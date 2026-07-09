@@ -25,13 +25,14 @@ public:
 
     void collect(void* record) override
     {
+        auto streamRecord = reinterpret_cast<StreamRecord*>(record);
+        long timestamp = streamRecord->getTimestamp();
+        auto value = streamRecord->getValue();
+
         LOG(" VectorBatchCopyingBroadcastingOutputCollector collect >>>>>>>>");
         for (size_t i = 0; i < outputs.size() - 1; i++) {
             auto output = outputs[i];
-            auto streamRecord = reinterpret_cast<StreamRecord*>(record);
             if (streamRecord->hasExternalRow()) {
-                long timestamp = streamRecord->getTimestamp();
-                auto value = streamRecord->getValue();
                 auto row = reinterpret_cast<Row*>(value);
                 auto copyRow =
                     new Row(row->getKind(), row->getFieldByPosition(), row->getFieldByName(), row->getPositionByName());
@@ -42,9 +43,20 @@ public:
                 delete row;
                 delete streamRecord;
             } else {
-                StreamRecord* copyRecord = StreamRecordHelper::deepCopyVectorBatch(streamRecord);
-                copyRecord->setTag(streamRecord->getTag());
-                output->collect(copyRecord);
+                if (streamRecord->getValueType() == RecordValueType::JOINED_ROW_DATA) {
+                    auto copyRow = BinaryRowDataSerializer::joinedRowToBinaryRow(reinterpret_cast<JoinedRowData*>(value));
+                    auto copyStreamRecord = new StreamRecord(copyRow, timestamp);
+                    output->collect(copyRow);
+                } else if (streamRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+                    //TODO: Do we need to delete the incoming binar
+                    auto copyRow = reinterpret_cast<BinaryRowData*>(value)->copy();
+                    auto copyStreamRecord = new StreamRecord(copyRow, timestamp);
+                    output->collect(copyRow);
+                } else { //vectorbatch
+                    StreamRecord *copyRecord = StreamRecordHelper::deepCopyVectorBatch(streamRecord);
+                    copyRecord->setTag(streamRecord->getTag());
+                    output->collect(copyRecord);
+                }
             }
         }
         if (!outputs.empty()) {

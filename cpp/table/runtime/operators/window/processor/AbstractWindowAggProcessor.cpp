@@ -22,7 +22,8 @@ AbstractWindowAggProcessor::AbstractWindowAggProcessor(const nlohmann::json desc
     sliceAssigner = AssignerAtt::createSliceAssigner(description);
     isEventTime = sliceAssigner->isEventTime();
     windowInterval = sliceAssigner->getSliceEndInterval();
-    collector = std::make_unique<TimestampedCollector>(this->output);
+    // GlobalWindowAgg
+    collector = std::make_unique<TimestampedCollector>(this->output, false, RecordValueType::BINARY_ROW_DATA);
 
     outputTypes = description["outputTypes"].get<std::vector<std::string>>();
     for (const auto& typeStr : outputTypes) {
@@ -185,10 +186,8 @@ void AbstractWindowAggProcessor::ProcessHopResult(RowData* result)
     resultRow->replace(stateBackend->getCurrentKey().get(), result);
     if (static_cast<size_t>(resultRow->getArity()) == outputTypes.size()) {
         if (!isWindowEmpty()) {
+            collector->collect(BinaryRowDataSerializer::joinedRowToBinaryRow(resultRow.get(), outputTypeIds));
             LOG("window not empty");
-            auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(1, outputTypeIds);
-            SetOutputBatch(outputBatch, resultRow.get());
-            collector->collect(outputBatch);
         } else {
             LOG("window is empty");
         }

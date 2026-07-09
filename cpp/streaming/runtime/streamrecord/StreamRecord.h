@@ -21,7 +21,9 @@ enum class RecordValueType : uint8_t
     UNKNOWN = 0,
     VECTOR_BATCH = 1,
     OBJECT = 2,
-    EXTERNAL_ROW = 3
+    BINARY_ROW_DATA = 3,
+    JOINED_ROW_DATA = 4,
+    EXTERNAL_ROW = 5
 };
 class StreamRecord : public StreamElement {
 public:
@@ -52,10 +54,17 @@ public:
     {
         return this->hasExternalRow_;
     }
-
+    RecordValueType getValueType() const
+    {
+        return valueType_;
+    }
+    void setValueType(RecordValueType valueType)
+    {
+        valueType_ = valueType;
+    }
 private:
     long timestamp_;
-    uint8_t valueType_;
+    RecordValueType valueType_ = RecordValueType::UNKNOWN;
     bool hasExternalRow_ = false;
 };
 

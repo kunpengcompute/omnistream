@@ -20,7 +20,7 @@
 
 class TimestampedCollector : public Output {
 public:
-    explicit TimestampedCollector(Output* output, bool isDataStream = false);
+    explicit TimestampedCollector(Output* output, bool isDataStream = false, RecordValueType = RecordValueType::VECTOR_BATCH);
 
     ~TimestampedCollector() override;
 
@@ -46,9 +46,9 @@ private:
     // These three information used to be hold by the reUsableElement
     StreamElementTag tag_ = StreamElementTag::TAG_REC_WITH_TIMESTAMP;
     long timestamp_;
-    bool hasTimestamp_ = true;
     bool isDataStream = false;
     // StreamRecord *reusableElement_;
+    RecordValueType valueType_;
 };
 
 #endif // FLINK_TNEL_TIMESTAMPEDCOLLECTOR_H
