@@ -16,7 +16,13 @@
 #include <cstdint>
 #include <functional>
 #include "StreamElement.h"
-
+enum class RecordValueType : uint8_t
+{
+    UNKNOWN = 0,
+    VECTOR_BATCH = 1,
+    OBJECT = 2,
+    EXTERNAL_ROW = 3
+};
 class StreamRecord : public StreamElement {
 public:
     StreamRecord();
@@ -49,7 +55,7 @@ public:
 
 private:
     long timestamp_;
-    bool hasTimestamp_;
+    uint8_t valueType_;
     bool hasExternalRow_ = false;
 };
 
