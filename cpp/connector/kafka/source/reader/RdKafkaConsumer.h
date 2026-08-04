@@ -235,9 +235,10 @@ public:
     void commitOffsets(const std::map<std::shared_ptr<RdKafka::TopicPartition>, int64_t>& offsets);
 
 private:
+    static constexpr int DEFAULT_MAX_POLL_RECORDS = 100;
     RdKafka::KafkaConsumer* consumer_;
     std::string topic_;
-    int batch_size_ = 100000; // 默认批量大小
+    int batch_size_ = DEFAULT_MAX_POLL_RECORDS;
     bool closed_ = false;
 };
 
