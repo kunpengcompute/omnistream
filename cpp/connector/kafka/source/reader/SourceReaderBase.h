@@ -23,8 +23,11 @@
 #include "connector/kafka/source/split/KafkaPartitionSplitState.h"
 #include "connector/kafka/bind_core_manager.h"
 #include "core/include/common.h"
+#include "functions/Configuration.h"
 #include <algorithm>
 #include <climits>
+#include <exception>
+#include <string>
 
 template <typename E, typename SplitT, typename SplitStateT>
 class SourceReaderBase : public SourceReader<SplitT> {
@@ -43,6 +46,7 @@ public:
           context(context),
           noMoreSplitsAssignment(false)
     {
+        batchSize = resolveBatchSize();
         if (isBatch) {
             reuseMessageVec.reserve(batchSize);
         }
@@ -244,7 +248,10 @@ private:
     // 指示 SourceReader 是否将被分配更多拆分
     bool noMoreSplitsAssignment;
 
-    size_t batchSize = 1000;
+    static constexpr size_t DEFAULT_BATCH_SIZE = 1000;
+    static constexpr const char* SOURCE_READER_BATCH_SIZE_CONFIG = "omni.source.reader.batch.size";
+
+    size_t batchSize = DEFAULT_BATCH_SIZE;
 
     int32_t bindCore1 = -1;
 
@@ -259,6 +266,35 @@ private:
     {
         return status;
     }
+
+    size_t resolveBatchSize()
+    {
+        if (Configuration::TM_CONFIG == nullptr || Configuration::TM_CONFIG->getMap() == nullptr) {
+            return DEFAULT_BATCH_SIZE;
+        }
+
+        auto* value = reinterpret_cast<String*>(
+            Configuration::TM_CONFIG->getMap()->get(SOURCE_READER_BATCH_SIZE_CONFIG));
+        if (value == nullptr || value->getSize() == 0) {
+            return DEFAULT_BATCH_SIZE;
+        }
+
+        try {
+            size_t parsed = std::stoull(std::string(value->getData(), value->getSize()));
+            if (parsed == 0) {
+                LOG("Invalid " << SOURCE_READER_BATCH_SIZE_CONFIG << "=0, use default " << DEFAULT_BATCH_SIZE);
+                return DEFAULT_BATCH_SIZE;
+            }
+            INFO_RELEASE("SourceReaderBase batchSize configured by " << SOURCE_READER_BATCH_SIZE_CONFIG << "=" << parsed);
+            return parsed;
+        } catch (const std::exception& e) {
+            LOG("Invalid " << SOURCE_READER_BATCH_SIZE_CONFIG << "="
+                << std::string(value->getData(), value->getSize()) << ", use default "
+                << DEFAULT_BATCH_SIZE << ", error: " << e.what());
+            return DEFAULT_BATCH_SIZE;
+        }
+    }
+
     // 获取下一个提取的记录批次
     RecordsWithSplitIds<E>* getNextFetch(ReaderOutput* output)
     {
