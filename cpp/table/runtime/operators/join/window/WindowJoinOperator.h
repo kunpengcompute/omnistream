@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <vector>
 #include <cstring>
+#include <cstring>
 #include <arm_sve.h>
 
 #include "table/runtime/operators/join/stream/AbstractStreamingJoinOperator.h"

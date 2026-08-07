@@ -33,6 +33,7 @@
 #include "heap/HeapValueState.h"
 #include "runtime/state/heap/HeapListState.h"
 #include "RegisteredKeyValueStateBackendMetaInfo.h"
+#include "core/typeutils/TypeSerializer.h"
 #include "runtime/metrics/groups/OperatorStateMetricGroup.h"
 #include "runtime/state/StateSizeUtil.h"
 #include "table/data/RowData.h"
