@@ -241,6 +241,23 @@ int OmniCreditBasedSequenceNumberingViewReader::getNextBuffer()
     return readElementNumber;
 }
 
+void OmniCreditBasedSequenceNumberingViewReader::DoSerializeBinaryRowData(
+    BinaryRowData* element, int rowSize, std::shared_ptr<NettyBufferInfo>& bufferInfo)
+{
+   LOG(">>>");
+    if (!bufferInfo) {
+        INFO_RELEASE("buffer info in DoSerializeBinaryRowData is null");
+        throw std::runtime_error("buffer info in DoSerializeBinaryRowData is null");
+    }
+    
+    // Serialize the row directly into the buffer
+    BinaryRowDataSerializationUtils::serializeBinaryRowData(element, rowSize, bufferInfo->GetAddress());
+    
+    // Update Netty buffer metadata
+    bufferInfo->SetWrittenBytes(rowSize);
+    bufferInfo->IncrementElementNum();
+}
+
 void OmniCreditBasedSequenceNumberingViewReader::DoSerializeVectorBatch(
     VectorBatch* element, int vectorSize, std::shared_ptr<NettyBufferInfo>& bufferInfo)
 {
@@ -278,6 +295,85 @@ bool OmniCreditBasedSequenceNumberingViewReader::SerializeVectorBatch(
             return true;
         } else {
             // send data in buffer to queue
+            AddNettyBufferInfoToQueue(bufferInfo);
+            currentInUseNettyMemorySegment->EnableEligibleRecycling();
+            if (currentInUseNettyMemorySegment->GetRefCount() == 0) {
+                // recycle it
+                RecycleNettyBuffer(reinterpret_cast<long>(currentInUseNettyMemorySegment->GetOriginalAddress()));
+            }
+            currentInUseNettyMemorySegment = nullptr;
+            return false;
+        }
+    }
+}
+
+bool OmniCreditBasedSequenceNumberingViewReader::SerializeBinaryRowData(
+    BinaryRowData* element, std::shared_ptr<NettyBufferInfo>& bufferInfo)
+{
+    LOG(">>>>>>>>>");
+    
+    int rowSize = BinaryRowDataSerializationUtils::calculateBinaryRowSerializableSize(element);
+    
+    if (!bufferInfo) {
+        INFO_RELEASE("buffer info in SerializeBinaryRowData is null");
+        throw std::runtime_error("buffer info in SerializeBinaryRowData is null");
+    }
+    
+    
+     if (rowSize > bufferSize - bufferInfo->elementNumBytes) {
+        AddNettyBufferInfoToQueue(bufferInfo);
+        
+        auto bigBufferInfo = RequestNettyBuffer(rowSize);
+        
+        DoSerializeBinaryRowData(element, rowSize, bigBufferInfo);
+        
+        AddNettyBufferInfoToQueue(bigBufferInfo);
+        return true;
+    } else {
+        if (bufferInfo->Useable(rowSize)) {
+            DoSerializeBinaryRowData(element, rowSize, bufferInfo);
+            return true;
+        } else {
+            AddNettyBufferInfoToQueue(bufferInfo);
+            currentInUseNettyMemorySegment->EnableEligibleRecycling();
+            if (currentInUseNettyMemorySegment->GetRefCount() == 0) {
+                // recycle it
+                RecycleNettyBuffer(reinterpret_cast<long>(currentInUseNettyMemorySegment->GetOriginalAddress()));
+            }
+            currentInUseNettyMemorySegment = nullptr;
+            return false;
+        }
+    }
+}
+
+bool OmniCreditBasedSequenceNumberingViewReader::SerializeBinaryRowData(
+    BinaryRowData* element, std::shared_ptr<NettyBufferInfo>& bufferInfo)
+{
+    LOG(">>>>>>>>>");
+    
+    int rowSize = BinaryRowDataSerializationUtils::calculateBinaryRowSerializableSize(element);
+    
+    if (!bufferInfo) {
+        INFO_RELEASE("buffer info in SerializeBinaryRowData is null");
+        throw std::runtime_error("buffer info in SerializeBinaryRowData is null");
+    }
+    
+    
+    if (rowSize > bufferSize - bufferInfo->elementNumBytes) {
+        AddNettyBufferInfoToQueue(bufferInfo);
+        
+        auto bigBufferNettyMemeorySegment = RequestNettyBuffer(rowSize);
+        bigBufferNettyMemeorySegment->EnableEligibleRecycling();
+        auto bigBufferInfo = std::make_shared<NettyBufferInfo>(bigBufferNettyMemeorySegment);
+        DoSerializeBinaryRowData(element, rowSize, bigBufferInfo);
+        
+        AddNettyBufferInfoToQueue(bigBufferInfo);
+        return true;
+    } else {
+        if (bufferInfo->Useable(rowSize)) {
+            DoSerializeBinaryRowData(element, rowSize, bufferInfo);
+            return true;
+        } else {
             AddNettyBufferInfoToQueue(bufferInfo);
             currentInUseNettyMemorySegment->EnableEligibleRecycling();
             if (currentInUseNettyMemorySegment->GetRefCount() == 0) {
@@ -405,13 +501,26 @@ void OmniCreditBasedSequenceNumberingViewReader::SerializeVectorBatchBuffer(Vect
             StreamRecord* streamRecord = static_cast<StreamRecord*>(streamElement);
             // Handle StreamRecord
             // process streamRecord
-            VectorBatch* element = static_cast<VectorBatch*>(streamRecord->getValue());
-            while (!SerializeVectorBatch(element, bufferInfo)) {
-                bufferInfo = CreateNettyBufferInfo();
-            }
-            if (objectBufferRecycler == nullptr) {
-                delete element;
-                delete streamRecord;
+            if (streamRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+                auto* rowData = static_cast<BinaryRowData*>(streamRecord->getValue());
+
+                while (!SerializeBinaryRowData(rowData, bufferInfo)) {
+                    bufferInfo = CreateNettyBufferInfo();
+                }
+                if (objectBufferRecycler == nullptr) {
+                    delete rowData;
+                    delete streamRecord;
+                }
+            } else {
+                VectorBatch* element = static_cast<VectorBatch*>(streamRecord->getValue());
+                while (!SerializeVectorBatch(element, bufferInfo)) {
+                    bufferInfo = CreateNettyBufferInfo();
+                }
+
+                if (objectBufferRecycler == nullptr) {
+                    delete element;
+                    delete streamRecord;
+                }
             }
         } else if (auto* status = dynamic_cast<WatermarkStatus*>(streamElement)) {
             while (!DoSerializeWaterMark(status->GetStatus(), bufferInfo, true)) {

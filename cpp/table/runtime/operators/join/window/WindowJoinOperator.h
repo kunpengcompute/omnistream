@@ -280,6 +280,8 @@ private:
         int windowEndIndex,
         WindowListState<KeyType, int64_t, RowData*>* recordState,
         bool isLeftSide);
+    void processElement(RowData* inputRow, int64_t windowEndTime, KeySelector<KeyType>* keySelector, WindowListState<KeyType, int64_t, RowData*>* recordState);
+
     ::FilterFunc generateJoinCondition();
     void getAllColRefs(nlohmann::json& config);
     void BuildInnerLeft(
@@ -418,7 +420,15 @@ void WindowJoinOperator<KeyType>::close()
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::processBatch1(StreamRecord* input)
 {
+    LOG("processBatch1");
     auto record = std::unique_ptr<StreamRecord>(input);
+    if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+        auto rowData = static_cast<BinaryRowData*>(record->getValue());
+        int64_t windowEndTime = *rowData->getLong(leftWindowEndIndex);
+        processElement(rowData, windowEndTime, this->keySelectorLeft.get(), leftWindowState);
+        return;
+    } 
+    
     auto batch = reinterpret_cast<omnistream::VectorBatch*>(record->getValue());
     processBatch(batch, leftWindowEndIndex, leftWindowState, true);
 }
@@ -426,7 +436,15 @@ void WindowJoinOperator<KeyType>::processBatch1(StreamRecord* input)
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::processBatch2(StreamRecord* input)
 {
+    LOG("processBatch2");
     auto record = std::unique_ptr<StreamRecord>(input);
+    if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+        auto rowData = static_cast<BinaryRowData*>(record->getValue());
+        int64_t windowEndTime = *rowData->getLong(rightWindowEndIndex);
+        LOG("jojo: windowEndTime:"<< windowEndTime);
+        processElement(rowData, windowEndTime, this->keySelectorRight.get(), rightWindowState);
+        return;
+    }
     auto batch = reinterpret_cast<omnistream::VectorBatch*>(record->getValue());
     processBatch(batch, rightWindowEndIndex, rightWindowState, false);
 }
@@ -446,6 +464,7 @@ inline void WindowJoinOperator<KeyType>::initializeState(
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::onEventTime(TimerHeapInternalTimer<KeyType, int64_t>* timer)
 {
+    LOG("OnEventTime");
     int64_t window = timer->getNamespace();
     this->setCurrentKey(timer->getKey());
 
@@ -705,6 +724,24 @@ inline void WindowJoinOperator<KeyType>::buildSemiAnti(
 }
 
 template <typename KeyType>
+    void WindowJoinOperator<KeyType>::processElement(RowData* inputRow, int64_t windowEndTime, KeySelector<KeyType>* keySelector, WindowListState<KeyType, int64_t, RowData*>* recordState)
+{
+    LOG("process element");
+    if (TimeWindowUtil::isWindowFired(windowEndTime, internalTimerService->currentWatermark(), shiftTimeZone)) {
+        return;
+    }
+    // reuseWindowEndTimes_[i] = windowEndTime;
+    auto key = keySelector->getKey(inputRow);
+
+    this->setCurrentKey(key);
+
+    recordState->add(windowEndTime, inputRow);
+
+    internalTimerService->registerEventTimeTimer(
+        windowEndTime, TimeWindowUtil::toEpochMillsForTimer(windowEndTime - 1, shiftTimeZone));
+}
+
+template <typename KeyType>
 void WindowJoinOperator<KeyType>::processBatch(
     omnistream::VectorBatch* batch,
     int windowEndIndex,
@@ -718,23 +755,13 @@ void WindowJoinOperator<KeyType>::processBatch(
     auto rowCount = batchGuard->GetRowCount();
 
     for (int i = 0; i < rowCount; i++) {
-        // processElement();
+        auto inputRow = std::unique_ptr<RowData>(batchGuard->extractRowData(i));
         int64_t windowEndTime =
             reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batchGuard->Get(windowEndIndex))->GetValue(i);
-        if (TimeWindowUtil::isWindowFired(windowEndTime, internalTimerService->currentWatermark(), shiftTimeZone)) {
-            continue;
-        }
-        // reuseWindowEndTimes_[i] = windowEndTime;
-        auto key = keySelector->getKey(batchGuard.get(), i);
-
-        this->setCurrentKey(key);
-        auto inputRow = std::unique_ptr<RowData>(batchGuard->extractRowData(i));
-        recordState->add(windowEndTime, inputRow.get());
+        processElement(inputRow.get(), windowEndTime, keySelector, recordState);
         if (stateType_ == omnistream::StateType::HEAP) {
             inputRow.release();
         }
-        internalTimerService->registerEventTimeTimer(
-            windowEndTime, TimeWindowUtil::toEpochMillsForTimer(windowEndTime - 1, shiftTimeZone));
     }
 }
 

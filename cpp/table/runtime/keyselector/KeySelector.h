@@ -195,6 +195,24 @@ K KeySelector<K>::getKey(RowData* input)
             }
         }
         return key;
+    } else if constexpr (isSharedRowKey_) {
+        auto key = std::shared_ptr<BinaryRowData>(BinaryRowData::createBinaryRowDataWithMem(keyColTypeIds.size()));
+        for (size_t i = 0; i < keyColIndices.size(); ++i) {
+            switch (keyColTypeIds[i]) {
+                case OMNI_LONG:
+                case OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+                case OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+                case OMNI_TIMESTAMP: key->setLong(i, *input->getLong(keyColIndices[i])); break;
+                case OMNI_VARCHAR: {
+                    std::string_view sv = input->getStringView(keyColIndices[i]);
+                    key->setStringView(i, sv);
+                    break;
+                }
+                case OMNI_INT: key->setInt(i, *input->getInt(keyColIndices[i])); break;
+                default: THROW_LOGIC_EXCEPTION("Key type not supported, typeId: " << keyColTypeIds[i]);
+            }
+        }
+        return key;
     } else {
         if (keyColIndices.size() != 1) {
             THROW_LOGIC_EXCEPTION("KeySelector getKey: keyColIndices size is not 1");

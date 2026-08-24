@@ -14,6 +14,7 @@
 #include <atomic>
 #include "LocalInputChannel.h"
 #include "table/utils/VectorBatchDeserializationUtils.h"
+#include "table/utils/BinaryRowDataSerializationUtils.h"
 #include <optional>
 #include <memory>
 #include <queue>

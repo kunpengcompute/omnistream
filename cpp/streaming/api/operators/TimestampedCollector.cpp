@@ -42,6 +42,7 @@ void TimestampedCollector::collect(void* value)
     } else {
         auto* record = new StreamRecord(value);
         record->setTimestamp(timestamp_);
+        record->setValueType(valueType_);
         output_->collect(record);
     }
 }

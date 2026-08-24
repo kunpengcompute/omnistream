@@ -180,6 +180,7 @@ void SlicingWindowOperator<K, W>::close()
 template <typename K, typename W>
 void SlicingWindowOperator<K, W>::processBatch(StreamRecord* input)
 {
+    LOG("SlicingWindowOperator processBatch "<< this);
     auto record = std::unique_ptr<StreamRecord>(input);
     auto batch =
         std::unique_ptr<omnistream::VectorBatch>(reinterpret_cast<omnistream::VectorBatch*>(record->getValue()));
@@ -195,6 +196,7 @@ void SlicingWindowOperator<K, W>::processBatch(omnistream::VectorBatch* batch)
 template <typename K, typename W>
 void SlicingWindowOperator<K, W>::ProcessWatermark(Watermark* mark)
 {
+    LOG("SlicingWindowOperator"<< this <<" ProcessWatermark "<<mark->getTimestamp());
     if (mark->getTimestamp() > this->currentWatermark) {
         windowProcessor_->advanceProgress(mark->getTimestamp());
         TableStreamOperator<K>::ProcessWatermark(mark);

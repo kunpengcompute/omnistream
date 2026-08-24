@@ -241,12 +241,24 @@ std::shared_ptr<ObjectSegment> RemoteInputChannel::DoDataDeserializationResult(u
                 break;
             }
             case StreamElementTag::VECTOR_BATCH: {
+                LOG("RemoteInputChannel::DoDataDeserializationResult:: deserialize VECTOR_BATCH ");
                 VectorBatch* vb = VectorBatchDeserializationUtils::deserializeVectorBatch(buffer);
                 StreamRecord* streamRecord = new StreamRecord(vb);
                 objectSegment->putObject(i, streamRecord);
                 break;
             }
-            default: break;
+            case StreamElementTag::BINARY_ROW_DATA: {
+                LOG("RemoteInputChannel::DoDataDeserializationResult:: deserialize BinaryRowData " );
+                BinaryRowData* row = BinaryRowDataSerializationUtils::deserializeBinaryRowData(buffer); 
+                StreamRecord* streamRecord = new StreamRecord(row);
+                streamRecord->setValueType(RecordValueType::BINARY_ROW_DATA);
+                objectSegment->putObject(i, streamRecord);
+                break;
+            }
+            default: {
+                LOG("Warning: cannt deserialize the records" );
+                break;
+            }
         }
     }
     return objectSegment;

@@ -103,7 +103,7 @@ private:
 
     std::vector<nlohmann::json> replacedDescriptions_;
     std::vector<nlohmann::json> newRefDescriptions_;
-    std::vector<int32_t> outputTypeIds_;
+    std::vector<DataTypeId> outputTypeIds_;
     omniruntime::type::DataTypes inputTypes_;
     omnistream::VectorBatch* outputBatch;
     // Used for simple col switch

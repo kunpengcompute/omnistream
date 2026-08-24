@@ -44,17 +44,24 @@ public:
                 delete streamRecord;
             } else {
                 if (streamRecord->getValueType() == RecordValueType::JOINED_ROW_DATA) {
+                    LOG("collect JOINED_ROW_DATA");//TODO: JoinROWDATA havent been fully supported.
                     auto copyRow = BinaryRowDataSerializer::joinedRowToBinaryRow(reinterpret_cast<JoinedRowData*>(value));
                     auto copyStreamRecord = new StreamRecord(copyRow, timestamp);
-                    output->collect(copyRow);
+                    copyStreamRecord->setTag(streamRecord->getTag());
+                    copyStreamRecord->setValueType(streamRecord->getValueType());
+                    output->collect(copyStreamRecord);
                 } else if (streamRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {
-                    //TODO: Do we need to delete the incoming binar
+                    LOG("collect binary row data");
                     auto copyRow = reinterpret_cast<BinaryRowData*>(value)->copy();
                     auto copyStreamRecord = new StreamRecord(copyRow, timestamp);
-                    output->collect(copyRow);
+                    copyStreamRecord->setTag(streamRecord->getTag());
+                    copyStreamRecord->setValueType(streamRecord->getValueType());
+                    output->collect(copyStreamRecord);
                 } else { //vectorbatch
+                    LOG("collect vector batch");
                     StreamRecord *copyRecord = StreamRecordHelper::deepCopyVectorBatch(streamRecord);
                     copyRecord->setTag(streamRecord->getTag());
+                    copyRecord->setValueType(streamRecord->getValueType());
                     output->collect(copyRecord);
                 }
             }

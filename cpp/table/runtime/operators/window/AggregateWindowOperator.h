@@ -105,5 +105,5 @@ private:
     std::unique_ptr<NamespaceAggsHandleFunction<W>> aggWindowAggregator;
     std::unique_ptr<JoinedRowData> reuseOutput_{};
     std::vector<RowData*> reuseResultRows_;
-    std::vector<int32_t> outputTypeIds;
+    std::vector<omniruntime::type::DataTypeId> outputTypeIds;
 };
