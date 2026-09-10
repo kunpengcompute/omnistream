@@ -26,7 +26,7 @@ enum class StreamElementTag {
     TAG_STREAM_STATUS = 4,
     TAG_RECORD_ATTRIBUTES = 5,
     TAG_INTERNAL_WATERMARK = 6,
-    BINARY_ROW_DATA =7,
+    BINARY_ROW_DATA = 7,
     VECTOR_BATCH = 127
 };
 

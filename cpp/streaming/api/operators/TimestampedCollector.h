@@ -20,7 +20,8 @@
 
 class TimestampedCollector : public Output {
 public:
-    explicit TimestampedCollector(Output* output, bool isDataStream = false, RecordValueType = RecordValueType::VECTOR_BATCH);
+    explicit TimestampedCollector(
+        Output* output, bool isDataStream = false, RecordValueType = RecordValueType::VECTOR_BATCH);
 
     ~TimestampedCollector() override;
 

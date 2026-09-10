@@ -69,8 +69,8 @@ public:
             delete row;
             delete streamRecord;
             return result;
-        }else if (streamRecord->getValueType() == RecordValueType::JOINED_ROW_DATA) {
-            //do we need to handle joined Rowdata?
+        } else if (streamRecord->getValueType() == RecordValueType::JOINED_ROW_DATA) {
+            // do we need to handle joined Rowdata?
             auto row = static_cast<JoinedRowData*>(streamRecord->getValue());
             auto channel = selectRowChannel(row);
             result[channel] = streamRecord;
@@ -78,8 +78,8 @@ public:
         } else if (streamRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {
             auto row = static_cast<BinaryRowData*>(streamRecord->getValue());
             auto channel = selectRowChannel(row);
-            result[channel] = streamRecord;//TODO: copy the row using buildNewStreamRecordBasedOnOffsets().
-            
+            result[channel] = streamRecord; // TODO: copy the row using buildNewStreamRecordBasedOnOffsets().
+
             return result;
         }
         auto vectorBatch = static_cast<VectorBatch*>(streamRecord->getValue());

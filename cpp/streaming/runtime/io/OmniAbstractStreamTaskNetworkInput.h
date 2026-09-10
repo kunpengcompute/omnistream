@@ -236,7 +236,7 @@ public:
                             THROW_LOGIC_EXCEPTION("recevied RowData is null");
                         }
                         numberOfRow++;
-                    }else {
+                    } else {
                         LOG("Warning: cannt not casting the record");
                         numberOfRow++;
                     }

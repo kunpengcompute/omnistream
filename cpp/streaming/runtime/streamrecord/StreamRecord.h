@@ -16,8 +16,7 @@
 #include <cstdint>
 #include <functional>
 #include "StreamElement.h"
-enum class RecordValueType : uint8_t
-{
+enum class RecordValueType : uint8_t {
     UNKNOWN = 0,
     VECTOR_BATCH = 1,
     OBJECT = 2,
@@ -62,6 +61,7 @@ public:
     {
         valueType_ = valueType;
     }
+
 private:
     long timestamp_;
     RecordValueType valueType_ = RecordValueType::UNKNOWN;

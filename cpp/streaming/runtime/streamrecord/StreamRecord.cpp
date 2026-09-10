@@ -13,15 +13,11 @@
 #include <limits>
 #include "StreamRecord.h"
 
-StreamRecord::StreamRecord()
-    : StreamElement(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP),
-      timestamp_(0)
+StreamRecord::StreamRecord() : StreamElement(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP), timestamp_(0)
 {
 }
 
-StreamRecord::StreamRecord(void* value)
-    : StreamElement(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP),
-      timestamp_(0)
+StreamRecord::StreamRecord(void* value) : StreamElement(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP), timestamp_(0)
 {
     setValue(value);
 }

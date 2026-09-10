@@ -70,42 +70,43 @@ void StreamCalcBatch::processBatch(StreamRecord* input)
                     outputTypeIds_.push_back(LogicalType::flinkTypeToOmniTypeId(type));
                 }
             }
-           
-                auto row = static_cast<BinaryRowData*>(input->getValue());
-                auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(1, outputTypeIds_);
-                for (size_t i = 0; i < outputIndexes_.size(); i++) {
-                    switch (outputTypeIds_[i]) {
-                        case DataTypeId::OMNI_LONG:
-                        case DataTypeId::OMNI_TIMESTAMP:
-                        case DataTypeId::OMNI_DOUBLE:{
-                            auto vector = static_cast<omniruntime::vec::Vector<int64_t>*>(outputBatch->Get(i));
-                            vector->SetValue(0, *row->getLong(outputIndexes_[i]));
-                            break;
-                        }
-                        case DataTypeId::OMNI_INT:
-                        case DataTypeId::OMNI_BOOLEAN: {
-                            auto vector = static_cast<omniruntime::vec::Vector<int64_t>*>(outputBatch->Get(i));
-                            vector->SetValue(0, *row->getInt(outputIndexes_[i]));
-                            break;
-                        }
-                        case DataTypeId::OMNI_VARCHAR: {
-                            auto vector = static_cast<omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(
-        outputBatch->Get(i));
-                            std::string_view strView = row->getStringView(outputIndexes_[i]);
-                            vector->SetValue(0, strView);
-                            break;
-                        }
-                        default: {
-                            throw std::runtime_error("Unsupported column type in inputRow");
-                        }
+
+            auto row = static_cast<BinaryRowData*>(input->getValue());
+            auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(1, outputTypeIds_);
+            for (size_t i = 0; i < outputIndexes_.size(); i++) {
+                switch (outputTypeIds_[i]) {
+                    case DataTypeId::OMNI_LONG:
+                    case DataTypeId::OMNI_TIMESTAMP:
+                    case DataTypeId::OMNI_DOUBLE: {
+                        auto vector = static_cast<omniruntime::vec::Vector<int64_t>*>(outputBatch->Get(i));
+                        vector->SetValue(0, *row->getLong(outputIndexes_[i]));
+                        break;
                     }
+                    case DataTypeId::OMNI_INT:
+                    case DataTypeId::OMNI_BOOLEAN: {
+                        auto vector = static_cast<omniruntime::vec::Vector<int64_t>*>(outputBatch->Get(i));
+                        vector->SetValue(0, *row->getInt(outputIndexes_[i]));
+                        break;
                     }
+                    case DataTypeId::OMNI_VARCHAR: {
+                        auto vector = static_cast<
+                            omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(
+                            outputBatch->Get(i));
+                        std::string_view strView = row->getStringView(outputIndexes_[i]);
+                        vector->SetValue(0, strView);
+                        break;
+                    }
+                    default: {
+                        throw std::runtime_error("Unsupported column type in inputRow");
+                    }
+                }
+            }
             outputBatch->setRowKind(0, row->getRowKind());
             delete input;
-            delete static_cast<BinaryRowData*> (row);
+            delete static_cast<BinaryRowData*>(row);
             timestampedCollector_->collect(outputBatch);
             return;
-        }else {
+        } else {
             NOT_IMPL_EXCEPTION;
         }
         return;

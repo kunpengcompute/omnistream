@@ -106,10 +106,10 @@ std::vector<uint8_t> Base64_decode(const std::string& encoded_string);
     } while (false)
 
 #else
-#define LOG_DEBUG(msg) 
-#define LOG(msg) 
-#define LOG_TRACE(msg) 
-#define LOG_PART(msg) 
+#define LOG_DEBUG(msg)
+#define LOG(msg)
+#define LOG_TRACE(msg)
+#define LOG_PART(msg)
 #define LOG_INFO_IMP(msg)
 
 #define LOG_PRINTF(fmt, ...)

@@ -48,9 +48,8 @@ void SimpleSelectorRecordWriterV2::emit(StreamRecord* record)
             size_t row_cnt = vectorBatch->GetRowCount();
             counter_ += row_cnt;
         } else {
-          counter_++;
+            counter_++;
         }
-        
 
         if (channelSelector != nullptr) {
             auto selectedChannel = channelSelector->selectChannel(record);

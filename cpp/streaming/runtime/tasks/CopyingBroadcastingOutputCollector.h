@@ -44,8 +44,9 @@ public:
                 delete streamRecord;
             } else {
                 if (streamRecord->getValueType() == RecordValueType::JOINED_ROW_DATA) {
-                    LOG("collect JOINED_ROW_DATA");//TODO: JoinROWDATA havent been fully supported.
-                    auto copyRow = BinaryRowDataSerializer::joinedRowToBinaryRow(reinterpret_cast<JoinedRowData*>(value));
+                    LOG("collect JOINED_ROW_DATA"); // TODO: JoinROWDATA havent been fully supported.
+                    auto copyRow =
+                        BinaryRowDataSerializer::joinedRowToBinaryRow(reinterpret_cast<JoinedRowData*>(value));
                     auto copyStreamRecord = new StreamRecord(copyRow, timestamp);
                     copyStreamRecord->setTag(streamRecord->getTag());
                     copyStreamRecord->setValueType(streamRecord->getValueType());
@@ -57,9 +58,9 @@ public:
                     copyStreamRecord->setTag(streamRecord->getTag());
                     copyStreamRecord->setValueType(streamRecord->getValueType());
                     output->collect(copyStreamRecord);
-                } else { //vectorbatch
+                } else { // vectorbatch
                     LOG("collect vector batch");
-                    StreamRecord *copyRecord = StreamRecordHelper::deepCopyVectorBatch(streamRecord);
+                    StreamRecord* copyRecord = StreamRecordHelper::deepCopyVectorBatch(streamRecord);
                     copyRecord->setTag(streamRecord->getTag());
                     copyRecord->setValueType(streamRecord->getValueType());
                     output->collect(copyRecord);

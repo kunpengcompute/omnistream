@@ -22,14 +22,14 @@ AbstractWindowAggProcessor::AbstractWindowAggProcessor(const nlohmann::json desc
     sliceAssigner = AssignerAtt::createSliceAssigner(description);
     isEventTime = sliceAssigner->isEventTime();
     windowInterval = sliceAssigner->getSliceEndInterval();
-    //temp refactor for Q5 test
-    //Q5 first agg: hop windowAgg, generate vectorBatch
-    //Q5 second agg: generate rowdata
+    // temp refactor for Q5 test
+    // Q5 first agg: hop windowAgg, generate vectorBatch
+    // Q5 second agg: generate rowdata
     WindowedSliceAssigner* windowedSliceAssigner = dynamic_cast<WindowedSliceAssigner*>(sliceAssigner);
     SliceAssigner* assigner = windowedSliceAssigner->GetInnerAssigner();
-    
+
     collector = std::make_unique<TimestampedCollector>(this->output, false, RecordValueType::BINARY_ROW_DATA);
-    
+
     outputTypes = description["outputTypes"].get<std::vector<std::string>>();
     for (const auto& typeStr : outputTypes) {
         outputTypeIds.push_back(LogicalType::flinkTypeToOmniTypeId(typeStr));
@@ -151,7 +151,7 @@ void AbstractWindowAggProcessor::prepareCheckpoint()
 
 void AbstractWindowAggProcessor::fireWindow(int64_t windowEnd)
 {
-    LOG("AbstractWindowAggProcessor "<< this<< " fireWindow:"<< windowEnd);
+    LOG("AbstractWindowAggProcessor " << this << " fireWindow:" << windowEnd);
     if (!sliceAssigner->hasSliceEndIndex && !sliceAssigner->hasWindowEndIndex) {
         LOG("get value in the firewindow");
         std::unique_ptr<RowData> result(GetNonHopResult(windowEnd));

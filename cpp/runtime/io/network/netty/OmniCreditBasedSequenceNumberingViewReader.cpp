@@ -244,15 +244,15 @@ int OmniCreditBasedSequenceNumberingViewReader::getNextBuffer()
 void OmniCreditBasedSequenceNumberingViewReader::DoSerializeBinaryRowData(
     BinaryRowData* element, int rowSize, std::shared_ptr<NettyBufferInfo>& bufferInfo)
 {
-   LOG(">>>");
+    LOG(">>>");
     if (!bufferInfo) {
         INFO_RELEASE("buffer info in DoSerializeBinaryRowData is null");
         throw std::runtime_error("buffer info in DoSerializeBinaryRowData is null");
     }
-    
+
     // Serialize the row directly into the buffer
     BinaryRowDataSerializationUtils::serializeBinaryRowData(element, rowSize, bufferInfo->GetAddress());
-    
+
     // Update Netty buffer metadata
     bufferInfo->SetWrittenBytes(rowSize);
     bufferInfo->IncrementElementNum();
@@ -320,45 +320,6 @@ bool OmniCreditBasedSequenceNumberingViewReader::SerializeBinaryRowData(
     }
     
     
-     if (rowSize > bufferSize - bufferInfo->elementNumBytes) {
-        AddNettyBufferInfoToQueue(bufferInfo);
-        
-        auto bigBufferInfo = RequestNettyBuffer(rowSize);
-        
-        DoSerializeBinaryRowData(element, rowSize, bigBufferInfo);
-        
-        AddNettyBufferInfoToQueue(bigBufferInfo);
-        return true;
-    } else {
-        if (bufferInfo->Useable(rowSize)) {
-            DoSerializeBinaryRowData(element, rowSize, bufferInfo);
-            return true;
-        } else {
-            AddNettyBufferInfoToQueue(bufferInfo);
-            currentInUseNettyMemorySegment->EnableEligibleRecycling();
-            if (currentInUseNettyMemorySegment->GetRefCount() == 0) {
-                // recycle it
-                RecycleNettyBuffer(reinterpret_cast<long>(currentInUseNettyMemorySegment->GetOriginalAddress()));
-            }
-            currentInUseNettyMemorySegment = nullptr;
-            return false;
-        }
-    }
-}
-
-bool OmniCreditBasedSequenceNumberingViewReader::SerializeBinaryRowData(
-    BinaryRowData* element, std::shared_ptr<NettyBufferInfo>& bufferInfo)
-{
-    LOG(">>>>>>>>>");
-    
-    int rowSize = BinaryRowDataSerializationUtils::calculateBinaryRowSerializableSize(element);
-    
-    if (!bufferInfo) {
-        INFO_RELEASE("buffer info in SerializeBinaryRowData is null");
-        throw std::runtime_error("buffer info in SerializeBinaryRowData is null");
-    }
-    
-    
     if (rowSize > bufferSize - bufferInfo->elementNumBytes) {
         AddNettyBufferInfoToQueue(bufferInfo);
         
@@ -366,7 +327,6 @@ bool OmniCreditBasedSequenceNumberingViewReader::SerializeBinaryRowData(
         bigBufferNettyMemeorySegment->EnableEligibleRecycling();
         auto bigBufferInfo = std::make_shared<NettyBufferInfo>(bigBufferNettyMemeorySegment);
         DoSerializeBinaryRowData(element, rowSize, bigBufferInfo);
-        
         AddNettyBufferInfoToQueue(bigBufferInfo);
         return true;
     } else {

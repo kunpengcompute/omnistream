@@ -33,7 +33,8 @@ public:
 
     [[nodiscard]] const char* getName() const override;
 
-    static BinaryRowData* joinedRowToBinaryRow(JoinedRowData* row, const std::vector<omniruntime::type::DataTypeId>& typeId = {});
+    static BinaryRowData* joinedRowToBinaryRow(
+        JoinedRowData* row, const std::vector<omniruntime::type::DataTypeId>& typeId = {});
 
     static BinaryRowData* joinedRowFromBothBinaryRow(JoinedRowData* row);
 

@@ -111,7 +111,8 @@ const char* BinaryRowDataSerializer::getName() const
 }
 
 // The caller takes ownership of the returned pointer
-BinaryRowData* BinaryRowDataSerializer::joinedRowToBinaryRow(JoinedRowData* row, const std::vector<omniruntime::type::DataTypeId>& typeId)
+BinaryRowData* BinaryRowDataSerializer::joinedRowToBinaryRow(
+    JoinedRowData* row, const std::vector<omniruntime::type::DataTypeId>& typeId)
 {
     if (typeId.empty()) {
         INFO_RELEASE("WARNING: joinedRowToBinaryRow are only meant for testing. It only treat long type!!");

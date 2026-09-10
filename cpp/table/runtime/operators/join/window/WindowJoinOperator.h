@@ -280,7 +280,11 @@ private:
         int windowEndIndex,
         WindowListState<KeyType, int64_t, RowData*>* recordState,
         bool isLeftSide);
-    void processElement(RowData* inputRow, int64_t windowEndTime, KeySelector<KeyType>* keySelector, WindowListState<KeyType, int64_t, RowData*>* recordState);
+    void processElement(
+        RowData* inputRow,
+        int64_t windowEndTime,
+        KeySelector<KeyType>* keySelector,
+        WindowListState<KeyType, int64_t, RowData*>* recordState);
 
     ::FilterFunc generateJoinCondition();
     void getAllColRefs(nlohmann::json& config);
@@ -427,8 +431,8 @@ void WindowJoinOperator<KeyType>::processBatch1(StreamRecord* input)
         int64_t windowEndTime = *rowData->getLong(leftWindowEndIndex);
         processElement(rowData, windowEndTime, this->keySelectorLeft.get(), leftWindowState);
         return;
-    } 
-    
+    }
+
     auto batch = reinterpret_cast<omnistream::VectorBatch*>(record->getValue());
     processBatch(batch, leftWindowEndIndex, leftWindowState, true);
 }
@@ -441,7 +445,7 @@ void WindowJoinOperator<KeyType>::processBatch2(StreamRecord* input)
     if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
         auto rowData = static_cast<BinaryRowData*>(record->getValue());
         int64_t windowEndTime = *rowData->getLong(rightWindowEndIndex);
-        LOG("jojo: windowEndTime:"<< windowEndTime);
+        LOG("jojo: windowEndTime:" << windowEndTime);
         processElement(rowData, windowEndTime, this->keySelectorRight.get(), rightWindowState);
         return;
     }
@@ -724,7 +728,11 @@ inline void WindowJoinOperator<KeyType>::buildSemiAnti(
 }
 
 template <typename KeyType>
-    void WindowJoinOperator<KeyType>::processElement(RowData* inputRow, int64_t windowEndTime, KeySelector<KeyType>* keySelector, WindowListState<KeyType, int64_t, RowData*>* recordState)
+void WindowJoinOperator<KeyType>::processElement(
+    RowData* inputRow,
+    int64_t windowEndTime,
+    KeySelector<KeyType>* keySelector,
+    WindowListState<KeyType, int64_t, RowData*>* recordState)
 {
     LOG("process element");
     if (TimeWindowUtil::isWindowFired(windowEndTime, internalTimerService->currentWatermark(), shiftTimeZone)) {
