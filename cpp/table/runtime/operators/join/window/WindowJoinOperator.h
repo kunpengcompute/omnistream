@@ -247,6 +247,8 @@ private:
     std::vector<KeyType> reuseKeys_{};
     std::vector<ComboId> reuseComboIds_{};
     std::vector<int64_t> reuseWindowEndTimes_{};
+    std::string inputRecordType1 = "VECTOR_BATCH";
+    std::string inputRecordType2 = "VECTOR_BATCH";
 
     template <typename TYPE>
     void insertLeft(
@@ -335,6 +337,13 @@ WindowJoinOperator<KeyType>::WindowJoinOperator(
     if (rightSerializer == nullptr) {
         INFO_RELEASE("rightSerializer is null");
         this->rightSerializer = new RowDataSerializer(new omnistream::RowType(true, rightTypeStr));
+    }
+    if (description.contains("InputRecordType1")) {
+        inputRecordType1 = description["InputRecordType1"].get<std::string>();
+    }
+
+    if (description.contains("InputRecordType2")) {
+        inputRecordType2 = description["InputRecordType2"].get<std::string>();
     }
 }
 
@@ -432,7 +441,9 @@ void WindowJoinOperator<KeyType>::processBatch1(StreamRecord* input)
         processElement(rowData, windowEndTime, this->keySelectorLeft.get(), leftWindowState);
         return;
     }
-
+    if (inputRecordType1 != "VECTOR_BATCH") {
+        LOG("Warning: The record type in the description does not match the input record type(1)!!");
+    }
     auto batch = reinterpret_cast<omnistream::VectorBatch*>(record->getValue());
     processBatch(batch, leftWindowEndIndex, leftWindowState, true);
 }
@@ -448,6 +459,9 @@ void WindowJoinOperator<KeyType>::processBatch2(StreamRecord* input)
         LOG("jojo: windowEndTime:" << windowEndTime);
         processElement(rowData, windowEndTime, this->keySelectorRight.get(), rightWindowState);
         return;
+    }
+    if (inputRecordType2 != "VECTOR_BATCH") {
+        LOG("Warning: The record type in the description does not match the input record type(2)!!");
     }
     auto batch = reinterpret_cast<omnistream::VectorBatch*>(record->getValue());
     processBatch(batch, rightWindowEndIndex, rightWindowState, false);

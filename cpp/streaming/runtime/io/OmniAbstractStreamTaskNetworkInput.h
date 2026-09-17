@@ -225,7 +225,7 @@ public:
                     if (filteredRecord == nullptr) {
                         continue;
                     }
-                    if (filteredRecord->getValueType() == RecordValueType::VECTOR_BATCH || filteredRecord->getValueType() == RecordValueType::UNKNOWN) {//todo: fix unknown vectorBatch
+                    if (filteredRecord->getValueType() == RecordValueType::VECTOR_BATCH ) {
                         
                     auto vectorBatch = static_cast<VectorBatch*>(filteredRecord->getValue());
                         size_t row_cnt = vectorBatch->GetRowCount();

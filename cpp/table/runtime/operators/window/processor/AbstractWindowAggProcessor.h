@@ -88,6 +88,7 @@ protected:
 private:
     std::unordered_set<int64_t> uniqueData;
     omnistream::StateType backendType_ = omnistream::StateType::HEAP;
+    bool outputRowData = false;
 
     std::unique_ptr<NamespaceAggsHandleFunction<int64_t>> initNamespaceAggsHandleFunction(
         bool isWindowAgg, const nlohmann::json& aggInfoList);

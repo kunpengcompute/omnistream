@@ -64,7 +64,7 @@ public:
 
 private:
     long timestamp_;
-    RecordValueType valueType_ = RecordValueType::UNKNOWN;
+    RecordValueType valueType_ = RecordValueType::VECTOR_BATCH;
     bool hasExternalRow_ = false;
 };
 
