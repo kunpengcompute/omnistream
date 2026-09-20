@@ -11,10 +11,12 @@
 
 #pragma once
 
+#include <unordered_map>
+
 #include "State.h"
 
-class RowData;
 class Object;
+class RowData;
 
 /**
  * T: such as Object*
