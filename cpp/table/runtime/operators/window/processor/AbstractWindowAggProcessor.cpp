@@ -219,7 +219,6 @@ void AbstractWindowAggProcessor::ProcessNonHopResult(RowData* result)
             collector->collect(BinaryRowDataSerializer::joinedRowToBinaryRow(resultRow.get(), outputTypeIds));
         } else {
             auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(1, outputTypeIds);
-            collector->collect(BinaryRowDataSerializer::joinedRowToBinaryRow(resultRow.get(), outputTypeIds));
             SetOutputBatch(outputBatch, resultRow.get());
             collector->collect(outputBatch);
         }
