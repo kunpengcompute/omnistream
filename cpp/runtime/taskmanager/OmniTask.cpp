@@ -418,7 +418,7 @@ void OmniTask::notifyRemoteDataAvailable(
     auto inputGate = inputGates[inputGateIndex];
     auto channel = inputGate->getChannel(channelIndex);
     if (auto remoteChannel = std::dynamic_pointer_cast<RemoteInputChannel>(channel)) {
-        if (taskType == 1 && isBuffer) {
+        if (taskType == 1 && isBuffer && !remoteChannel->getChannelInfo().getOmni()) {
             remoteChannel->notifyRemoteDataAvailableForVectorBatch(
                 bufferAddress, bufferLength, sequenceNumber, originalNetworkBufferRecycler_);
         } else {
@@ -437,7 +437,7 @@ void OmniTask::notifyRemoteDataAvailable(
 }
 
 long OmniTask::createNativeCreditBasedSequenceNumberingViewReader(
-    long resultBufferAddress, ResultPartitionIDPOD partitionId, int subPartitionId)
+    long resultBufferAddress, ResultPartitionIDPOD partitionId, int subPartitionId, bool downStreamIsNative)
 {
     LOG_TRACE(
         "resultBufferAddress:" << resultBufferAddress
@@ -452,7 +452,8 @@ long OmniTask::createNativeCreditBasedSequenceNumberingViewReader(
     }
     std::shared_ptr<ResultPartitionManager> resultPartitionManager = omniShuffleEnv->getResultPartitionManager();
 
-    auto* reader = new OmniCreditBasedSequenceNumberingViewReader(partitionId, subPartitionId, resultBufferAddress);
+    auto* reader = new OmniCreditBasedSequenceNumberingViewReader(
+        partitionId, subPartitionId, resultBufferAddress, downStreamIsNative);
     int retryCount = 0;
     while (true) {
         try {
@@ -628,6 +629,22 @@ void OmniTask::notifyChannelToOmni(const ResultPartitionIDPOD& partitionId)
         }
         return;
     }
+}
+
+long OmniTask::addExtraInfoToRemoteInputChannel(ResultPartitionIDPOD partitionId)
+{
+    const auto irp = partitionId.getPartitionId();
+    for (const auto& singleInputGate : inputGates) {
+        auto& inputChannelMap = singleInputGate->getInputChannels();
+        auto it = inputChannelMap.find(irp);
+        if (it != inputChannelMap.end()) {
+            auto channel = it->second;
+            // In InputChannelInfo, omni=true denotes Java row input.
+            channel->getChannelInfo().setOmni();
+            return reinterpret_cast<long>(channel.get());
+        }
+    }
+    return -1;
 }
 
 int OmniTask::GetTaskType()

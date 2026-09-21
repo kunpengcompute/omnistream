@@ -89,7 +89,7 @@ public:
         int bufferType);
 
     long createNativeCreditBasedSequenceNumberingViewReader(
-        long resultBufferAddress, ResultPartitionIDPOD partitionId, int subPartitionId);
+        long resultBufferAddress, ResultPartitionIDPOD partitionId, int subPartitionId, bool downStreamIsNative);
     void notifyCheckpointAborted(long checkpointid, long latestCompletedCheckpointId);
     void notifyCheckpointComplete(long checkpointID, long inputState);
     void notifyCheckpointSubsumed(long latestCompletedCheckpointId);
@@ -128,6 +128,7 @@ public:
     void declineCheckpoint(long checkpointid, CheckpointFailureReason failureReason, std::exception* e);
     long createOmniLocalChannelReader(ResultPartitionIDPOD partitionId, int subPartitionId, long returnDataAddress);
     long changeLocalInputChannelToOriginal(ResultPartitionIDPOD partitionId);
+    long addExtraInfoToRemoteInputChannel(ResultPartitionIDPOD partitionId);
     void notifyChannelToOmni(const ResultPartitionIDPOD& partitionId);
     int GetTaskType();
     long GetRecycleBufferAddress();

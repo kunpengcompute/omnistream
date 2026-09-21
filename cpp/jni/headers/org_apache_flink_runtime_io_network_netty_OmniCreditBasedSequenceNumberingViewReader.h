@@ -47,11 +47,11 @@ Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingV
 /*
  * Class:     org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader
  * Method:    createNativeCreditBasedSequenceNumberingViewReader
- * Signature: (JJLjava/lang/String;I)J
+ * Signature: (JJLjava/lang/String;IZ)J
  */
 JNIEXPORT jlong JNICALL
 Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader_createNativeCreditBasedSequenceNumberingViewReader(
-    JNIEnv*, jobject, jlong, jlong, jstring, jint);
+    JNIEnv*, jobject, jlong, jlong, jstring, jint, jboolean);
 
 /*
  * Class:     org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader

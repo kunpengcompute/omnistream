@@ -44,7 +44,7 @@ struct LongEqual {
 class OmniCreditBasedSequenceNumberingViewReader : public BufferAvailabilityListener {
 public:
     OmniCreditBasedSequenceNumberingViewReader(
-        ResultPartitionIDPOD partitionId, int subPartitionIndex, long outputBufferStatus);
+        ResultPartitionIDPOD partitionId, int subPartitionIndex, long outputBufferStatus, bool downStreamIsNative);
     ~OmniCreditBasedSequenceNumberingViewReader() override;
     void notifyDataAvailable() override;
     void requestSubpartitionView(
@@ -66,8 +66,10 @@ public:
     void RecycleNetworkBuffer(int64_t address);
 
     void ResumeConsumption();
+    void SerializeVectorBatchBufferToRowData(VectorBatchBuffer* vectorBatchBuffer);
 
 private:
+    bool downStreamIsNative = true;
     std::atomic<bool> stopped_{false};
     std::shared_ptr<ResultSubpartitionView> subpartitionView;
     std::queue<std::shared_ptr<SerializedBatchInfo>> serializedBatchQueue;

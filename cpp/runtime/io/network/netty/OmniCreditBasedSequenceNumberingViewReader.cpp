@@ -9,15 +9,18 @@
  * See the Mulan PSL v2 for more details.
  */
 #include "OmniCreditBasedSequenceNumberingViewReader.h"
+#include "runtime/streamrecord/StreamElementSerializer.h"
+#include "typeutils/BinaryRowDataSerializer.h"
 
 #include "buffer/ReadOnlySlicedVectorBatchBuffer.h"
 #include "runtime/buffer/ReadOnlySlicedNetworkBuffer.h"
 
 namespace omnistream {
 OmniCreditBasedSequenceNumberingViewReader::OmniCreditBasedSequenceNumberingViewReader(
-    ResultPartitionIDPOD partitionId, int subPartitionIndex, long outputBufferStatus)
+    ResultPartitionIDPOD partitionId, int subPartitionIndex, long outputBufferStatus, bool downStreamIsNative)
     : outputBufferStatus(reinterpret_cast<OutputBufferStatus*>(outputBufferStatus))
 {
+    this->downStreamIsNative = downStreamIsNative;
     nettyBufferPool = std::make_unique<NettyBufferPool>(bufferPoolSize, bufferSize);
     LOG_TRACE("create OmniCreditBasedSequenceNumberingViewReader " << reinterpret_cast<long>(this));
 }
@@ -100,7 +103,7 @@ void OmniCreditBasedSequenceNumberingViewReader::getNextBufferInternal()
             // recycle buffer
             vectorBatchBuffer->RecycleBuffer();
             delete vectorBatchBuffer;
-        } else if (auto nBuffer = dynamic_cast<datastream::ReadOnlySlicedNetworkBuffer*>(buffer)) {
+        } else if (auto nBuffer = dynamic_cast<::datastream::ReadOnlySlicedNetworkBuffer*>(buffer)) {
             uint8_t* memorySegmentAddress = nBuffer->getMemorySegment()->getAll();
             int memorySegmentOffset = nBuffer->GetMemorySegmentOffset();
             uint8_t* readableAddress = memorySegmentAddress + memorySegmentOffset;
@@ -287,7 +290,11 @@ void OmniCreditBasedSequenceNumberingViewReader::RecycleNettyBuffer(long address
 void OmniCreditBasedSequenceNumberingViewReader::SerializeBufferAndBacklog(VectorBatchBuffer* vectorBatchBuffer)
 {
     if (vectorBatchBuffer->isBuffer()) {
-        SerializeVectorBatchBuffer(vectorBatchBuffer);
+        if (downStreamIsNative) {
+            SerializeVectorBatchBuffer(vectorBatchBuffer);
+        } else {
+            SerializeVectorBatchBufferToRowData(vectorBatchBuffer);
+        }
     } else {
         SerializeEvent(vectorBatchBuffer);
     }
@@ -364,4 +371,43 @@ void OmniCreditBasedSequenceNumberingViewReader::ResumeConsumption()
 {
     this->subpartitionView->resumeConsumption();
 }
+void OmniCreditBasedSequenceNumberingViewReader::SerializeVectorBatchBufferToRowData(VectorBatchBuffer* buffer)
+{
+    auto enqueue = [this](StreamElement* element, omnistream::datastream::StreamElementSerializer& serializer) {
+        DataOutputSerializer output;
+        output.writeInt(0);
+        serializer.serialize(element, output);
+        output.writeIntUnsafe(output.length() - 4, 0);
+        auto networkBuffer = RequestNettyBuffer(output.length());
+        std::memcpy(networkBuffer->GetOriginalAddress(), output.getData(), output.length());
+        auto info = std::make_shared<SerializedBatchInfo>(
+            SerializedBatchInfo{networkBuffer->GetOriginalAddress(), output.length()});
+        std::lock_guard<std::recursive_mutex> lock(queueMutex);
+        serializedBatchQueue.push(info);
+    };
+    auto* segment = buffer->GetObjectSegment();
+    for (int i = buffer->GetOffset(); i < buffer->GetOffset() + buffer->GetSize(); ++i) {
+        std::unique_ptr<StreamElement> element(segment->getObject(i));
+        if (auto* record = dynamic_cast<StreamRecord*>(element.get())) {
+            std::unique_ptr<VectorBatch> batch(static_cast<VectorBatch*>(record->getValue()));
+            omnistream::datastream::StreamElementSerializer serializer(
+                new BinaryRowDataSerializer(batch->GetVectorCount()));
+            for (int row = 0; row < batch->GetRowCount(); ++row) {
+                std::unique_ptr<RowData> rowData(batch->extractRowData(row));
+                StreamRecord rowRecord;
+                rowRecord.setValue(rowData.get());
+                if (batch->getTimestamps() != nullptr) {
+                    rowRecord.setTimestamp(batch->getTimestamp(row));
+                }
+                enqueue(&rowRecord, serializer);
+            }
+        } else if (dynamic_cast<Watermark*>(element.get())) {
+            omnistream::datastream::StreamElementSerializer serializer(nullptr);
+            enqueue(element.get(), serializer);
+        } else {
+            THROW_RUNTIME_ERROR("Unsupported stream element in remote row conversion");
+        }
+    }
+}
+
 } // namespace omnistream
