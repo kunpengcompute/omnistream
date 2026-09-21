@@ -178,10 +178,28 @@ public:
                 return reinterpret_cast<omniruntime::vec::Vector<int8_t>*>(vector)->CopyPositions(
                     positions, offset, length);
             }
+            case omniruntime::type::OMNI_DECIMAL64: {
+                // Vector<int64_t>::CopyPositions 不传 dataTypeId，DECIMAL64 会退化成
+                // OMNI_LONG(2)；这里逐位置拷贝并显式保留 OMNI_DECIMAL64。
+                if (UNLIKELY((positions == nullptr) || (length < 0))) {
+                    throw omniruntime::vec::OmniException(
+                        "OPERATOR_RUNTIME_ERROR", "positions is null or the input length is incorrect.");
+                }
+                auto* srcVector = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(vector);
+                auto* copiedVector = new omniruntime::vec::Vector<int64_t>(length, omniruntime::type::OMNI_DECIMAL64);
+                for (int32_t i = 0; i < length; i++) {
+                    int32_t position = positions[offset + i];
+                    if (srcVector->IsNull(position)) {
+                        copiedVector->SetNull(i);
+                        continue;
+                    }
+                    copiedVector->SetValue(i, srcVector->GetValue(position));
+                }
+                return copiedVector;
+            }
             case omniruntime::type::OMNI_LONG:
             case omniruntime::type::OMNI_TIMESTAMP:
-            case omniruntime::type::OMNI_DATE64:
-            case omniruntime::type::OMNI_DECIMAL64: {
+            case omniruntime::type::OMNI_DATE64: {
                 return reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(vector)->CopyPositions(
                     positions, offset, length);
             }
@@ -289,6 +307,7 @@ public:
                             reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(vecBatch->Get(col))->GetValue(row));
                     }
                     break;
+                case omniruntime::type::DataTypeId::OMNI_VARCHAR:
                 case omniruntime::type::DataTypeId::OMNI_CHAR: {
                     if (vecBatch->Get(col)->GetEncoding() == omniruntime::vec::OMNI_FLAT) {
                         auto casted = reinterpret_cast<

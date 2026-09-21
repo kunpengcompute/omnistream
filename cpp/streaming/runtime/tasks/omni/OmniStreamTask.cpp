@@ -320,6 +320,10 @@ void OmniStreamTask::cancel()
 
 void OmniStreamTask::cleanup()
 {
+    if (cleanedUp_) {
+        return;
+    }
+    cleanedUp_ = true;
     INFO_RELEASE("Start cleaning up OmniStreamTask");
     // clean up operator chain and record writer
     releaseOutputResource();
