@@ -855,3 +855,196 @@ TEST(VectorBatchTest, DISABLED_StringDictionaryContainerAndOtherVector)
     delete vec3;
     delete vec4;
 }
+
+// VectorBatch::copy() must keep DECIMAL64 columns as OMNI_DECIMAL64: the stock
+// path degrades them to OMNI_LONG(2), while DECIMAL128 keeps its id.
+TEST(VectorBatchTest, CopyKeepsDecimal64LogicalType)
+{
+    constexpr int32_t rowCount = 3;
+    omnistream::VectorBatch vectorBatch(rowCount);
+
+    auto* decimalVector = new omniruntime::vec::Vector<int64_t>(rowCount, omniruntime::type::OMNI_DECIMAL64);
+    const int64_t unscaled[] = {12345, -700, 5};
+    for (int32_t row = 0; row < rowCount; ++row) {
+        decimalVector->SetValue(row, unscaled[row]);
+        vectorBatch.setTimestamp(row, 1000 + row);
+        vectorBatch.setRowKind(row, row == 1 ? RowKind::DELETE : RowKind::INSERT);
+    }
+    decimalVector->SetNull(2);
+    vectorBatch.Append(decimalVector);
+
+    omnistream::VectorBatch* copied = vectorBatch.copy();
+    ASSERT_NE(copied, nullptr);
+    ASSERT_EQ(copied->GetVectorCount(), 1);
+    EXPECT_EQ(copied->Get(0)->GetTypeId(), omniruntime::type::OMNI_DECIMAL64);
+
+    auto* copiedDecimal = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(copied->Get(0));
+    EXPECT_EQ(copiedDecimal->GetValue(0), 12345);
+    EXPECT_EQ(copiedDecimal->GetValue(1), -700);
+    EXPECT_TRUE(copiedDecimal->IsNull(2));
+    EXPECT_EQ(copied->getTimestamp(0), 1000);
+    EXPECT_EQ(copied->getTimestamp(1), 1001);
+    EXPECT_EQ(copied->getRowKind(0), RowKind::INSERT);
+    EXPECT_EQ(copied->getRowKind(1), RowKind::DELETE);
+
+    copied->FreeAllVectors();
+    delete copied;
+    vectorBatch.ClearVectors();
+    delete decimalVector;
+}
+
+TEST(VectorBatchTest, CopyKeepsDecimal128LogicalType)
+{
+    // Control case: DECIMAL128 was already correct, pin it against regressions.
+    constexpr int32_t rowCount = 2;
+    omnistream::VectorBatch vectorBatch(rowCount);
+    auto* decimalVector = new omniruntime::vec::Vector<omniruntime::type::Decimal128>(rowCount);
+    decimalVector->SetValue(0, omniruntime::type::Decimal128(omniruntime::type::int128_t(908)));
+    decimalVector->SetValue(1, omniruntime::type::Decimal128(omniruntime::type::int128_t(-1)));
+    vectorBatch.Append(decimalVector);
+
+    omnistream::VectorBatch* copied = vectorBatch.copy();
+    ASSERT_NE(copied, nullptr);
+    EXPECT_EQ(copied->Get(0)->GetTypeId(), omniruntime::type::OMNI_DECIMAL128);
+    auto* copiedDecimal = reinterpret_cast<omniruntime::vec::Vector<omniruntime::type::Decimal128>*>(copied->Get(0));
+    EXPECT_EQ(copiedDecimal->GetValue(0).ToString(), "908");
+    EXPECT_EQ(copiedDecimal->GetValue(1).ToString(), "-1");
+
+    copied->FreeAllVectors();
+    delete copied;
+    vectorBatch.ClearVectors();
+    delete decimalVector;
+}
+
+TEST(VectorBatchTest, CopyKeepsLongColumnAsLong)
+{
+    // Control case: a plain BIGINT column must not be turned into DECIMAL64.
+    constexpr int32_t rowCount = 2;
+    omnistream::VectorBatch vectorBatch(rowCount);
+    auto* longVector = new omniruntime::vec::Vector<int64_t>(rowCount);
+    longVector->SetValue(0, 11);
+    longVector->SetValue(1, 22);
+    vectorBatch.Append(longVector);
+
+    omnistream::VectorBatch* copied = vectorBatch.copy();
+    ASSERT_NE(copied, nullptr);
+    EXPECT_EQ(copied->Get(0)->GetTypeId(), omniruntime::type::OMNI_LONG);
+    EXPECT_EQ(reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(copied->Get(0))->GetValue(1), 22);
+
+    copied->FreeAllVectors();
+    delete copied;
+    vectorBatch.ClearVectors();
+    delete longVector;
+}
+
+// The wire format carries DataTypeId per column, so a DECIMAL64 column must come back
+// as OMNI_DECIMAL64 (and not as OMNI_LONG) after the network hop.
+TEST(VectorBatchTest, VectorBatchSerializationTestDecimal64)
+{
+    constexpr int32_t rowCnt = 3;
+    omnistream::VectorBatch vectorBatch(rowCnt);
+    vectorBatch.setRowKind(0, RowKind::INSERT);
+    vectorBatch.setRowKind(1, RowKind::DELETE);
+    vectorBatch.setRowKind(2, RowKind::UPDATE_AFTER);
+    vectorBatch.setTimestamp(0, 123);
+    vectorBatch.setTimestamp(1, 456);
+    vectorBatch.setTimestamp(2, 789);
+
+    auto* decimalVector = new omniruntime::vec::Vector<int64_t>(rowCnt, omniruntime::type::OMNI_DECIMAL64);
+    decimalVector->SetValue(0, 12345);
+    decimalVector->SetValue(1, -12345);
+    decimalVector->SetValue(2, 0);
+    decimalVector->SetNull(2);
+    vectorBatch.Append(decimalVector);
+
+    int32_t batchSize = VectorBatchSerializationUtils::calculateVectorBatchSerializableSize(&vectorBatch);
+    uint8_t* buffer = new uint8_t[batchSize];
+    uint8_t* originalBuffer = buffer;
+    SerializedBatchInfo serializedBatchInfo =
+        VectorBatchSerializationUtils::serializeVectorBatch(&vectorBatch, batchSize, buffer);
+    readDataType(serializedBatchInfo.buffer);
+
+    omnistream::VectorBatch* deserializedVectorBatch =
+        VectorBatchDeserializationUtils::deserializeVectorBatch(serializedBatchInfo.buffer);
+
+    ASSERT_NE(deserializedVectorBatch, nullptr);
+    ASSERT_EQ(deserializedVectorBatch->GetVectorCount(), 1);
+    EXPECT_EQ(deserializedVectorBatch->Get(0)->GetTypeId(), omniruntime::type::OMNI_DECIMAL64);
+
+    auto* deserializedDecimal = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(deserializedVectorBatch->Get(0));
+    EXPECT_EQ(deserializedDecimal->GetValue(0), 12345);
+    EXPECT_EQ(deserializedDecimal->GetValue(1), -12345);
+    EXPECT_TRUE(deserializedDecimal->IsNull(2));
+    EXPECT_EQ(deserializedVectorBatch->getRowKind(1), RowKind::DELETE);
+    EXPECT_EQ(deserializedVectorBatch->getTimestamp(2), 789);
+
+    vectorBatch.ClearVectors();
+    deserializedVectorBatch->FreeAllVectors();
+    delete[] originalBuffer;
+    delete deserializedVectorBatch;
+    delete decimalVector;
+}
+
+TEST(VectorBatchTest, VectorBatchSerializationTestDecimal128)
+{
+    constexpr int32_t rowCnt = 2;
+    omnistream::VectorBatch vectorBatch(rowCnt);
+    auto* decimalVector = new omniruntime::vec::Vector<omniruntime::type::Decimal128>(rowCnt);
+    decimalVector->SetValue(0, omniruntime::type::Decimal128(omniruntime::type::int128_t(908)));
+    decimalVector->SetValue(1, omniruntime::type::Decimal128(omniruntime::type::int128_t(-908)));
+    vectorBatch.Append(decimalVector);
+
+    int32_t batchSize = VectorBatchSerializationUtils::calculateVectorBatchSerializableSize(&vectorBatch);
+    uint8_t* buffer = new uint8_t[batchSize];
+    uint8_t* originalBuffer = buffer;
+    SerializedBatchInfo serializedBatchInfo =
+        VectorBatchSerializationUtils::serializeVectorBatch(&vectorBatch, batchSize, buffer);
+    readDataType(serializedBatchInfo.buffer);
+
+    omnistream::VectorBatch* deserializedVectorBatch =
+        VectorBatchDeserializationUtils::deserializeVectorBatch(serializedBatchInfo.buffer);
+
+    ASSERT_NE(deserializedVectorBatch, nullptr);
+    EXPECT_EQ(deserializedVectorBatch->Get(0)->GetTypeId(), omniruntime::type::OMNI_DECIMAL128);
+    auto* deserializedDecimal =
+        reinterpret_cast<omniruntime::vec::Vector<omniruntime::type::Decimal128>*>(deserializedVectorBatch->Get(0));
+    EXPECT_EQ(deserializedDecimal->GetValue(0).ToString(), "908");
+    EXPECT_EQ(deserializedDecimal->GetValue(1).ToString(), "-908");
+
+    vectorBatch.ClearVectors();
+    deserializedVectorBatch->FreeAllVectors();
+    delete[] originalBuffer;
+    delete deserializedVectorBatch;
+    delete decimalVector;
+}
+
+TEST(VectorBatchTest, VectorBatchSerializationTestLongStaysLong)
+{
+    // Control case: BIGINT must keep travelling as OMNI_LONG.
+    constexpr int32_t rowCnt = 2;
+    omnistream::VectorBatch vectorBatch(rowCnt);
+    auto* longVector = new omniruntime::vec::Vector<int64_t>(rowCnt);
+    longVector->SetValue(0, 11);
+    longVector->SetValue(1, 22);
+    vectorBatch.Append(longVector);
+
+    int32_t batchSize = VectorBatchSerializationUtils::calculateVectorBatchSerializableSize(&vectorBatch);
+    uint8_t* buffer = new uint8_t[batchSize];
+    uint8_t* originalBuffer = buffer;
+    SerializedBatchInfo serializedBatchInfo =
+        VectorBatchSerializationUtils::serializeVectorBatch(&vectorBatch, batchSize, buffer);
+    readDataType(serializedBatchInfo.buffer);
+
+    omnistream::VectorBatch* deserializedVectorBatch =
+        VectorBatchDeserializationUtils::deserializeVectorBatch(serializedBatchInfo.buffer);
+
+    ASSERT_NE(deserializedVectorBatch, nullptr);
+    EXPECT_EQ(deserializedVectorBatch->Get(0)->GetTypeId(), omniruntime::type::OMNI_LONG);
+    EXPECT_EQ(reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(deserializedVectorBatch->Get(0))->GetValue(0), 11);
+
+    vectorBatch.ClearVectors();
+    deserializedVectorBatch->FreeAllVectors();
+    delete[] originalBuffer;
+    delete deserializedVectorBatch;
+    delete longVector;
+}

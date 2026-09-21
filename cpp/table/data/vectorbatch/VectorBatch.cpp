@@ -750,17 +750,19 @@ omnistream::VectorBatch* VectorBatch::CreateVectorBatch(int rowCount, const std:
                 break;
             }
             case (omniruntime::type::DataTypeId::OMNI_DECIMAL64): {
-                auto vec = new omniruntime::vec::Vector<long>(rowCount, omniruntime::type::DataTypeId::OMNI_DECIMAL64);
+                auto vec =
+                    new omniruntime::vec::Vector<int64_t>(rowCount, omniruntime::type::DataTypeId::OMNI_DECIMAL64);
                 vectorBatch->Append(vec);
                 break;
             }
             case (omniruntime::type::DataTypeId::OMNI_DECIMAL128): {
-                auto vec =
-                    new omniruntime::vec::Vector<Decimal128>(rowCount, omniruntime::type::DataTypeId::OMNI_DECIMAL128);
+                auto vec = new omniruntime::vec::Vector<omniruntime::type::Decimal128>(rowCount);
                 vectorBatch->Append(vec);
                 break;
             }
-            default: throw std::runtime_error("Unsupported type: " + dataTypes[i]);
+            default:
+                throw std::runtime_error(
+                    "CreateVectorBatch: unsupported type id " + std::to_string(static_cast<int>(dataTypes[i])));
         }
     }
     return vectorBatch;

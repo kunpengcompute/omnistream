@@ -27,9 +27,18 @@ public:
 template <typename IN, typename BucketID>
 class BucketAssigner {
 public:
+    // vanilla 的默认分区名。
+    static constexpr const char* DEFAULT_PARTITION_NAME = "__DEFAULT_PARTITION__";
+
     BucketAssigner(std::vector<std::string> keys, std::vector<int> indexes)
+        : BucketAssigner(std::move(keys), std::move(indexes), DEFAULT_PARTITION_NAME)
+    {
+    }
+
+    BucketAssigner(std::vector<std::string> keys, std::vector<int> indexes, std::string defaultPartitionName)
         : partitionKeys(std::move(keys)),
-          partitionIndexes(std::move(indexes))
+          partitionIndexes(std::move(indexes)),
+          defaultPartitionName(std::move(defaultPartitionName))
     {
         if (partitionKeys.size() != partitionIndexes.size()) {
             throw std::runtime_error("mismatched keys/indexes size");
@@ -42,8 +51,16 @@ public:
         auto vb = reinterpret_cast<omnistream::VectorBatch*>(batch);
 
         for (size_t i = 0; i < partitionKeys.size(); ++i) {
-            auto val = VectorBatchUtil::getValueAtAsStr(vb, partitionIndexes[i], rowId);
-            partitionSpec.emplace_back(partitionKeys[i], std::string(val));
+            const int columnIndex = partitionIndexes[i];
+            // vanilla 把 NULL 与空串都替换成 partition.default-name 再拼目录；native 原先把
+            // NULL 输出成字面量 "NULL"、空串直接抛异常，这里与 vanilla 对齐。
+            std::string val = vb->Get(columnIndex)->IsNull(rowId)
+                                  ? defaultPartitionName
+                                  : VectorBatchUtil::getValueAtAsStr(vb, columnIndex, rowId);
+            if (val.empty()) {
+                val = defaultPartitionName;
+            }
+            partitionSpec.emplace_back(partitionKeys[i], std::move(val));
         }
 
         auto partitionPath = PartitionPathUtils::generatePartitionPath(partitionSpec);
@@ -53,6 +70,7 @@ public:
 private:
     std::vector<std::string> partitionKeys;
     std::vector<int> partitionIndexes;
+    std::string defaultPartitionName;
 };
 
 #endif // OMNISTREAM_BUCKET_ASSIGNER_H

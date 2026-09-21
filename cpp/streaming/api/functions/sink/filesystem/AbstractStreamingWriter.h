@@ -28,17 +28,23 @@ template <typename IN, typename OUT>
 class AbstractStreamingWriter : public AbstractStreamOperator<OUT>, public OneInputStreamOperator {
 public:
     AbstractStreamingWriter(long bucketCheckInterval, BulkFormatBuilder<IN, std::string>* bucketsBuilder)
-        : bucketCheckInterval(bucketCheckInterval),
-          bucketsBuilder(bucketsBuilder),
-          currentWatermark(LONG_MIN)
+        : buckets(nullptr),
+          helper(nullptr),
+          procTimeService(nullptr),
+          currentWatermark(LONG_MIN),
+          bucketCheckInterval(bucketCheckInterval),
+          bucketsBuilder(bucketsBuilder)
     {
     }
 
     void initializeState(StreamTaskStateInitializerImpl* initializer, TypeSerializer* keySerializer) override
     {
         AbstractStreamOperator<OUT>::initializeState(initializer, keySerializer);
+        // initializeState 可能被重复调用，先释放上一轮的定时服务和运行时对象，避免线程与定时器残留
+        releaseRuntime();
         buckets = bucketsBuilder->createBuckets(this->getRuntimeContext()->getIndexOfThisSubtask());
-        helper = new StreamingFileSinkHelper<IN>(buckets, new SystemProcessingTimeService(), bucketCheckInterval);
+        procTimeService = new SystemProcessingTimeService();
+        helper = new StreamingFileSinkHelper<IN>(buckets, procTimeService, bucketCheckInterval);
     }
 
     void processWatermark(Watermark* mark)
@@ -109,13 +115,7 @@ public:
     void close() override
     {
         AbstractStreamOperator<OUT>::close();
-        if (helper) {
-            helper->close();
-            delete helper;
-        }
-        if (buckets) {
-            delete buckets;
-        }
+        releaseRuntime();
     }
 
     virtual ~AbstractStreamingWriter()
@@ -130,9 +130,31 @@ public:
         return typeName;
     }
 
+private:
+    void releaseRuntime()
+    {
+        // bucket 检查定时器每隔 bucketCheckInterval 会以 helper 为回调重新注册自己，所以必须先停服务
+        // （内部会 join worker 线程）再删 helper，否则 worker 会在 helper 释放之后回调到已释放内存。
+        if (procTimeService != nullptr) {
+            procTimeService->shutdownService();
+            delete procTimeService;
+            procTimeService = nullptr;
+        }
+        if (helper != nullptr) {
+            helper->close();
+            delete helper;
+            helper = nullptr;
+        }
+        if (buckets != nullptr) {
+            delete buckets;
+            buckets = nullptr;
+        }
+    }
+
 protected:
     Buckets<IN, std::string>* buckets;
     StreamingFileSinkHelper<IN>* helper;
+    SystemProcessingTimeService* procTimeService;
     long currentWatermark;
 
     virtual void partitionCreated(const std::string& partition)
