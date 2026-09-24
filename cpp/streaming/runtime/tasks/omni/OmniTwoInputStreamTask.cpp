@@ -29,6 +29,9 @@ void OmniTwoInputStreamTask::init()
             default: THROW_RUNTIME_ERROR("Invalid input type number:" + std::to_string(inputType));
         }
     }
+    if (taskType == 1 && (inputList1.size() != 1 || inputList2.size() != 1)) {
+        throw std::invalid_argument("SQL two-input task requires one physical gate per logical input");
+    }
     auto getPartitionerFunction = std::function<StreamPartitioner<IOReadableWritable>*(int)>(
         [&inEdges, this](const int i) { return this->createPartitionerFromDesc(inEdges[i], true); });
     auto description = nlohmann::json::parse(pod.getOperatorDescription().getDescription());

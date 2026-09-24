@@ -15,6 +15,7 @@
 #include <string>
 #include <filesystem>
 #include <cstdint>
+#include <stdexcept>
 #include <nlohmann/json.hpp>
 #include "StreamConfigPOD.h"
 #include "CheckpointConfigPOD.h"
@@ -270,7 +271,8 @@ public:
         return taskName == other.taskName && numberOfSubtasks == other.numberOfSubtasks &&
                maxNumberOfSubtasks == other.maxNumberOfSubtasks && indexOfSubtask == other.indexOfSubtask &&
                streamConfig == other.streamConfig && chainedConfig == other.chainedConfig &&
-               stateBackend == other.stateBackend && rocksdbStorePaths == other.rocksdbStorePaths;
+               stateBackend == other.stateBackend && rocksdbStorePaths == other.rocksdbStorePaths &&
+               upstreamNative == other.upstreamNative;
     }
 
     bool GetSplitWatermark() const
@@ -323,6 +325,18 @@ public:
         return tmpWorkingDirectory;
     }
 
+    const std::vector<bool>& getUpstreamNative() const
+    {
+        return upstreamNative;
+    }
+
+    void validateInputGateCount(size_t gateCount) const
+    {
+        if (upstreamNative.size() != gateCount) {
+            throw std::invalid_argument("upstreamNative count does not match deployed input gates");
+        }
+    }
+
     friend void to_json(nlohmann::json& json, const TaskInformationPOD& taskInfo)
     {
         json = nlohmann::json{
@@ -342,6 +356,7 @@ public:
             {"streamConfig", taskInfo.streamConfig},
             {"chainedConfig", taskInfo.chainedConfig},
             {"taskType", taskInfo.taskType},
+            {"upstreamNative", nlohmann::json(taskInfo.upstreamNative).dump()},
             {"checkpointConfig", taskInfo.checkpointConfig},
             {"executionCheckpointConfig", taskInfo.executionCheckpointConfig},
             {"localRecoveryConfig", taskInfo.localRecoveryConfig},
@@ -373,6 +388,17 @@ public:
                                     : StreamConfigPOD();
         taskInfo.chainedConfig = json.value("chainedConfig", std::vector<StreamConfigPOD>());
         taskInfo.taskType = json.value("taskType", 1);
+        const auto upstream = nlohmann::json::parse(json.value("upstreamNative", std::string("[]")));
+        if (!upstream.is_array()) {
+            throw std::invalid_argument("upstreamNative must encode a boolean array");
+        }
+        taskInfo.upstreamNative.clear();
+        for (const auto& flag : upstream) {
+            if (!flag.is_boolean()) {
+                throw std::invalid_argument("upstreamNative entries must be booleans");
+            }
+            taskInfo.upstreamNative.push_back(flag.get<bool>());
+        }
         taskInfo.checkpointConfig = json.contains("checkpointConfig") && !json.at("checkpointConfig").is_null()
                                         ? json.at("checkpointConfig").get<CheckpointConfigPOD>()
                                         : CheckpointConfigPOD();
@@ -386,6 +412,7 @@ public:
     }
 
 private:
+    std::vector<bool> upstreamNative;
     std::string taskName;
     int numberOfSubtasks;
     int maxNumberOfSubtasks;

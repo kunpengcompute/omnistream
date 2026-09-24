@@ -48,8 +48,9 @@ public:
         int64_t checkpointInterval)
         : recordDeserializers(std::move(recordDeserializers)),
           inputIndex(inputIndex),
-          inputGate(std::move(inputGate)),
+          inputGate(inputGate),
           taskType(taskType),
+          inputFormat_(taskType == 1 ? inputGate->getInputFormat() : InputFormat::FLINK_ROW),
           currentRecordDeserializer(nullptr),
           output_(nullptr),
           statusWatermarkValve_(this->inputGate->GetNumberOfInputChannels()),
@@ -73,8 +74,9 @@ public:
         std::vector<long>& channelInfos,
         int64_t checkpointInterval)
         : inputIndex(inputIndex),
-          inputGate(std::move(inputGate)),
+          inputGate(inputGate),
           taskType(taskType),
+          inputFormat_(taskType == 1 ? inputGate->getInputFormat() : InputFormat::FLINK_ROW),
           currentRecordDeserializer(nullptr),
           output_(nullptr),
           statusWatermarkValve_(this->inputGate->GetNumberOfInputChannels()),
@@ -97,8 +99,7 @@ public:
         output->setTaskType(taskType);
 
         if (taskType == 1) {
-            fromOriginal = inputGate->fromOriginal();
-            if (fromOriginal) {
+            if (inputFormat_ == InputFormat::FLINK_ROW) {
                 if (!isStartTimer) {
                     INFO_RELEASE("Start timer thread");
                     timer_thread_ = std::thread(&OmniAbstractStreamTaskNetworkInput::timerThread, this);
@@ -703,11 +704,10 @@ protected:
     int NullValueCount = 0;
     bool isLastValueNull = false;
     int taskType;
+    const InputFormat inputFormat_;
     RecordDeserializer* currentRecordDeserializer;
     std::unique_ptr<DeserializationDelegate> deserializationDelegate_;
     TypeSerializer* inSerializer;
-    // Determine if the upstream task is an original Java task.
-    bool fromOriginal = true;
     // When the current SQL task has a Java task as its upstream,
     // maintain the number of rows accumulated for generating VectorBatch.
     int rowCount;

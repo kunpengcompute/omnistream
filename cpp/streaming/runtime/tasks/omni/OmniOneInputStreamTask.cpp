@@ -150,6 +150,9 @@ const std::string OmniOneInputStreamTask::getName() const
 std::shared_ptr<CheckpointedInputGate> OmniOneInputStreamTask::CreateCheckpointedInputGate()
 {
     auto checkpointableInputs = env_->GetAllInputGates();
+    if (taskType == 1 && checkpointableInputs.size() != 1) {
+        throw std::invalid_argument("SQL one-input task requires exactly one physical input gate");
+    }
     std::vector<std::shared_ptr<OmniStreamTaskSourceInput>> emptySourceInputs;
 
     taskConfiguration_ = env_->taskConfiguration();

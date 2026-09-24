@@ -47,7 +47,7 @@ Java_com_huawei_omniruntime_flink_runtime_taskexecutor_OmniTaskExecutor_createNa
  */
 JNIEXPORT jlong JNICALL Java_com_huawei_omniruntime_flink_runtime_taskexecutor_OmniTaskExecutor_submitTaskNative(
     JNIEnv* jniEnv, jobject thiz, jlong nativeTaskExecutorAddress, jstring jobjson, jstring taskjson, jstring tddjson)
-{
+try {
     const char* jobString = jniEnv->GetStringUTFChars(jobjson, nullptr);
     std::string jobInfoString(jobString);
     jniEnv->ReleaseStringUTFChars(jobjson, jobString);
@@ -70,6 +70,7 @@ JNIEXPORT jlong JNICALL Java_com_huawei_omniruntime_flink_runtime_taskexecutor_O
     omnistream::TaskInformationPOD taskInfo = task;
     nlohmann::json tdd = nlohmann::json::parse(taskDDString);
     omnistream::TaskDeploymentDescriptorPOD tddinfo = tdd;
+    taskInfo.validateInputGateCount(tddinfo.getInputGates().size());
 
     auto omniTaskExecutor = reinterpret_cast<omnistream::OmniTaskExecutor*>(nativeTaskExecutorAddress);
     std::shared_ptr<RemoteDataFetcherBridge> remoteDataFetcherBridge = std::make_shared<RemoteDataFetcherBridgeImpl>();
@@ -77,6 +78,15 @@ JNIEXPORT jlong JNICALL Java_com_huawei_omniruntime_flink_runtime_taskexecutor_O
     auto nativeTask =
         omniTaskExecutor->submitTask(jobInfo, taskInfo, tddinfo, nullptr, nullptr, nullptr, remoteDataFetcherBridge);
     return reinterpret_cast<jlong>(nativeTask);
+} catch (const std::exception& error) {
+    if (!jniEnv->ExceptionCheck()) {
+        jclass exceptionClass = jniEnv->FindClass("java/lang/IllegalArgumentException");
+        if (exceptionClass != nullptr) {
+            jniEnv->ThrowNew(exceptionClass, error.what());
+            jniEnv->DeleteLocalRef(exceptionClass);
+        }
+    }
+    return -1;
 }
 /*
  * Class:     com_huawei_omniruntime_flink_runtime_taskexecutor_OmniTaskExecutor
@@ -96,7 +106,7 @@ Java_com_huawei_omniruntime_flink_runtime_taskexecutor_OmniTaskExecutor_submitTa
     jobject taskStateManagerWrapper,
     jobject omniTaskWrapper,
     jobject taskOperatorEventGateway)
-{
+try {
     const char* jobString = jniEnv->GetStringUTFChars(jobjson, nullptr);
     std::string jobInfoString(jobString);
     jniEnv->ReleaseStringUTFChars(jobjson, jobString);
@@ -119,6 +129,7 @@ Java_com_huawei_omniruntime_flink_runtime_taskexecutor_OmniTaskExecutor_submitTa
     omnistream::TaskInformationPOD taskInfo = task;
     nlohmann::json tdd = nlohmann::json::parse(taskDDString);
     omnistream::TaskDeploymentDescriptorPOD tddinfo = tdd;
+    taskInfo.validateInputGateCount(tddinfo.getInputGates().size());
     jobject globalTaskStateRef = jniEnv->NewGlobalRef(taskStateManagerWrapper);
     if (globalTaskStateRef == nullptr) {
         LOG_TRACE("Failed to create global reference for TaskState!");
@@ -147,4 +158,13 @@ Java_com_huawei_omniruntime_flink_runtime_taskexecutor_OmniTaskExecutor_submitTa
     auto nativeTask = omniTaskExecutor->submitTask(
         jobInfo, taskInfo, tddinfo, stateBridge, TaskBridge, TaskOperatorEventGatewayBridge, remoteDataFetcherBridge);
     return reinterpret_cast<jlong>(nativeTask);
+} catch (const std::exception& error) {
+    if (!jniEnv->ExceptionCheck()) {
+        jclass exceptionClass = jniEnv->FindClass("java/lang/IllegalArgumentException");
+        if (exceptionClass != nullptr) {
+            jniEnv->ThrowNew(exceptionClass, error.what());
+            jniEnv->DeleteLocalRef(exceptionClass);
+        }
+    }
+    return -1;
 }

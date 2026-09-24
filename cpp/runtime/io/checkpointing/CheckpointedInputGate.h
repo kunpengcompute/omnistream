@@ -49,7 +49,7 @@ public:
     BufferOrEvent* PollNext() override;
     bool IsFinished() override;
     bool HasReceivedEndOfData() override;
-    bool fromOriginal();
+    InputFormat getInputFormat() const;
 
     // Checkpoint-specific APIs
     std::shared_ptr<CompletableFutureV2<void>> GetAllBarriersReceivedFuture(long checkpointId);

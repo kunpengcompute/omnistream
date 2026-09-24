@@ -103,6 +103,10 @@ OmniTask::OmniTask(
     auto ShuffleIOOwnerContext =
         shuffleEnv->createShuffleIOOwnerContext(taskNameWithSubtaskAndId, executionId_, nullptr);
 
+    // Validate before allocating shuffle resources. Entries are indexed by physical gate index.
+    const auto& upstreamNative = taskInfo_.getUpstreamNative();
+    taskInfo_.validateInputGateCount(tdd.getInputGates().size());
+
     auto resultPartitionWriters =
         shuffleEnv_->createResultPartitionWriters(ShuffleIOOwnerContext, tdd.getProducedPartitions(), taskType);
 
@@ -110,6 +114,16 @@ OmniTask::OmniTask(
 
     LOG_INFO_IMP(">>>> create the InputGates");
     inputGates = shuffleEnv_->createInputGates(ShuffleIOOwnerContext, nullptr, tdd.getInputGates(), taskType);
+    std::vector<bool> configuredGates(upstreamNative.size(), false);
+    for (const auto& gate : inputGates) {
+        const int gateIndex = gate->GetGateIndex();
+        if (gateIndex < 0 || static_cast<size_t>(gateIndex) >= upstreamNative.size() || configuredGates[gateIndex]) {
+            throw std::invalid_argument("Invalid or duplicate physical input gate index");
+        }
+        configuredGates[gateIndex] = true;
+        gate->initializeInputFormat(
+            taskType == 1 && upstreamNative[gateIndex] ? InputFormat::OMNI_BATCH : InputFormat::FLINK_ROW);
+    }
     taskMetricGroup = std::make_shared<TaskMetricGroup>();
     // setup runtime env
     TaskPlainInfoPOD taskPlainInfo;
@@ -418,7 +432,7 @@ void OmniTask::notifyRemoteDataAvailable(
     auto inputGate = inputGates[inputGateIndex];
     auto channel = inputGate->getChannel(channelIndex);
     if (auto remoteChannel = std::dynamic_pointer_cast<RemoteInputChannel>(channel)) {
-        if (taskType == 1 && isBuffer && !remoteChannel->getChannelInfo().getOmni()) {
+        if (taskType == 1 && isBuffer && inputGate->getInputFormat() == InputFormat::OMNI_BATCH) {
             remoteChannel->notifyRemoteDataAvailableForVectorBatch(
                 bufferAddress, bufferLength, sequenceNumber, originalNetworkBufferRecycler_);
         } else {
@@ -629,22 +643,6 @@ void OmniTask::notifyChannelToOmni(const ResultPartitionIDPOD& partitionId)
         }
         return;
     }
-}
-
-long OmniTask::addExtraInfoToRemoteInputChannel(ResultPartitionIDPOD partitionId)
-{
-    const auto irp = partitionId.getPartitionId();
-    for (const auto& singleInputGate : inputGates) {
-        auto& inputChannelMap = singleInputGate->getInputChannels();
-        auto it = inputChannelMap.find(irp);
-        if (it != inputChannelMap.end()) {
-            auto channel = it->second;
-            // In InputChannelInfo, omni=true denotes Java row input.
-            channel->getChannelInfo().setOmni();
-            return reinterpret_cast<long>(channel.get());
-        }
-    }
-    return -1;
 }
 
 int OmniTask::GetTaskType()
