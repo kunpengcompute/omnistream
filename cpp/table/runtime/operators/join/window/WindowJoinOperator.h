@@ -456,7 +456,6 @@ void WindowJoinOperator<KeyType>::processBatch2(StreamRecord* input)
     if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
         auto rowData = static_cast<BinaryRowData*>(record->getValue());
         int64_t windowEndTime = *rowData->getLong(rightWindowEndIndex);
-        LOG("jojo: windowEndTime:" << windowEndTime);
         processElement(rowData, windowEndTime, this->keySelectorRight.get(), rightWindowState);
         return;
     }

@@ -308,26 +308,6 @@ void RecordsWindowBuffer::flush()
         for (auto& pair : localBuffer) {
             WindowKey currentKey = pair.first;
             std::vector<int64_t>& combinedIdArr = pair.second;
-            // do we still need the iteration?
-            auto iter = combinedIdArr.begin();
-            while (iter != combinedIdArr.end()) {
-                int64_t element = *iter;
-                int batchId = VectorBatchUtil::getBatchId(element);
-                int rowId = VectorBatchUtil::getRowId(element);
-
-                if (batchId >= retainedBatches.size()) {
-                    LOG("ERROR: batchId out of bounds!");
-                    iter = combinedIdArr.erase(iter);
-                    continue;
-                }
-
-                auto& targetBatch = retainedBatches[batchId];
-                if (RowDataUtil::isRetractMsg(targetBatch->getRowKind(rowId))) {
-                    iter = combinedIdArr.erase(iter);
-                } else {
-                    ++iter;
-                }
-            }
 
             if (combinedIdArr.empty()) {
                 continue;
@@ -402,14 +382,6 @@ void RecordsWindowBuffer::flush()
     for (auto& pair : localBuffer) {
         WindowKey currentKey = pair.first;
         auto& sliceResultArr = pair.second;
-        auto iter = sliceResultArr.begin();
-        while (iter != sliceResultArr.end()) {
-            if (RowDataUtil::isRetractMsg((*iter)->getRowKind())) {
-                iter = sliceResultArr.erase(iter); // Safe iteration erasure
-            } else {
-                ++iter;
-            }
-        }
         if (!sliceResultArr.empty()) {
             globalWinAggProcess(currentKey, sliceResultArr);
         }
