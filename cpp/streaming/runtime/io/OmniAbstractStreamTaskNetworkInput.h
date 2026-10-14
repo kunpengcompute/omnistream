@@ -410,14 +410,14 @@ public:
     omnistream::VectorBatch* createOutputBatch(
         std::vector<BinaryRowData*> collectedRows, const std::vector<std::string>& inputTypes)
     {
-        INFO_RELEASE("Start to createOutputBatch");
+        // INFO_RELEASE("Start to createOutputBatch");
         int numColumns = inputTypes.size();
         auto inputRowType = new std::vector<omniruntime::type::DataTypeId>;
         for (const auto& typeStr : inputTypes) {
             inputRowType->push_back(LogicalType::flinkTypeToOmniTypeId(typeStr));
         }
         int numRows = collectedRows.size();
-        INFO_RELEASE("collectedRows: " << collectedRows.size());
+        // INFO_RELEASE("collectedRows: " << collectedRows.size());
         auto* outputBatch = new omnistream::VectorBatch(numRows);
         for (int colIndex = 0; colIndex < numColumns; ++colIndex) {
             switch (inputRowType->at(colIndex)) {
@@ -692,6 +692,12 @@ protected:
             if (inputGate->AllChannelsRecovered()) {
                 INFO_RELEASE("received a end of recovery event end");
                 return DataInputStatus::END_OF_RECOVERY;
+            }
+        } else if (dynamic_cast<InnerRecoverEvent*>(event.get())) {
+            INFO_RELEASE("received a inner recovery event start");
+            if (inputGate->AllInnerChannelsRecovered()) {
+                INFO_RELEASE("received a inner recovery event end");
+                return DataInputStatus::INNER_RECOVER;
             }
         }
         // by default,continue the data processing
