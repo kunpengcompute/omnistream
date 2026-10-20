@@ -16,6 +16,7 @@
 #include <vector>
 #include <cstring>
 #include <cstring>
+#include <memory>
 #include <arm_sve.h>
 
 #include "table/runtime/operators/join/stream/AbstractStreamingJoinOperator.h"
@@ -437,8 +438,14 @@ void WindowJoinOperator<KeyType>::processBatch1(StreamRecord* input)
     auto record = std::unique_ptr<StreamRecord>(input);
     if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
         auto rowData = static_cast<BinaryRowData*>(record->getValue());
-        int64_t windowEndTime = *rowData->getLong(leftWindowEndIndex);
-        processElement(rowData, windowEndTime, this->keySelectorLeft.get(), leftWindowState);
+        // The row is owned by the record and is released when the record goes away, so the state
+        // has to get its own copy.
+        auto copiedRowData = std::unique_ptr<RowData>(rowData->copy());
+        int64_t windowEndTime = *copiedRowData->getLong(leftWindowEndIndex);
+        processElement(copiedRowData.get(), windowEndTime, this->keySelectorLeft.get(), leftWindowState);
+        if (stateType_ == omnistream::StateType::HEAP) {
+            copiedRowData.release();
+        }
         return;
     }
     if (inputRecordType1 != "VECTOR_BATCH") {
@@ -455,8 +462,14 @@ void WindowJoinOperator<KeyType>::processBatch2(StreamRecord* input)
     auto record = std::unique_ptr<StreamRecord>(input);
     if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
         auto rowData = static_cast<BinaryRowData*>(record->getValue());
-        int64_t windowEndTime = *rowData->getLong(rightWindowEndIndex);
-        processElement(rowData, windowEndTime, this->keySelectorRight.get(), rightWindowState);
+        // The row is owned by the record and is released when the record goes away, so the state
+        // has to get its own copy.
+        auto copiedRowData = std::unique_ptr<RowData>(rowData->copy());
+        int64_t windowEndTime = *copiedRowData->getLong(rightWindowEndIndex);
+        processElement(copiedRowData.get(), windowEndTime, this->keySelectorRight.get(), rightWindowState);
+        if (stateType_ == omnistream::StateType::HEAP) {
+            copiedRowData.release();
+        }
         return;
     }
     if (inputRecordType2 != "VECTOR_BATCH") {

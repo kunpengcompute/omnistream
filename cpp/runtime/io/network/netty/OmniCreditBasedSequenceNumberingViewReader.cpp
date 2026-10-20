@@ -251,7 +251,7 @@ void OmniCreditBasedSequenceNumberingViewReader::DoSerializeBinaryRowData(
     }
 
     // Serialize the row directly into the buffer
-    BinaryRowDataSerializationUtils::serializeBinaryRowData(element, rowSize, bufferInfo->GetAddress());
+    BinaryRowDataSerializationUtils::serializeBinaryRowData(element, rowSize, bufferInfo->GetPosition());
 
     // Update Netty buffer metadata
     bufferInfo->SetWrittenBytes(rowSize);
@@ -311,18 +311,17 @@ bool OmniCreditBasedSequenceNumberingViewReader::SerializeBinaryRowData(
     BinaryRowData* element, std::shared_ptr<NettyBufferInfo>& bufferInfo)
 {
     LOG(">>>>>>>>>");
-    
+
     int rowSize = BinaryRowDataSerializationUtils::calculateBinaryRowSerializableSize(element);
-    
+
     if (!bufferInfo) {
         INFO_RELEASE("buffer info in SerializeBinaryRowData is null");
         throw std::runtime_error("buffer info in SerializeBinaryRowData is null");
     }
-    
-    
+
     if (rowSize > bufferSize - bufferInfo->elementNumBytes) {
         AddNettyBufferInfoToQueue(bufferInfo);
-        
+
         auto bigBufferNettyMemeorySegment = RequestNettyBuffer(rowSize);
         bigBufferNettyMemeorySegment->EnableEligibleRecycling();
         auto bigBufferInfo = std::make_shared<NettyBufferInfo>(bigBufferNettyMemeorySegment);

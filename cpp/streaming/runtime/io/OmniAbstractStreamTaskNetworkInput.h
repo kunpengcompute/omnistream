@@ -225,9 +225,8 @@ public:
                     if (filteredRecord == nullptr) {
                         continue;
                     }
-                    if (filteredRecord->getValueType() == RecordValueType::VECTOR_BATCH ) {
-                        
-                    auto vectorBatch = static_cast<VectorBatch*>(filteredRecord->getValue());
+                    if (filteredRecord->getValueType() == RecordValueType::VECTOR_BATCH) {
+                        auto vectorBatch = static_cast<VectorBatch*>(filteredRecord->getValue());
                         size_t row_cnt = vectorBatch->GetRowCount();
                         numberOfRow += row_cnt;
                     } else if (filteredRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {

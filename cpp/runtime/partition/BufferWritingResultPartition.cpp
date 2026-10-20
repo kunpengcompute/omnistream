@@ -19,6 +19,7 @@
 #include <vector>
 #include <core/utils/ByteBuffer.h>
 #include <streaming/runtime/streamrecord/StreamRecord.h>
+#include <streaming/runtime/streamrecord/StreamRecordHelper.h>
 #include <streaming/api/watermark/Watermark.h>
 
 #include "PipelinedSubpartition.h"
@@ -356,8 +357,10 @@ BufferBuilder* BufferWritingResultPartition::appendUnicastDataForNewRecord(void*
                 case StreamElementTag::TAG_REC_WITH_TIMESTAMP:
                 case StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP: {
                     auto* streamRecord = static_cast<StreamRecord*>(element);
-                    auto* vectorBatch = static_cast<omnistream::VectorBatch*>(streamRecord->getValue());
-                    bytes = vectorBatch == nullptr ? 0 : static_cast<uint64_t>(vectorBatch->getSizeInBytes());
+                    // The payload is either a VectorBatch or a BinaryRowData, depending on the
+                    // record value type. Casting it to a VectorBatch unconditionally would read
+                    // unrelated memory for row data records and produce a bogus size.
+                    bytes = StreamRecordHelper::getRecordSizeInBytes(streamRecord);
                     break;
                 }
                 case StreamElementTag::TAG_WATERMARK: bytes = sizeof(int64_t); break;

@@ -120,6 +120,11 @@ public:
         auto copyedVectorBatch = VectorBatchUtil::buildNewVectorBatchByRowIds(vectorBatch, offsets);
         auto copyedRecord = new StreamRecord(copyedVectorBatch, timestamp);
         copyedRecord->setValueType(originStreamRecord->getValueType());
+        if (originStreamRecord->hasTimestamp()) {
+            copyedRecord->setTag(StreamElementTag::TAG_REC_WITH_TIMESTAMP);
+        } else {
+            copyedRecord->setTag(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP);
+        }
         return copyedRecord;
     }
 
@@ -128,7 +133,14 @@ public:
         auto row = reinterpret_cast<Row*>(originStreamRecord->getValue());
         auto copyRow =
             new Row(row->getKind(), row->getFieldByPosition(), row->getFieldByName(), row->getPositionByName());
-        return new StreamRecord(copyRow, timestamp);
+        auto newRecord = new StreamRecord(copyRow, timestamp);
+        newRecord->setValueType(originStreamRecord->getValueType());
+        if (originStreamRecord->hasTimestamp()) {
+            newRecord->setTag(StreamElementTag::TAG_REC_WITH_TIMESTAMP);
+        } else {
+            newRecord->setTag(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP);
+        }
+        return newRecord;
     }
 
 protected:

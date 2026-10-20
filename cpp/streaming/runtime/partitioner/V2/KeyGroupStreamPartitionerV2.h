@@ -71,7 +71,13 @@ public:
         } catch (const std::exception& e) {
             throw std::runtime_error("Could not extract key from ");
         }
-        return KeyGroupRangeAssignment<K>::assignKeyToParallelOperator(key, maxParallelism, this->numberOfChannels);
+        int channel =
+            KeyGroupRangeAssignment<K>::assignKeyToParallelOperator(key, maxParallelism, this->numberOfChannels);
+        // The key extracted from a row is always a newly allocated object, it has to be released here.
+        if constexpr (std::is_pointer_v<K>) {
+            delete key;
+        }
+        return channel;
     }
 
     std::unique_ptr<SubtaskStateMapper> getDownstreamSubtaskStateMapper() override

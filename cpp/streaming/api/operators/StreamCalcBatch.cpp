@@ -77,6 +77,8 @@ void StreamCalcBatch::processBatch(StreamRecord* input)
                 switch (outputTypeIds_[i]) {
                     case DataTypeId::OMNI_LONG:
                     case DataTypeId::OMNI_TIMESTAMP:
+                    case DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+                    case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                     case DataTypeId::OMNI_DOUBLE: {
                         auto vector = static_cast<omniruntime::vec::Vector<int64_t>*>(outputBatch->Get(i));
                         vector->SetValue(0, *row->getLong(outputIndexes_[i]));

@@ -221,6 +221,11 @@ int OmniLocalChannelReader::calculateTotalRows(ObjectSegment* objectSegment, int
         StreamElement* streamElement = objectSegment->getObject(i);
         if (dynamic_cast<StreamRecord*>(streamElement)) {
             auto* streamRecord = dynamic_cast<StreamRecord*>(streamElement);
+            if (streamRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+                // A binary row record already carries exactly one row.
+                totalRow += 1;
+                continue;
+            }
             auto* element = static_cast<VectorBatch*>(streamRecord->getValue());
             totalRow += element->GetRowCount();
         } else if (dynamic_cast<Watermark*>(streamElement)) {
@@ -247,7 +252,7 @@ void OmniLocalChannelReader::setRowDataToPtr(
     valueOutputSerializer->setBackendBuffer(valueOutputBufferStatus);
     StreamRecord streamRecord;
     streamRecord.setValue(binaryRowData);
-    if (element->getTimestamps() != nullptr) {
+    if (element != nullptr && element->getTimestamps() != nullptr) {
         streamRecord.setTimestamp(element->getTimestamp(index));
     }
     valueOutputSerializer->setPosition(4);
@@ -291,6 +296,12 @@ void OmniLocalChannelReader::WrapBufferInfoIntoBinaryRowDataInfo(
         StreamElement* streamElement = objectSegment->getObject(i);
         if (dynamic_cast<StreamRecord*>(streamElement)) {
             auto* streamRecord = dynamic_cast<StreamRecord*>(streamElement);
+            if (streamRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+                // The record already is a row, it only has to be serialized.
+                auto* rowData = static_cast<BinaryRowData*>(streamRecord->getValue());
+                setRowDataToPtr(rowData, dataResultContainer, position, 0, nullptr, 0);
+                continue;
+            }
             auto* element = static_cast<VectorBatch*>(streamRecord->getValue());
             auto vectorBatchRow = element->GetRowCount();
             vectorBatchCol = element->GetVectorCount();

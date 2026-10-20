@@ -16,6 +16,7 @@
 #include <streaming/runtime/streamrecord/StreamRecordHelper.h>
 #include "WatermarkGaugeExposingOutput.h"
 #include "table/data/Row.h"
+#include "table/typeutils/BinaryRowDataSerializer.h"
 
 namespace omnistream {
 class VectorBatchCopyingBroadcastingOutputCollector : public WatermarkGaugeExposingOutput {
