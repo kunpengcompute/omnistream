@@ -89,7 +89,7 @@ void RecordWriterOutputV2::broadcastEvent(std::shared_ptr<AbstractEvent> event, 
 
     if (isPriorityEvent && !supportsUnalignedCheckpoints_) {
         if (barrier != nullptr) {
-            CheckpointOptions* newOptions = barrier->GetCheckpointOptions()->ToAlignedWithTimeout();
+            auto newOptions = barrier->GetCheckpointOptions()->ToAlignedWithTimeout();
             CheckpointBarrier* newBarrier = barrier->WithOptions(newOptions);
             event = std::shared_ptr<AbstractEvent>(newBarrier);
             isPriorityEvent = false;

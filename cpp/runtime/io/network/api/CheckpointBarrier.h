@@ -30,7 +30,7 @@ public:
 
     std::shared_ptr<CheckpointOptions> GetCheckpointOptions() const;
 
-    CheckpointBarrier* WithOptions(CheckpointOptions* checkpointOptions);
+    CheckpointBarrier* WithOptions(std::shared_ptr<CheckpointOptions> checkpointOptions);
 
     std::string GetEventClassName() override
     {

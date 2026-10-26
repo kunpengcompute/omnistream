@@ -626,7 +626,7 @@ TEST(CheckpointBarrierTest, WithOptionsSameReturnsThis)
     auto options = std::make_shared<CheckpointOptions>(
         CheckpointType::CHECKPOINT, CheckpointStorageLocationReference::GetDefault());
     CheckpointBarrier barrier(1, 1000, options);
-    auto* result = barrier.WithOptions(options.get());
+    auto* result = barrier.WithOptions(options);
     EXPECT_EQ(result, &barrier);
 }
 
@@ -714,7 +714,7 @@ TEST(CheckpointBarrierTest, WithOptionsDifferentReturnsNewBarrier)
         CheckpointOptions::NO_ALIGNED_CHECKPOINT_TIME_OUT);
     CheckpointBarrier barrier(1, 1000, opts1);
 
-    auto* result = barrier.WithOptions(opts2.get());
+    auto* result = barrier.WithOptions(opts2);
     ASSERT_NE(result, &barrier);
     EXPECT_EQ(result->GetId(), 1);
     EXPECT_EQ(result->GetTimestamp(), 1000);
