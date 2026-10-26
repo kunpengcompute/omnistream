@@ -26,6 +26,8 @@ constexpr std::string_view OPERATOR_NAME_WATERMARK_ASSIGNER =
     "org.apache.flink.table.runtime.operators.wmassigners.WatermarkAssignerOperator";
 constexpr std::string_view OPERATOR_NAME_WINDOW_INNER_JOIN =
     "org.apache.flink.table.runtime.operators.join.window.WindowJoinOperator.InnerJoinOperator";
+constexpr std::string_view OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN =
+    "org.apache.flink.table.runtime.operators.join.window.WindowJoinOperator.LeftOuterJoinOperator";
 constexpr std::string_view OPERATOR_NAME_PROCESS_OPERATOR = "org.apache.flink.streaming.api.operators.ProcessOperator";
 constexpr std::string_view OPERATOR_NAME_COLLECT_SINK =
     "org.apache.flink.streaming.api.operators.collect.CollectSinkOperator";

@@ -116,17 +116,59 @@ LeftOuterJoinOperator<KeyType>::LeftOuterJoinOperator(
 template <typename KeyType>
 void LeftOuterJoinOperator<KeyType>::join(std::vector<RowData*>* leftRecords, std::vector<RowData*>* rightRecords)
 {
-    // map = key : <left rows, right rows>
-    if (leftRecords != nullptr && rightRecords != nullptr) {
+    // 1. left side has no records: no output.
+    if (leftRecords == nullptr || leftRecords->empty()) {
+        return;
+    }
+    // 2. right side has no records: pad null right columns for all left rows.
+    if (rightRecords == nullptr || rightRecords->empty()) {
+        auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(leftRecords->size(), this->outputTypes);
+        this->buildRightNull(leftRecords, outputBatch);
+        AbstractStreamOperator<KeyType>::output->collect(outputBatch);
+        return;
+    }
+    // 3. null join key (Flink JoinConditionWithNullFilters semantics): no pair can match.
+    if (this->keyHasFilteredNull(leftRecords)) {
+        auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(leftRecords->size(), this->outputTypes);
+        this->buildRightNull(leftRecords, outputBatch);
+        AbstractStreamOperator<KeyType>::output->collect(outputBatch);
+        return;
+    }
+    // 4. equi condition: rows in the same key group and same window share equal join keys,
+    //    so the cartesian product is the set of matched pairs.
+    if (!this->isNonEquiCondition) {
         auto outputBatch =
             omnistream::VectorBatch::CreateVectorBatch(leftRecords->size() * rightRecords->size(), this->outputTypes);
         this->buildInner(leftRecords, rightRecords, outputBatch);
         AbstractStreamOperator<KeyType>::output->collect(outputBatch);
+        return;
     }
-
-    if (leftRecords != nullptr && rightRecords == nullptr) {
-        auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(leftRecords->size(), this->outputTypes);
-        this->buildRightNull(leftRecords, outputBatch);
+    // 5. non-equi condition: match each left row against right rows via the JIT filter;
+    //    matched pairs are emitted together, unmatched left rows are null-padded.
+    std::vector<RowData*> matchedLeft;
+    std::vector<RowData*> matchedRight;
+    std::vector<RowData*> unmatchedLeft;
+    for (auto leftRecord : *leftRecords) {
+        bool anyMatch = false;
+        for (auto rightRecord : *rightRecords) {
+            if (this->filter(static_cast<RowData*>(leftRecord), static_cast<RowData*>(rightRecord))) {
+                matchedLeft.push_back(leftRecord);
+                matchedRight.push_back(rightRecord);
+                anyMatch = true;
+            }
+        }
+        if (!anyMatch) {
+            unmatchedLeft.push_back(leftRecord);
+        }
+    }
+    if (!matchedLeft.empty()) {
+        auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(matchedLeft.size(), this->outputTypes);
+        this->buildInner(&matchedLeft, &matchedRight, outputBatch);
+        AbstractStreamOperator<KeyType>::output->collect(outputBatch);
+    }
+    if (!unmatchedLeft.empty()) {
+        auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(unmatchedLeft.size(), this->outputTypes);
+        this->buildRightNull(&unmatchedLeft, outputBatch);
         AbstractStreamOperator<KeyType>::output->collect(outputBatch);
     }
 }

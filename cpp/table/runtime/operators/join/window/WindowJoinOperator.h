@@ -204,6 +204,9 @@ protected:
     void buildSemiAnti(
         std::vector<RowData*>* elements, omnistream::VectorBatch* outputBatch, bool isSemi, std::set<int>* matchedSet);
     bool filter(RowData* leftElement, RowData* rightElement);
+    // Aligns with Flink JoinConditionWithNullFilters: if any filtered join key column
+    // of the key group is null, no pair in this group can match.
+    bool keyHasFilteredNull(const std::vector<RowData*>* leftRecords);
     InternalTimerServiceImpl<KeyType, int64_t>* internalTimerService;
     bool isNonEquiCondition;
     std::unique_ptr<KeySelector<KeyType>> keySelectorLeft{};
@@ -298,6 +301,12 @@ WindowJoinOperator<KeyType>::WindowJoinOperator(
     auto rightTypeStr = config["rightInputTypes"].get<std::vector<std::string>>();
     rightKeyIndex = description["rightJoinKey"].get<std::vector<int32_t>>();
     leftKeyIndex = description["leftJoinKey"].get<std::vector<int32_t>>();
+    if (description.contains("filterNulls")) {
+        filterNullKeys = description["filterNulls"].get<std::vector<bool>>();
+    } else {
+        // Default to filtering null keys on all join keys, matching SQL '=' semantics.
+        filterNullKeys.assign(leftKeyIndex.size(), true);
+    }
     for (const auto& i : leftTypeStr) {
         leftTypes.push_back(LogicalType::flinkTypeToOmniTypeId(i));
     }
@@ -914,4 +923,21 @@ bool WindowJoinOperator<KeyType>::filter(RowData* leftRow, RowData* rightRow)
         reinterpret_cast<int64_t>(&context));
 
     return result;
+}
+
+template <typename KeyType>
+bool WindowJoinOperator<KeyType>::keyHasFilteredNull(const std::vector<RowData*>* leftRecords)
+{
+    if (leftRecords == nullptr || leftRecords->empty() || filterNullKeys.empty()) {
+        return false;
+    }
+    // All rows in the same key group share the same join key, so inspecting one row is
+    // equivalent to checking the group key (Flink checks the current key as well).
+    RowData* sampleRow = leftRecords->front();
+    for (size_t i = 0; i < leftKeyIndex.size(); i++) {
+        if (i < filterNullKeys.size() && filterNullKeys[i] && sampleRow->isNullAt(leftKeyIndex[i])) {
+            return true;
+        }
+    }
+    return false;
 }
