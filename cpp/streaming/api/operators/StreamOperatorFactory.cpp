@@ -24,6 +24,7 @@
 #include "StreamFilter.h"
 #include "StreamGroupedReduceOperator.h"
 #include "table/runtime/operators/aggregate/GroupAggFunction.h"
+#include "table/runtime/operators/aggregate/GroupTableAggregateFunction.h"
 #include "table/runtime/operators/deduplicate/RowTimeDeduplicateFunction.h"
 #include "streaming/api/operators/KeyedProcessOperator.h"
 #include "table/runtime/operators/join/stream/StreamingJoinOperator.h"
@@ -145,6 +146,17 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
             op->setup();
             LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
 
+            return static_cast<OneInputStreamOperator*>(op);
+        } else if (
+            opConfig.getDescription().contains("processFunction") &&
+            opConfig.getDescription()["processFunction"] == "GroupTableAggregateFunction") {
+            GroupTableAggregateFunction* func = new GroupTableAggregateFunction(0l, opConfig.getDescription());
+            auto* op = new KeyedProcessOperator(func, chainOutput, opConfig.getDescription());
+            op->setup();
+            op->setDescription(opConfig.getDescription());
+            op->setFlinkSavepointUnsupported(
+                "GroupTableAggregateFunction v1: savepoint restore from Flink-native format is not supported yet");
+            LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
             return static_cast<OneInputStreamOperator*>(op);
         } else {
             GroupAggFunction* func = new GroupAggFunction(0l, opConfig.getDescription());
@@ -438,6 +450,20 @@ StreamOperator* StreamOperatorFactory::CreateKeyedProcessOp(
         auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
         op->setup(std::move(task));
         op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
+        op->setDescription(opDescriptionJSON);
+        LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
+        return static_cast<OneInputStreamOperator*>(op);
+    } else if (
+        opDescriptionJSON.contains("processFunction") &&
+        opDescriptionJSON["processFunction"] == "GroupTableAggregateFunction") {
+        // Table aggregate (ROW_NUMBER Top-N leaderboard). Zero-slot accumulator (Scheme B):
+        // members live in a keyed MapView whose layout differs from the Flink codegen
+        // DataView state, so Flink-native savepoint restore is not supported yet.
+        GroupTableAggregateFunction* func = new GroupTableAggregateFunction(0l, opDescriptionJSON);
+        auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
+        op->setup(std::move(task));
+        op->setFlinkSavepointUnsupported(
+            "GroupTableAggregateFunction v1: savepoint restore from Flink-native format is not supported yet");
         op->setDescription(opDescriptionJSON);
         LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);
