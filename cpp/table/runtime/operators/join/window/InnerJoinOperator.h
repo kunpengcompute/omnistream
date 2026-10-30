@@ -145,31 +145,32 @@ void LeftOuterJoinOperator<KeyType>::join(std::vector<RowData*>* leftRecords, st
     }
     // 5. non-equi condition: match each left row against right rows via the JIT filter;
     //    matched pairs are emitted together, unmatched left rows are null-padded.
-    std::vector<RowData*> matchedLeft;
+    //    To stay consistent with Flink, rows are emitted per left record: all of its matched
+    //    pairs first (one batch), then the null-padded row if it matched nothing.
     std::vector<RowData*> matchedRight;
-    std::vector<RowData*> unmatchedLeft;
+    std::vector<RowData*> matchedLeft;
+    std::vector<RowData*> singleLeft(1, nullptr);
     for (auto leftRecord : *leftRecords) {
-        bool anyMatch = false;
+        matchedRight.clear();
         for (auto rightRecord : *rightRecords) {
             if (this->filter(static_cast<RowData*>(leftRecord), static_cast<RowData*>(rightRecord))) {
-                matchedLeft.push_back(leftRecord);
                 matchedRight.push_back(rightRecord);
-                anyMatch = true;
             }
         }
-        if (!anyMatch) {
-            unmatchedLeft.push_back(leftRecord);
+        if (!matchedRight.empty()) {
+            // buildInner's non-equi path fills output rows sequentially from parallel
+            // left/right arrays (row i = left[i] + right[i]), so repeat the left record
+            // once per matched right record.
+            matchedLeft.assign(matchedRight.size(), leftRecord);
+            auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(matchedRight.size(), this->outputTypes);
+            this->buildInner(&matchedLeft, &matchedRight, outputBatch);
+            AbstractStreamOperator<KeyType>::output->collect(outputBatch);
+        } else {
+            singleLeft[0] = leftRecord;
+            auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(1, this->outputTypes);
+            this->buildRightNull(&singleLeft, outputBatch);
+            AbstractStreamOperator<KeyType>::output->collect(outputBatch);
         }
-    }
-    if (!matchedLeft.empty()) {
-        auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(matchedLeft.size(), this->outputTypes);
-        this->buildInner(&matchedLeft, &matchedRight, outputBatch);
-        AbstractStreamOperator<KeyType>::output->collect(outputBatch);
-    }
-    if (!unmatchedLeft.empty()) {
-        auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(unmatchedLeft.size(), this->outputTypes);
-        this->buildRightNull(&unmatchedLeft, outputBatch);
-        AbstractStreamOperator<KeyType>::output->collect(outputBatch);
     }
 }
 

@@ -72,26 +72,25 @@ inline bool getRowValue<bool>(RowData* row, int colIdx)
 {
     return *row->getInt(colIdx) != 0;
 }
-// todo:Decimal128 type casting?
 template <>
 inline omniruntime::type::Decimal128 getRowValue<omniruntime::type::Decimal128>(RowData* row, int colIdx)
 {
-    THROW_LOGIC_EXCEPTION("Extracting Decimal128 directly from RowData is not supported");
-    // Dummy return to satisfy the compiler
-    return omniruntime::type::Decimal128();
+    return *row->getDecimal128(colIdx);
 }
 
 inline void extractRowValueToFilterArray(
     RowData* row,
     int rowColIdx,    // Index inside RowData
-    int filterColIdx, // Target index inside the `vals`/`nulls` array
+    int filterColIdx, // Target index inside the `vals`/`lengths`/`nulls` arrays
     int64_t* vals,
+    int32_t* lengths,
     uint8_t* nulls,
     omniruntime::type::DataTypeId typeId)
 {
     if (row->isNullAt(rowColIdx)) {
         nulls[filterColIdx] = 1;
         vals[filterColIdx] = 0;
+        lengths[filterColIdx] = 0;
         return;
     }
 
@@ -99,6 +98,7 @@ inline void extractRowValueToFilterArray(
 
     switch (typeId) {
         case omniruntime::type::DataTypeId::OMNI_INT:
+        case omniruntime::type::DataTypeId::OMNI_DATE32:
             vals[filterColIdx] = reinterpret_cast<int64_t>(row->getInt(rowColIdx));
             break;
         case omniruntime::type::DataTypeId::OMNI_LONG:
@@ -114,8 +114,20 @@ inline void extractRowValueToFilterArray(
         case omniruntime::type::DataTypeId::OMNI_BOOLEAN:
             vals[filterColIdx] = reinterpret_cast<int64_t>(row->getInt(rowColIdx));
             break;
-        case omniruntime::type::DataTypeId::OMNI_VARCHAR:
-            vals[filterColIdx] = reinterpret_cast<int64_t>(row->getString(rowColIdx));
+        case omniruntime::type::DataTypeId::OMNI_CHAR:
+        case omniruntime::type::DataTypeId::OMNI_VARCHAR: {
+            // The codegen reads string columns as a raw `i8*` buffer plus its length from the
+            // lengths array (SimpleFilterCodeGen::Visit), so the raw data pointer and the size
+            // must be filled here.
+            std::string_view sv = row->getStringView(rowColIdx);
+            vals[filterColIdx] = reinterpret_cast<int64_t>(sv.data());
+            lengths[filterColIdx] = static_cast<int32_t>(sv.size());
+            break;
+        }
+        case omniruntime::type::DataTypeId::OMNI_DECIMAL128:
+            // The codegen loads a 128-bit decimal from the address stored in `vals`
+            // (GetPtrTypeFromInt maps OMNI_DECIMAL128 to i128*).
+            vals[filterColIdx] = reinterpret_cast<int64_t>(row->getDecimal128(rowColIdx));
             break;
         default:
             THROW_LOGIC_EXCEPTION(
@@ -389,7 +401,10 @@ void WindowJoinOperator<KeyType>::open()
         } else {
             bool leftSideState = static_cast<size_t>(i) < leftTypes.size();
             switch (leftSideState ? leftTypes[i] : rightTypes[i - leftTypes.size()]) {
-                case omniruntime::type::DataTypeId::OMNI_INT: filterFuncPtrs.push_back(getValueAddress<int32_t>); break;
+                case omniruntime::type::DataTypeId::OMNI_INT:
+                case omniruntime::type::DataTypeId::OMNI_DATE32:
+                    filterFuncPtrs.push_back(getValueAddress<int32_t>);
+                    break;
                 case omniruntime::type::DataTypeId::OMNI_LONG:
                     filterFuncPtrs.push_back(getValueAddress<int64_t>);
                     break;
@@ -399,7 +414,11 @@ void WindowJoinOperator<KeyType>::open()
                 case omniruntime::type::DataTypeId::OMNI_BOOLEAN:
                     filterFuncPtrs.push_back(getValueAddress<bool>);
                     break;
-                default: THROW_LOGIC_EXCEPTION("Type not recognized");
+                default:
+                    // filterFuncPtrs is currently unused by the row-based filter() path; keep
+                    // non-fatal for types not handled here (e.g. CHAR/VARCHAR/DECIMAL128).
+                    filterFuncPtrs.push_back(nullptr);
+                    break;
             }
         }
     }
@@ -541,6 +560,7 @@ void WindowJoinOperator<KeyType>::BuildInnerLeft(
                 insertLeft<int16_t>(colIdx, leftElements, rightElements, outputBatch, true);
                 break;
             case omniruntime::type::DataTypeId::OMNI_INT:
+            case omniruntime::type::DataTypeId::OMNI_DATE32:
                 insertLeft<int32_t>(colIdx, leftElements, rightElements, outputBatch, true);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
@@ -580,6 +600,7 @@ void WindowJoinOperator<KeyType>::BuildInnerRight(
                 insertRight<int16_t>(colIdx, leftElements, rightElements, outputBatch, true);
                 break;
             case omniruntime::type::DataTypeId::OMNI_INT:
+            case omniruntime::type::DataTypeId::OMNI_DATE32:
                 insertRight<int32_t>(colIdx, leftElements, rightElements, outputBatch, true);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
@@ -626,9 +647,13 @@ void WindowJoinOperator<KeyType>::buildRightNull(
                 insertLeft<int16_t>(colIdx, leftElements, nullptr, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_INT:
+            case omniruntime::type::DataTypeId::OMNI_DATE32:
                 insertLeft<int32_t>(colIdx, leftElements, nullptr, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 insertLeft<int64_t>(colIdx, leftElements, nullptr, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_DOUBLE:
@@ -667,9 +692,13 @@ void WindowJoinOperator<KeyType>::buildLeftNull(
                 insertRight<int16_t>(colIdx, nullptr, rightElements, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_INT:
+            case omniruntime::type::DataTypeId::OMNI_DATE32:
                 insertRight<int32_t>(colIdx, nullptr, rightElements, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 insertRight<int64_t>(colIdx, nullptr, rightElements, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_DOUBLE:
@@ -728,6 +757,10 @@ void WindowJoinOperator<KeyType>::processBatch(
 
         this->setCurrentKey(key);
         auto inputRow = std::unique_ptr<RowData>(batchGuard->extractRowData(i));
+        if (!RowDataUtil::isAccumulateMsg(inputRow->getRowKind())) {
+            // Aligns with Flink: window join cannot handle retraction (DELETE/UPDATE_BEFORE) input.
+            THROW_LOGIC_EXCEPTION("Window join could not handle retraction input stream");
+        }
         recordState->add(windowEndTime, inputRow.get());
         if (stateType_ == omnistream::StateType::HEAP) {
             inputRow.release();
@@ -848,12 +881,15 @@ void WindowJoinOperator<KeyType>::insertRightVarchar(
             rowIdx++;
         }
     } else {
-        auto num = rightElements->size();
-        for (size_t i = 0; i < rightElements->size(); i++) {
-            std::string_view value = (rightElements->at(i))->getStringView(colIdx - leftTypes.size());
-            for (size_t j = 0; j < leftElements->size(); j++) {
-                int valIdx = j * rightElements->size() + i;
-                col->SetValue(valIdx, value);
+        // LargeStringContainer::SetValue only supports sequential ascending writes, so the
+        // right-side VARCHAR columns must be filled in row-major order (same layout as
+        // insertLeft/insertLeftVarchar: row = j * rightElements->size() + i).
+        int rowIdx = 0;
+        for (size_t j = 0; j < leftElements->size(); j++) {
+            for (size_t i = 0; i < rightElements->size(); i++) {
+                std::string_view value = (rightElements->at(i))->getStringView(colIdx - leftTypes.size());
+                col->SetValue(rowIdx, value);
+                rowIdx++;
             }
         }
     }
@@ -897,19 +933,20 @@ bool WindowJoinOperator<KeyType>::filter(RowData* leftRow, RowData* rightRow)
     }
 
     std::vector<int64_t> vals(totalNumOfCols, 0);
+    std::vector<int32_t> lengths(totalNumOfCols, 0);
     std::vector<uint8_t> nulls(totalNumOfCols, 0);
     bool resultBool = false;
 
     const int leftColsCount = static_cast<int>(leftTypes.size());
 
-    // Populate vals and nulls directly from RowData
+    // Populate vals, lengths and nulls directly from RowData
     for (int col : colRefsForNonEquiCondition) {
         if (col < leftColsCount) {
-            extractRowValueToFilterArray(leftRow, col, col, vals.data(), nulls.data(), leftTypes[col]);
+            extractRowValueToFilterArray(leftRow, col, col, vals.data(), lengths.data(), nulls.data(), leftTypes[col]);
         } else {
             int rightColIdx = col - leftColsCount;
             extractRowValueToFilterArray(
-                rightRow, rightColIdx, col, vals.data(), nulls.data(), rightTypes[rightColIdx]);
+                rightRow, rightColIdx, col, vals.data(), lengths.data(), nulls.data(), rightTypes[rightColIdx]);
         }
     }
 
@@ -917,7 +954,7 @@ bool WindowJoinOperator<KeyType>::filter(RowData* leftRow, RowData* rightRow)
     bool result = generatedFilter(
         vals.data(),
         reinterpret_cast<bool*>(nulls.data()),
-        nullptr,
+        lengths.data(),
         &resultBool,
         nullptr,
         reinterpret_cast<int64_t>(&context));
