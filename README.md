@@ -318,5 +318,3 @@ OmniStream由华为公司的下列部门联合贡献：
 鲲鹏计算BoostKit开发部
 
 感谢来自社区的每一个PR，欢迎贡献OmniStream！
-
-12

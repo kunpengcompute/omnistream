@@ -15,6 +15,7 @@
 #include "table/data/binary/BinaryRowData.h"
 #include "table/data/RowData.h"
 #include "table/data/vectorbatch/VectorBatch.h"
+#include "table/runtime/dataview/StateDataViewStore.h"
 #include "streaming/api/operators/TimestampedCollector.h"
 
 /**
@@ -54,6 +55,13 @@ public:
 
     /** 释放资源。 */
     virtual void close() = 0;
+
+    /**
+     * 从算子获取 keyed 状态视图存储。持有 MapView 等 DataView 状态的实现类
+     * 必须覆盖本方法完成视图装配（算子经基类指针统一调用，故必须在契约声明）。
+     * 无状态实现可不覆盖。
+     */
+    virtual void open(StateDataViewStore* store) {}
 
     /**
      * 占用的 BinaryRowData 累加器槽位数（默认 0：表聚合成员走 keyed MapView 持久层，

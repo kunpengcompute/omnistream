@@ -62,7 +62,7 @@ public:
     ~RowNumberFunction() override = default;
 
     /** Obtain the keyed MapView from the operator-provided store (JsonArrayAggFunction pattern). */
-    void open(StateDataViewStore* store);
+    void open(StateDataViewStore* store) override;
 
     // ---- TableAggsHandleFunction contract ----
 

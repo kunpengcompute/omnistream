@@ -53,6 +53,7 @@
 #include "table/runtime/keyselector/KeySelector.h"
 #include "core/api/common/state/ValueState.h"
 #include "core/api/common/state/ValueStateDescriptor.h"
+#include "functions/OpenContext.h"
 #include "functions/RuntimeContext.h"
 #include "streaming/api/functions/KeyedProcessFunction.h"
 #include "streaming/api/operators/StreamingRuntimeContext.h"
@@ -111,7 +112,7 @@ private:
 
     // grouping (batch-path key extraction)
     std::vector<int32_t> keyedIndex;
-    std::vector<int> keyedTypes;
+    std::vector<int32_t> keyedTypes;
     KeySelector<RowData*>* groupByKeySelector = nullptr;
 
     // ---- runtime state ----
