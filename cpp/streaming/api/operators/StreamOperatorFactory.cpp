@@ -221,13 +221,16 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         LOG("Operator WindowTableFunctionOperator address " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);
     } else if (uniqueName == OPERATOR_NAME_WINDOW_INNER_JOIN ||
-               uniqueName == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN) {
+               uniqueName == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
+               uniqueName == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN) {
         auto opDescriptionJSON = opConfig.getDescription();
         std::string joinType =
             opDescriptionJSON.contains("joinType") ? opDescriptionJSON["joinType"].get<std::string>() : "InnerJoin";
         WindowJoinOperator<std::shared_ptr<RowData>>* op = nullptr;
         if (joinType == "LeftOuterJoin") {
             op = new LeftOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+        } else if (joinType == "RightOuterJoin") {
+            op = new RightOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
         } else {
             op = new InnerJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
         }
@@ -291,7 +294,8 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
     } else if (operatorID == OPERATOR_NAME_CONSTRAINTENFORCER) {
         return CreateConstraintEnforcerOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_WINDOW_INNER_JOIN ||
-               operatorID == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN) {
+               operatorID == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
+               operatorID == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN) {
         return CreateWindowInnerJoinOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_WINDOW_TABLE_FUNCTION) {
         return CreateWindowTableFunctionOp(opDesc, chainOutput, task);
@@ -702,6 +706,8 @@ StreamOperator* StreamOperatorFactory::CreateWindowInnerJoinOp(
     WindowJoinOperator<std::shared_ptr<RowData>>* op = nullptr;
     if (joinType == "LeftOuterJoin") {
         op = new LeftOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    } else if (joinType == "RightOuterJoin") {
+        op = new RightOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
     } else {
         op = new InnerJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
     }
