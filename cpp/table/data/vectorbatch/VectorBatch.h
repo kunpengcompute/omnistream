@@ -156,6 +156,31 @@ public:
         std::vector<std::string> inputTypes,
         const std::string& tzStr) const;
     void WriteString(std::ofstream& file, int vectorID, int rowID) const;
+    /**
+     * VectorHelper::CopyPositionsVector 构造副本时不传 dataTypeId，int64 承载的类型会退化成
+     * OMNI_LONG(2)。断链时批量要经 VectorBatch::copy 深拷贝，DECIMAL64 列因此丢失逻辑类型；
+     * 这里对 DECIMAL64 逐位置拷贝并保留类型 id（DECIMAL128 的模板默认 id 恰好正确）。
+     */
+    static omniruntime::vec::BaseVector* CopyPositionsKeepLogicalType(
+        omniruntime::vec::BaseVector* src, const int* positions, int offset, int length)
+    {
+        if (src == nullptr || src->GetTypeId() != OMNI_DECIMAL64 ||
+            src->GetEncoding() == omniruntime::vec::OMNI_DICTIONARY) {
+            return omniruntime::vec::VectorHelper::CopyPositionsVector(src, positions, offset, length);
+        }
+        auto* srcVector = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(src);
+        auto* copiedVector = new omniruntime::vec::Vector<int64_t>(length, OMNI_DECIMAL64);
+        for (int i = 0; i < length; i++) {
+            int32_t position = positions[offset + i];
+            if (srcVector->IsNull(position)) {
+                copiedVector->SetNull(i);
+                continue;
+            }
+            copiedVector->SetValue(i, srcVector->GetValue(position));
+        }
+        return copiedVector;
+    }
+
     VectorBatch* copy()
     {
         auto value = this;
@@ -167,8 +192,7 @@ public:
         std::iota(offsets.begin(), offsets.end(), 0);
 
         for (int i = 0; i < vectorCount; i++) {
-            copiedVectorBatch->Append(
-                omniruntime::vec::VectorHelper::CopyPositionsVector(value->Get(i), offsets.data(), 0, offsets.size()));
+            copiedVectorBatch->Append(CopyPositionsKeepLogicalType(value->Get(i), offsets.data(), 0, offsets.size()));
         }
         if (rowCount > 0) {
             memcpy_s(
