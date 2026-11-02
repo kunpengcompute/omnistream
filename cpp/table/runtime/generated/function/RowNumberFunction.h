@@ -11,9 +11,16 @@
  * Description: Native handler for the ROW_NUMBER table aggregate (Top-N leaderboard).
  *
  * Accumulator model = Scheme B (StateDataView / MapView), aligned with JsonArrayAggFunction:
- *   - keyed MapView<VoidNamespace, long, std::string> : insertion seqNo -> serialized member
- *     ("uniqueId \x1f sortKey"); double backend (heap / RocksDB) and checkpoint recovery are
- *     inherited from the keyed state itself.
+ *   - keyed MapView<VoidNamespace, long, long> : uniqueId -> sortKey.
+ *     The type pair is dictated by the state-backend dispatch tables
+ *     (HeapKeyedStateBackend / RocksdbKeyedStateBackend createOrUpdateInternalState):
+ *     a MapState's <UK, UV> is chosen from a whitelist of (BackendDataType keyId, valueId)
+ *     combinations, and (BIGINT_BK, BIGINT_BK) -> <int64_t, int64_t> is the combination that
+ *     is registered on BOTH backends and whose serializer (LongSerializer) round-trips
+ *     symmetrically. String-valued MapViews ((BIGINT, VARCHAR) -> <int64_t, std::string>,
+ *     the JSON_ARRAYAGG combination) only work on the heap backend: RocksDB really calls
+ *     StringSerializer, whose native payload type is std::u32string, so a std::string value
+ *     is type-punned to garbage there.
  *   - NO BinaryRowData accumulator slot is used (accumulatorSlots()==0), so the operator's
  *     accStartingIndex bookkeeping stays aligned with the Flink RAW-accType plan.
  *
@@ -23,9 +30,15 @@
  *
  * Semantics (v1 scope, documented deviations fall back to Java):
  *   - sort key: BIGINT only (POC auction bids); other types throw at construction.
- *   - unique key: STRING / BIGINT / INT column, required for retract matching and idempotence.
+ *   - unique key: BIGINT / INT column (numeric), required for retract matching and
+ *     idempotence; STRING and other types throw at construction and the plan falls back to
+ *     Java (a string unique key cannot be stored in the (BIGINT, BIGINT) MapView without a
+ *     lossy hash, which we refuse: idempotence must be exact).
  *   - Top-N bounds: rankStart fixed at 1; rankEnd = N. Members beyond rankEnd are evicted from
  *     both the in-memory board and the MapView (bounded state, Flink Top-N parity).
+ *   - rank order is the lexicographic (sortKey, uniqueId) order: equal sort keys are broken
+ *     deterministically by ascending uniqueId, identical on both backends and across restarts
+ *     (MapView iteration order itself is unspecified, so the board must never depend on it).
  *   - accumulate: filtered, idempotent by uniqueId; inserts in rank order, evicts the worst
  *     member when the board overflows.
  *   - retract: removes the member with the same uniqueId; retracting an already-evicted
@@ -93,11 +106,10 @@ public:
     }
 
 private:
-    /** One leaderboard member. seqNo is the MapView key (insertion order). */
+    /** One leaderboard member, identified by its unique key (numeric in v1). */
     struct LeaderboardMember {
-        long seqNo = 0;
+        long long uniqueId = 0;
         long long sortKey = 0; // BIGINT sort key (v1 scope)
-        std::string uniqueId;
     };
 
     /** Strict ordering: does candidate `a` rank strictly before `b`? */
@@ -106,13 +118,22 @@ private:
         return ascending ? a < b : a > b;
     }
 
-    static std::string serializeMember(const LeaderboardMember& member);
-    static LeaderboardMember deserializeMember(long seqNo, const std::string& text);
+    /**
+     * Full strict rank order: (sortKey, uniqueId) lexicographic. Equal sort keys are broken
+     * by ascending uniqueId so the board never depends on MapView iteration order.
+     */
+    static bool ranksBefore(long long sortA, long long idA, long long sortB, long long idB, bool ascending)
+    {
+        if (sortA != sortB) {
+            return betterThan(sortA, sortB, ascending);
+        }
+        return idA < idB;
+    }
 
-    /** Extract the unique-key column value as text (STRING / BIGINT / INT in v1). */
-    std::string extractUniqueId(RowData* input) const;
+    /** Extract the unique-key column value as a number (BIGINT / INT in v1). */
+    long long extractUniqueKey(RowData* input) const;
 
-    /** Rebuild sortedMembers + nextSeqNo from the MapView of the current key. */
+    /** Rebuild sortedMembers from the MapView of the current key. */
     void rebuildFromView();
 
     // ---- plan configuration ----
@@ -129,11 +150,10 @@ private:
 
     // ---- persistent layer (Scheme B) ----
     StateDataViewStore* store = nullptr;
-    KeyedStateMapViewWithKeysNotNull<VoidNamespace, long, std::string>* membersView = nullptr;
+    KeyedStateMapViewWithKeysNotNull<VoidNamespace, long, long>* membersView = nullptr;
 
     // ---- in-memory working copy: rank-ordered board of the current group ----
     std::vector<LeaderboardMember> sortedMembers;
-    long nextSeqNo = 0;
 
     /** typeIds of the emitted aggregate row [sortKey, rn] (both BIGINT in v1). */
     std::vector<int> aggValueTypeIds;
