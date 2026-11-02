@@ -141,9 +141,10 @@ protected:
 template <typename KeyType>
 void AbstractTopNFunction<KeyType>::parseDescription(const nlohmann::json& jsonString)
 {
-    // Parse partitionKey as an integer (assumes single value in array)
-    if (jsonString.contains("partitionKey") && jsonString["partitionKey"].is_array() &&
-        !jsonString["partitionKey"].empty()) {
+    // Parse partitionKey as an integer (assumes single value in array).
+    // An empty array is legal: the streaming Limit shape uses PartitionSpec.ALL_IN_ONE
+    // (single global partition, empty key row), so only a missing/non-array field throws.
+    if (jsonString.contains("partitionKey") && jsonString["partitionKey"].is_array()) {
         partitionKeyIndices = jsonString["partitionKey"].get<std::vector<int>>();
     } else {
         throw std::runtime_error("Missing or invalid partitionKey");

@@ -115,7 +115,8 @@ public:
           partitionKeyColId_(partitionKeyColId),
           sortColumnIds_(sortColumnIds),
           ascending_(ascending),
-          keySelector_(partitionKeyColType_, partitionKeyColId_)
+          keySelector_(partitionKeyColType_, partitionKeyColId_),
+          limitShape_(partitionKeyColId.empty() && sortColumnIds.empty())
     {
     }
 
@@ -179,6 +180,18 @@ public:
             return top1RowIds;
         }
 
+        // Streaming Limit shape: one global partition and arrival-order ranking
+        // make row 0 the deterministic winner. The generic path would pick an
+        // arbitrary row, because the per-pointer map entries iterate in
+        // unspecified order while all rows compare equal.
+        if (limitShape_) {
+            if (vectorBatch->GetRowCount() > 0) {
+                K key = keySelector_.getKey(vectorBatch, 0);
+                top1RowIds.emplace(key, 0);
+            }
+            return top1RowIds;
+        }
+
         // Map to store heaps for each partition key.
         std::unordered_map<K, CompositeKeyRef> partitionHeaps;
 
@@ -215,6 +228,9 @@ private:
     std::vector<int> sortColumnIds_;     // Columns to use for sorting.
     std::vector<bool> ascending_;        // Sorting order for each column.
     KeySelector<K> keySelector_;
+    // Streaming Limit shape (empty partition + empty sort, SortSpec.ANY): one
+    // global partition with arrival-order ranking.
+    bool limitShape_ = false;
 };
 
 #endif // FLINK_TNEL_TOP1COMPARATOR_H

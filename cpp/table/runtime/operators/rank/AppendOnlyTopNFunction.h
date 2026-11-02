@@ -43,9 +43,18 @@ public:
         : AbstractTopNFunction<K>(rankConfig),
           partitionKeySelector(this->partitionKeyTypeIds, this->partitionKeyIndices)
     {
-        if (this->sortKeyTypeIds.size() != 1 || this->sortKeyTypeIds[0] != OMNI_LONG || this->sortOrder[0]) {
+        // An empty sort key list is the streaming Limit shape (SortSpec.ANY):
+        // every row ranks in arrival order within one constant group - all sort
+        // comparisons degenerate to "equal" (FirstN semantics). The general
+        // shape supports a single BIGINT descending key only.
+        if (this->sortKeyTypeIds.size() > 1) {
             NOT_IMPL_EXCEPTION;
         }
+        if (this->sortKeyTypeIds.size() == 1 &&
+            (this->sortKeyTypeIds[0] != OMNI_LONG || this->sortOrder[0])) {
+            NOT_IMPL_EXCEPTION;
+        }
+        limitShape = this->partitionKeyIndices.empty();
     }
 
     ~AppendOnlyTopNFunction() = default;
@@ -53,7 +62,11 @@ public:
     void open(const Configuration& context) override
     {
         int inputArity = static_cast<int>(this->inputRowType->size());
-        std::vector<std::string> sortTypeNames{(*this->inputTypeNames)[this->sortKeyIndices[0]]};
+        // Streaming Limit shape: arity-0 sort key type (the single constant group).
+        std::vector<std::string> sortTypeNames{};
+        if (!this->sortKeyIndices.empty()) {
+            sortTypeNames.push_back((*this->inputTypeNames)[this->sortKeyIndices[0]]);
+        }
         omnistream::RowType sortKeyType(false, sortTypeNames);
         auto* sortKeySer = new RowDataSerializer(&sortKeyType);
         omnistream::RowType inputType(false, *this->inputTypeNames);
@@ -80,7 +93,8 @@ public:
         std::vector<OutRow> outputs;
         std::vector<RowData*> deleteAfterOutput;
         std::unordered_map<int64_t, RowData*> retainedKeys;
-        std::unordered_map<K, PartitionWork, PartitionKeyHash, PartitionKeyEq> partitionWork;
+        std::unordered_map<K, PartitionWork, PartitionKeyHash, PartitionKeyEq> partitionWork(
+            16, PartitionKeyHash{this}, PartitionKeyEq{this});
         std::vector<K> touched;
 
         for (int i = 0; i < rowCnt; ++i) {
@@ -163,6 +177,9 @@ private:
     MapState<RowData*, std::vector<RowData*>*>* dataState = nullptr;
     omnistream::StateType stateType_ = omnistream::StateType::UNKNOWN;
     KeySelector<K> partitionKeySelector;
+    // Streaming Limit shape (empty partition key, ALL_IN_ONE): one global
+    // partition, the key row is the constant arity-0 row.
+    bool limitShape = false;
 
     static bool samePartition(const K& left, const K& right)
     {
@@ -174,9 +191,16 @@ private:
     }
 
     struct PartitionKeyHash {
+        const AppendOnlyTopNFunction* fn = nullptr;
         size_t operator()(const K& key) const
         {
             if constexpr (std::is_same<K, RowData*>::value) {
+                // Streaming Limit shape: every row shares the arity-0 key, so all
+                // keys must hash (and compare) equal - reading getLong(0) on the
+                // empty key row would throw IndexOutOfBoundsException.
+                if (fn != nullptr && fn->limitShape) {
+                    return 0;
+                }
                 return key == nullptr ? 0 : std::hash<int64_t>{}(*key->getLong(0));
             } else {
                 return std::hash<K>{}(key);
@@ -185,8 +209,16 @@ private:
     };
 
     struct PartitionKeyEq {
+        const AppendOnlyTopNFunction* fn = nullptr;
         bool operator()(const K& left, const K& right) const
         {
+            if (fn != nullptr && fn->limitShape) {
+                if constexpr (std::is_same<K, RowData*>::value) {
+                    return left == right || (left != nullptr && right != nullptr);
+                } else {
+                    return left == right;
+                }
+            }
             return samePartition(left, right);
         }
     };
@@ -194,6 +226,16 @@ private:
     K retainKey(K key, std::unordered_map<int64_t, RowData*>& retainedKeys)
     {
         if constexpr (std::is_same<K, RowData*>::value) {
+            // Streaming Limit shape: single slot for the one arity-0 key.
+            if (limitShape) {
+                auto found = retainedKeys.find(0);
+                if (found != retainedKeys.end()) {
+                    delete key;
+                    return found->second;
+                }
+                retainedKeys.emplace(0, key);
+                return key;
+            }
             int64_t id = *key->getLong(0);
             auto found = retainedKeys.find(id);
             if (found != retainedKeys.end()) {
@@ -229,6 +271,12 @@ private:
 
     void readBatchSort(omnistream::VectorBatch* batch, int row, bool& isNull, int64_t& value) const
     {
+        if (this->sortKeyIndices.empty()) {
+            // Streaming Limit shape: no sort column, every row is equal.
+            isNull = false;
+            value = 0;
+            return;
+        }
         auto* column = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(this->sortKeyIndices[0]));
         if (column->IsNull(row)) {
             isNull = true;
@@ -246,6 +294,10 @@ private:
 
     RowData* makeSortKey(bool isNull, int64_t value) const
     {
+        if (this->sortKeyIndices.empty()) {
+            // Streaming Limit shape: the constant arity-0 group key.
+            return BinaryRowData::createBinaryRowDataWithMem(0);
+        }
         auto* row = BinaryRowData::createBinaryRowDataWithMem(1);
         if (isNull) {
             row->setNullAt(0);
@@ -259,6 +311,12 @@ private:
     {
         if (key == nullptr) {
             throw std::runtime_error("AppendOnlyTopNFunction sort key is missing");
+        }
+        if (this->sortKeyIndices.empty()) {
+            // Streaming Limit shape: the single arity-0 key row is never null.
+            isNull = false;
+            value = 0;
+            return;
         }
         isNull = key->isNullAt(0);
         value = isNull ? 0 : *key->getLong(0);
