@@ -49,8 +49,9 @@ public:
         int64_t checkpointInterval)
         : recordDeserializers(std::move(recordDeserializers)),
           inputIndex(inputIndex),
-          inputGate(std::move(inputGate)),
+          inputGate(inputGate),
           taskType(taskType),
+          inputFormat_(taskType == 1 ? inputGate->getInputFormat() : InputFormat::FLINK_ROW),
           currentRecordDeserializer(nullptr),
           output_(nullptr),
           statusWatermarkValve_(this->inputGate->GetNumberOfInputChannels()),
@@ -75,8 +76,9 @@ public:
         std::vector<long>& channelInfos,
         int64_t checkpointInterval)
         : inputIndex(inputIndex),
-          inputGate(std::move(inputGate)),
+          inputGate(inputGate),
           taskType(taskType),
+          inputFormat_(taskType == 1 ? inputGate->getInputFormat() : InputFormat::FLINK_ROW),
           currentRecordDeserializer(nullptr),
           output_(nullptr),
           statusWatermarkValve_(this->inputGate->GetNumberOfInputChannels()),
@@ -105,8 +107,7 @@ public:
         output->setTaskType(taskType);
 
         if (taskType == 1) {
-            fromOriginal = inputGate->fromOriginal();
-            if (fromOriginal) {
+            if (inputFormat_ == InputFormat::FLINK_ROW) {
                 if (!isStartTimer) {
                     INFO_RELEASE("Start timer thread");
                     timer_thread_ = std::thread(&OmniAbstractStreamTaskNetworkInput::timerThread, this);
@@ -453,14 +454,14 @@ public:
     omnistream::VectorBatch* createOutputBatch(
         std::vector<BinaryRowData*> collectedRows, const std::vector<std::string>& inputTypes)
     {
-        INFO_RELEASE("Start to createOutputBatch");
+        // INFO_RELEASE("Start to createOutputBatch");
         int numColumns = inputTypes.size();
         auto inputRowType = new std::vector<omniruntime::type::DataTypeId>;
         for (const auto& typeStr : inputTypes) {
             inputRowType->push_back(LogicalType::flinkTypeToOmniTypeId(typeStr));
         }
         int numRows = collectedRows.size();
-        INFO_RELEASE("collectedRows: " << collectedRows.size());
+        // INFO_RELEASE("collectedRows: " << collectedRows.size());
         auto* outputBatch = new omnistream::VectorBatch(numRows);
         for (int colIndex = 0; colIndex < numColumns; ++colIndex) {
             switch (inputRowType->at(colIndex)) {
@@ -745,6 +746,12 @@ protected:
                 INFO_RELEASE("received a end of recovery event end");
                 return DataInputStatus::END_OF_RECOVERY;
             }
+        } else if (dynamic_cast<InnerRecoverEvent*>(event.get())) {
+            INFO_RELEASE("received a inner recovery event start");
+            if (inputGate->AllInnerChannelsRecovered()) {
+                INFO_RELEASE("received a inner recovery event end");
+                return DataInputStatus::INNER_RECOVER;
+            }
         }
         // by default,continue the data processing
         return DataInputStatus::MORE_AVAILABLE;
@@ -757,11 +764,10 @@ protected:
     int NullValueCount = 0;
     bool isLastValueNull = false;
     int taskType;
+    const InputFormat inputFormat_;
     RecordDeserializer* currentRecordDeserializer;
     std::unique_ptr<DeserializationDelegate> deserializationDelegate_;
     TypeSerializer* inSerializer;
-    // Determine if the upstream task is an original Java task.
-    bool fromOriginal = true;
     // When the current SQL task has a Java task as its upstream,
     // maintain the number of rows accumulated for generating VectorBatch.
     int rowCount;

@@ -24,7 +24,7 @@ Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingV
     jlong nativeTask,
     jlong resultBufferAddress,
     jstring partitionIdJson,
-    jint subPartitionId)
+    jint subPartitionId, jboolean downStreamIsNative)
 {
     const char* paritionIdChars = jniEnv->GetStringUTFChars(partitionIdJson, nullptr);
     std::string paritionIdStr(paritionIdChars);
@@ -35,7 +35,7 @@ Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingV
 
     auto task = reinterpret_cast<omnistream::OmniTask*>(nativeTask);
     return task->createNativeCreditBasedSequenceNumberingViewReader(
-        resultBufferAddress, partitionIdPOD, subPartitionId);
+        resultBufferAddress, partitionIdPOD, subPartitionId, downStreamIsNative);
 }
 
 JNIEXPORT jint JNICALL

@@ -37,20 +37,6 @@ std::vector<InputChannelInfo> InputGate::getChannelInfos()
     return channelInfos;
 }
 
-bool InputGate::fromOriginal()
-{
-    // Determine whether all InputChannelInfo have the omni type.
-    // Once it exists, it indicates that the upstream task is an original Java task.
-    bool res = false;
-    for (int index = 0; index < GetNumberOfInputChannels(); index++) {
-        if (getChannel(index)->getChannelInfo().getOmni()) {
-            res = true;
-            break;
-        }
-    }
-    return res;
-}
-
 std::shared_ptr<CompletableFuture> InputGate::getPriorityEventAvailableFuture()
 {
     return priorityAvailabilityHelper.GetAvailableFuture();

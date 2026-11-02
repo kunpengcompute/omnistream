@@ -78,6 +78,7 @@ try {
     omnistream::TaskDeploymentDescriptorPOD tddinfo = tdd;
     auto resources = resourceHandle == 0 ? nullptr : NativeRocksDBResourceRegistry::instance().acquire(resourceHandle);
     INFO_RELEASE("Omni RocksDB task resource: task=" << taskInfo.getTaskName() << ", handle=" << resourceHandle);
+    taskInfo.validateInputGateCount(tddinfo.getInputGates().size());
 
     auto omniTaskExecutor = reinterpret_cast<omnistream::OmniTaskExecutor*>(nativeTaskExecutorAddress);
     std::shared_ptr<RemoteDataFetcherBridge> remoteDataFetcherBridge = std::make_shared<RemoteDataFetcherBridgeImpl>();
@@ -136,6 +137,7 @@ try {
     omnistream::TaskDeploymentDescriptorPOD tddinfo = tdd;
     auto resources = resourceHandle == 0 ? nullptr : NativeRocksDBResourceRegistry::instance().acquire(resourceHandle);
     INFO_RELEASE("Omni RocksDB task resource: task=" << taskInfo.getTaskName() << ", handle=" << resourceHandle);
+    taskInfo.validateInputGateCount(tddinfo.getInputGates().size());
     jobject globalTaskStateRef = jniEnv->NewGlobalRef(taskStateManagerWrapper);
     if (globalTaskStateRef == nullptr) {
         LOG_TRACE("Failed to create global reference for TaskState!");

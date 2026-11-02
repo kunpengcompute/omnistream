@@ -106,7 +106,7 @@ public:
         int bufferType);
 
     long createNativeCreditBasedSequenceNumberingViewReader(
-        long resultBufferAddress, ResultPartitionIDPOD partitionId, int subPartitionId);
+        long resultBufferAddress, ResultPartitionIDPOD partitionId, int subPartitionId, bool downStreamIsNative);
     void notifyCheckpointAborted(long checkpointid, long latestCompletedCheckpointId);
     void notifyCheckpointComplete(long checkpointID, long inputState);
     void notifyCheckpointSubsumed(long latestCompletedCheckpointId);

@@ -25,6 +25,7 @@
 #include "InputChannel.h"
 
 #include "InputChannelInfo.h"
+#include "InputFormat.h"
 #include "partition/ChannelStateHolder.h"
 #include <event/TaskEvent.h>
 #include "core/utils/threads/CompletableFutureV2.h"
@@ -53,7 +54,8 @@ public:
     virtual std::shared_ptr<InputChannel> getChannel(int channelIndex) = 0;
 
     std::vector<InputChannelInfo> getChannelInfos();
-    bool fromOriginal();
+    void initializeInputFormat(InputFormat format) { inputFormat_.initialize(format); }
+    InputFormat getInputFormat() const { return inputFormat_.get(); }
 
     std::shared_ptr<CompletableFuture> getPriorityEventAvailableFuture();
 
@@ -63,6 +65,9 @@ public:
     virtual std::vector<bool> getStateConsumedFuture1() = 0;
     virtual void FinishReadRecoveredState() = 0;
     virtual void FinishInnerRecoveredState() {};
+
+private:
+    InputFormatState inputFormat_;
 
 protected:
     AvailabilityHelper availabilityHelper;

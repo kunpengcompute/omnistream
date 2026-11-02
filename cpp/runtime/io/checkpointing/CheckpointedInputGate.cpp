@@ -144,9 +144,9 @@ int CheckpointedInputGate::GetNumberOfInputChannels() const
     return inputGate_->GetNumberOfInputChannels();
 }
 
-bool CheckpointedInputGate::fromOriginal()
+InputFormat CheckpointedInputGate::getInputFormat() const
 {
-    return inputGate_->fromOriginal();
+    return inputGate_->getInputFormat();
 }
 
 std::shared_ptr<InputChannel> CheckpointedInputGate::GetChannel(int channelIndex)
