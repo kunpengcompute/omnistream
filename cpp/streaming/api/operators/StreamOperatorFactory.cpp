@@ -755,6 +755,9 @@ StreamOperator* StreamOperatorFactory::CreateStreamingFileWriterOp(
 
     auto* op = new StreamingFileWriter<omnistream::VectorBatch*>(bucketCheckInterval, bucketsBuilder);
     op->setOutput(chainOutput);
+    // 文件 sink 的 bucket 检查定时器必须挂在 task 的 processing time service 上：
+    // 回调经 mailbox 投递，在算子主线程执行，不会与 processBatch/endInput 并发访问 Buckets。
+    op->setProcessingTimeService(task->createProcessingTimeService());
     op->setup();
     // SP-INTEROP: StreamingFileWriter 无 managed keyed state，Omni 原生格式即为 Flink 兼容。
     op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
