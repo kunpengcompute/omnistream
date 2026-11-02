@@ -151,7 +151,7 @@ struct GroupTableAggTestRig {
     }
 };
 
-GroupTableAggTestRig makeRig(bool generateUpdateBefore, const std::string& backend)
+GroupTableAggTestRig makeRig(bool generateUpdateBefore, const std::string& backend, int uniqueKeyIndex = 1)
 {
     std::string description = R"DELIM({
         "input_channels": [0],
@@ -190,6 +190,13 @@ GroupTableAggTestRig makeRig(bool generateUpdateBefore, const std::string& backe
 
     json parsedJson = json::parse(description);
     parsedJson["operators"][0]["description"]["generateUpdateBefore"] = generateUpdateBefore;
+    if (uniqueKeyIndex == -1) {
+        // Keyless mode: the Java side omits the field entirely when the plan has no identity
+        // column (Top2 acceptance SQL); exercise that exact JSON shape here.
+        parsedJson["operators"][0]["description"].erase("uniqueKeyIndex");
+    } else {
+        parsedJson["operators"][0]["description"]["uniqueKeyIndex"] = uniqueKeyIndex;
+    }
 
     omnistream::OperatorConfig opConfig(
         "org.apache.flink.streaming.api.operators.KeyedProcessOperator",
@@ -450,4 +457,48 @@ TEST(GroupTableAggregateFunctionTest, DuplicateBidIsIdempotent)
 
     // One member on the board: exactly one retraction and one new-value row.
     expectOutput(*rig.output, {"-U|1|5000|1", "+U|1|5000|1"}, "bonus-duplicate-idempotent");
+}
+
+// ---------------------------------------------------------------------------
+// Keyless mode (uniqueKeyIndex missing): the acceptance SQL shape. The input row of the
+// GroupTableAggregate is [grouping key, UDF argument] with no identity column, so the
+// ledger key degenerates to the insertion sequence and idempotence is off. With distinct
+// prices the changelog must be byte-identical to the keyed mode (idempotence never fires).
+TEST(GroupTableAggregateFunctionTest, NoUniqueKeyMatchesFlinkTop2)
+{
+    auto rig = makeRig(true, "HashMapStateBackend", -1);
+
+    rig.feed(1, 1, 5000); // 张三
+    rig.feed(1, 2, 8000); // 李四
+    rig.feed(1, 3, 6500); // 王五
+    rig.feed(1, 4, 9000); // 赵六
+
+    // Same 12-row changelog as MultiRowOutputCorrectness (keyed mode): the board content
+    // only depends on (price, arrival order), both identical here.
+    expectOutput(
+        *rig.output,
+        {"+I|1|5000|1",
+         "-U|1|5000|1", "+U|1|8000|1", "+U|1|5000|2",
+         "-U|1|8000|1", "-U|1|5000|2", "+U|1|8000|1", "+U|1|6500|2",
+         "-U|1|8000|1", "-U|1|6500|2", "+U|1|9000|1", "+U|1|8000|2"},
+        "keyless-top2-changelog");
+}
+
+// ---------------------------------------------------------------------------
+// Keyless mode semantics fork: the SAME price arriving twice ranks twice (plain Flink Top2
+// TableAggregateFunction semantics -- accumulate() lets an equal value take the second
+// place). The keyed mode would instead drop the second row as a duplicate identity.
+TEST(GroupTableAggregateFunctionTest, NoUniqueKeyDuplicateValueRanksTwice)
+{
+    auto rig = makeRig(true, "HashMapStateBackend", -1);
+
+    rig.feed(1, 1, 5000);
+    rig.feed(1, 2, 5000); // same price, different bidder: still ranks twice
+
+    // First row: single-member board (+I). Second row: two equal prices on the board,
+    // earlier arrival ranks first (insertion-order tie-break = seqNo ascending).
+    expectOutput(
+        *rig.output,
+        {"+I|1|5000|1", "-U|1|5000|1", "+U|1|5000|1", "+U|1|5000|2"},
+        "keyless-duplicate-price");
 }

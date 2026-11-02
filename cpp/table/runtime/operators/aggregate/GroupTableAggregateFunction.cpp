@@ -82,18 +82,20 @@ void GroupTableAggregateFunction::parseDescription(const nlohmann::json& config)
     }
 
     // Unique key column: member identity for retract matching and idempotence.
-    uniqueKeyIndex = config.at("uniqueKeyIndex").get<int>();
+    // Missing / -1 = keyless mode (plain Top2 TableAggregateFunction semantics: the
+    // acceptance SQL input row is [grouping key, UDF argument] with no identity column).
+    uniqueKeyIndex = config.value("uniqueKeyIndex", -1);
 
     // Column types come from the input row type.
     const auto inputTypes = config.at("inputTypes").get<std::vector<std::string>>();
     if (sortKeyIndex < 0 || sortKeyIndex >= static_cast<int>(inputTypes.size())) {
         throw std::runtime_error("GroupTableAggregateFunction: sortFieldIndices out of range");
     }
-    if (uniqueKeyIndex < 0 || uniqueKeyIndex >= static_cast<int>(inputTypes.size())) {
+    if (uniqueKeyIndex >= static_cast<int>(inputTypes.size())) {
         throw std::runtime_error("GroupTableAggregateFunction: uniqueKeyIndex out of range");
     }
     sortKeyType = inputTypes[sortKeyIndex];
-    uniqueKeyType = inputTypes[uniqueKeyIndex];
+    uniqueKeyType = (uniqueKeyIndex == -1) ? "" : inputTypes[uniqueKeyIndex];
 
     // Optional FILTER on the aggregate call.
     if (config.contains("aggInfoList") && config["aggInfoList"].contains("aggregateCalls")) {

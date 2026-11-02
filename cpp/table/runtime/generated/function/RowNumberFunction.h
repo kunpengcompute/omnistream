@@ -30,10 +30,15 @@
  *
  * Semantics (v1 scope, documented deviations fall back to Java):
  *   - sort key: BIGINT only (POC auction bids); other types throw at construction.
- *   - unique key: BIGINT / INT column (numeric), required for retract matching and
- *     idempotence; STRING and other types throw at construction and the plan falls back to
- *     Java (a string unique key cannot be stored in the (BIGINT, BIGINT) MapView without a
- *     lossy hash, which we refuse: idempotence must be exact).
+ *   - unique key: BIGINT / INT column (numeric), used for retract matching and idempotence;
+ *     STRING and other types throw at construction and the plan falls back to Java (a string
+ *     unique key cannot be stored in the (BIGINT, BIGINT) MapView without a lossy hash,
+ *     which we refuse: idempotence must be exact).
+ *   - keyless mode (uniqueKeyIndex == -1): the ledger key degenerates to the insertion
+ *     sequence number and the idempotence check is OFF. This mirrors plain Flink
+ *     TableAggregateFunction semantics (e.g. the Top2 UDF: the same value arriving twice
+ *     ranks twice), which is what the acceptance SQL produces -- its input row is
+ *     [grouping key, UDF argument] with no identity column.
  *   - Top-N bounds: rankStart fixed at 1; rankEnd = N. Members beyond rankEnd are evicted from
  *     both the in-memory board and the MapView (bounded state, Flink Top-N parity).
  *   - rank order is the lexicographic (sortKey, uniqueId) order: equal sort keys are broken
@@ -106,7 +111,11 @@ public:
     }
 
 private:
-    /** One leaderboard member, identified by its unique key (numeric in v1). */
+    /**
+     * One leaderboard member. uniqueId is the member's identity AND the MapView ledger key:
+     * the unique-key column value in keyed mode, or the insertion sequence number in
+     * keyless mode (uniqueKeyIndex == -1).
+     */
     struct LeaderboardMember {
         long long uniqueId = 0;
         long long sortKey = 0; // BIGINT sort key (v1 scope)
@@ -141,7 +150,7 @@ private:
     int sortKeyId = 0; // omni DataTypeId of the sort column
     bool sortAscending;
     long rankEnd; // Top-N capacity N (rankStart fixed at 1 in v1)
-    int uniqueKeyIndex;
+    int uniqueKeyIndex; // -1 = keyless mode (see class comment)
     std::string uniqueKeyTypeName;
     int aggFuncIndex;
     int filterIndex;
@@ -154,6 +163,8 @@ private:
 
     // ---- in-memory working copy: rank-ordered board of the current group ----
     std::vector<LeaderboardMember> sortedMembers;
+    // Keyless-mode ledger key generator (insertion sequence); unused in keyed mode.
+    long nextSeqNo = 0;
 
     /** typeIds of the emitted aggregate row [sortKey, rn] (both BIGINT in v1). */
     std::vector<int> aggValueTypeIds;

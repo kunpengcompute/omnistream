@@ -45,10 +45,13 @@ RowNumberFunction::RowNumberFunction(
     if (sortKeyType != "BIGINT") {
         throw std::runtime_error("RowNumberFunction v1 only supports BIGINT sort key, got: " + sortKeyType);
     }
-    // v1 scope: numeric unique key only (BIGINT / INT). The ledger is a (BIGINT, BIGINT)
-    // MapView (the only serializer-symmetric combination on both backends -- see the class
-    // comment), so a STRING unique key cannot be stored exactly and must fall back to Java.
-    if (uniqueKeyType != "BIGINT" && uniqueKeyType != "INT") {
+    // v1 scope: numeric unique key (BIGINT / INT) or keyless (-1). The ledger is a (BIGINT,
+    // BIGINT) MapView (the only serializer-symmetric combination on both backends -- see the
+    // class comment), so a STRING unique key cannot be stored exactly and must fall back to
+    // Java. Keyless mode mirrors plain Flink TableAggregateFunction semantics (Top2 UDF).
+    if (uniqueKeyIndex == -1) {
+        LOG("RowNumberFunction: keyless mode (uniqueKeyIndex == -1), idempotence is off");
+    } else if (uniqueKeyType != "BIGINT" && uniqueKeyType != "INT") {
         throw std::runtime_error("RowNumberFunction v1 only supports BIGINT/INT unique key, got: " + uniqueKeyType);
     }
     if (rankEnd < 1) {
@@ -97,39 +100,47 @@ void RowNumberFunction::accumulate(RowData* input)
             return;
         }
     }
-    const long long uniqueId = extractUniqueKey(input);
     if (input->isNullAt(sortKeyIndex)) {
         // NULL sort key never ranks: skip (Flink ORDER BY NULLS placement is a v2 topic).
         return;
     }
     const long long sortKey = static_cast<long long>(*(input->getLong(sortKeyIndex)));
 
-    // Idempotence: a replayed/duplicated member is dropped instead of double-counted.
-    for (const auto& member : sortedMembers) {
-        if (member.uniqueId == uniqueId) {
-            LOG("RowNumberFunction: duplicate member " << uniqueId << " ignored");
-            return;
+    // Member identity = the MapView ledger key. Keyed mode: the unique-key column value,
+    // checked for idempotence (a replayed member is dropped instead of double-counted).
+    // Keyless mode: the insertion sequence number, no idempotence -- the same value ranks
+    // twice, mirroring plain Flink Top2 TableAggregateFunction semantics.
+    long long memberKey;
+    if (uniqueKeyIndex == -1) {
+        memberKey = nextSeqNo++;
+    } else {
+        memberKey = extractUniqueKey(input);
+        for (const auto& member : sortedMembers) {
+            if (member.uniqueId == memberKey) {
+                LOG("RowNumberFunction: duplicate member " << memberKey << " ignored");
+                return;
+            }
         }
     }
 
     // Admission check: only enter if the board is not full or we rank before the worst member.
     const bool boardNotFull = static_cast<long>(sortedMembers.size()) < rankEnd;
     const bool beatsWorst = !sortedMembers.empty()
-        && ranksBefore(sortKey, uniqueId, sortedMembers.back().sortKey, sortedMembers.back().uniqueId, sortAscending);
+        && ranksBefore(sortKey, memberKey, sortedMembers.back().sortKey, sortedMembers.back().uniqueId, sortAscending);
     if (!boardNotFull && !beatsWorst) {
         return; // ranks below the whole Top-N board: no state change, no output change
     }
 
-    // Insert in rank order (index 0 = rank 1), full (sortKey, uniqueId) order.
-    const LeaderboardMember member{uniqueId, sortKey};
+    // Insert in rank order (index 0 = rank 1), full (sortKey, memberKey) order.
+    const LeaderboardMember member{memberKey, sortKey};
     size_t pos = 0;
     while (pos < sortedMembers.size()
            && ranksBefore(
-               sortedMembers[pos].sortKey, sortedMembers[pos].uniqueId, sortKey, uniqueId, sortAscending)) {
+               sortedMembers[pos].sortKey, sortedMembers[pos].uniqueId, sortKey, memberKey, sortAscending)) {
         ++pos;
     }
     sortedMembers.insert(sortedMembers.begin() + static_cast<long>(pos), member);
-    membersView->put(std::optional<long>{static_cast<long>(uniqueId)}, static_cast<long>(sortKey));
+    membersView->put(std::optional<long>{static_cast<long>(memberKey)}, static_cast<long>(sortKey));
 
     // Eviction: the worst member leaves both the in-memory board and the MapView (bounded state).
     if (static_cast<long>(sortedMembers.size()) > rankEnd) {
@@ -148,6 +159,12 @@ void RowNumberFunction::retract(RowData* input)
         if (filterNull || !*(input->getBool(filterIndex))) {
             return;
         }
+    }
+    if (uniqueKeyIndex == -1) {
+        // Keyless mode cannot identify which member a retraction targets. The acceptance
+        // plan is append-only (the Top2 UDF declares no retract), so this path is defensive.
+        LOG("RowNumberFunction: retract in keyless mode ignored (no member identity)");
+        return;
     }
     const long long uniqueId = extractUniqueKey(input);
     for (auto it = sortedMembers.begin(); it != sortedMembers.end(); ++it) {
@@ -183,6 +200,7 @@ void RowNumberFunction::cleanup()
 {
     // Group death: drop the whole board of the current key from memory and the MapView.
     sortedMembers.clear();
+    nextSeqNo = 0; // keyless-mode ledger keys restart from 0 once the board is gone
     if (membersView == nullptr) {
         return;
     }
@@ -244,10 +262,14 @@ void RowNumberFunction::rebuildFromView()
     if (entries == nullptr) {
         return;
     }
+    long long maxKey = -1;
     for (const auto& entry : *entries) {
         sortedMembers.push_back(LeaderboardMember{
             static_cast<long long>(entry.first), static_cast<long long>(entry.second)});
+        maxKey = std::max(maxKey, static_cast<long long>(entry.first));
     }
+    // Keyless mode: the ledger keys are insertion sequence numbers, so resume past the max.
+    nextSeqNo = static_cast<long>(maxKey + 1);
     // Full (sortKey, uniqueId) order; MapView iteration order is unspecified and must not leak
     // into the board (deterministic output on both backends and across restarts).
     std::sort(
