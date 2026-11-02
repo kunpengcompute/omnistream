@@ -40,10 +40,14 @@ public:
     void initializeState(StreamTaskStateInitializerImpl* initializer, TypeSerializer* keySerializer) override
     {
         AbstractStreamOperator<OUT>::initializeState(initializer, keySerializer);
-        // initializeState 可能被重复调用，先释放上一轮的定时服务和运行时对象，避免线程与定时器残留
-        releaseRuntime();
+        // initializeState 可能被重复调用：先按"关闭"语义回收上一轮的 helper/buckets，
+        // 避免泄漏，以及上一轮未 finalize 的 part 文件一直挂在文件系统里。
+        closeRuntime();
         buckets = bucketsBuilder->createBuckets(this->getRuntimeContext()->getIndexOfThisSubtask());
-        procTimeService = new SystemProcessingTimeService();
+        // 定时器挂在 task 的 processing time service 上（由 StreamOperatorFactory::CreateStreamingFileWriterOp 注入）：
+        // 回调经 mailbox 投递、在算子主线程执行，与 processBatch/endInput/snapshotState 天然串行。
+        // 自建 SystemProcessingTimeService 会引入独立 worker 线程，与算子主线程并发访问 Buckets，导致 coredump。
+        procTimeService = this->getProcessingTimeService();
         helper = new StreamingFileSinkHelper<IN>(buckets, procTimeService, bucketCheckInterval);
     }
 
@@ -115,7 +119,8 @@ public:
     void close() override
     {
         AbstractStreamOperator<OUT>::close();
-        releaseRuntime();
+        // 没有 endInput 的路径（流式作业 cancel、任务失败、JM 主动关闭）靠这里把未完成的 part 文件落盘收尾。
+        closeRuntime();
     }
 
     virtual ~AbstractStreamingWriter()
@@ -131,15 +136,15 @@ public:
     }
 
 private:
-    void releaseRuntime()
+    // 回收 sink 的运行时对象：
+    //   1. helper->close() → Buckets::commitUpToCheckpoint(-1) → 每个活跃 bucket 的
+    //      onProcessingTime(LONG_MAX)，即把正在写的 part 文件 finalize（与 endInput 同一语义）；
+    //   2. 释放 helper 与 bucket 树。
+    // 不在这里关闭定时器服务：processingTimeService 由 StreamOperatorFactory 注入、归 task 所有，
+    // 由 ~OmniStreamTask 统一 shutdown（其回调只投递到 mailbox，这里也不会再有残留回调执行）。
+    void closeRuntime()
     {
-        // bucket 检查定时器每隔 bucketCheckInterval 会以 helper 为回调重新注册自己，所以必须先停服务
-        // （内部会 join worker 线程）再删 helper，否则 worker 会在 helper 释放之后回调到已释放内存。
-        if (procTimeService != nullptr) {
-            procTimeService->shutdownService();
-            delete procTimeService;
-            procTimeService = nullptr;
-        }
+        procTimeService = nullptr;
         if (helper != nullptr) {
             helper->close();
             delete helper;
@@ -154,7 +159,7 @@ private:
 protected:
     Buckets<IN, std::string>* buckets;
     StreamingFileSinkHelper<IN>* helper;
-    SystemProcessingTimeService* procTimeService;
+    ProcessingTimeService* procTimeService;
     long currentWatermark;
 
     virtual void partitionCreated(const std::string& partition)
