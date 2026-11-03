@@ -50,6 +50,7 @@
 #include "table/runtime/operators/join/window/InnerJoinOperator.h"
 #include "table/runtime/operators/join/window/LeftOuterJoinOperator.h"
 #include "table/runtime/operators/join/window/RightOuterJoinOperator.h"
+#include "table/runtime/operators/join/window/FullOuterJoinOperator.h"
 #include "runtime/operators/window/AggregateWindowOperator.h"
 #include "runtime/operators/window/tvf/WindowTableFunctionOperator.h"
 #include "datagen/meituan/JoinSource.h"
@@ -225,7 +226,8 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         return static_cast<OneInputStreamOperator*>(op);
     } else if (uniqueName == OPERATOR_NAME_WINDOW_INNER_JOIN ||
                uniqueName == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
-               uniqueName == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN) {
+               uniqueName == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN ||
+               uniqueName == OPERATOR_NAME_WINDOW_FULL_OUTER_JOIN) {
         auto opDescriptionJSON = opConfig.getDescription();
         std::string joinType =
             opDescriptionJSON.contains("joinType") ? opDescriptionJSON["joinType"].get<std::string>() : "InnerJoin";
@@ -234,6 +236,8 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
             op = new LeftOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
         } else if (joinType == "RightOuterJoin") {
             op = new RightOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+        } else if (joinType == "FullOuterJoin") {
+            op = new FullOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
         } else {
             op = new InnerJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
         }
@@ -298,7 +302,8 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         return CreateConstraintEnforcerOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_WINDOW_INNER_JOIN ||
                operatorID == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
-               operatorID == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN) {
+               operatorID == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN ||
+               operatorID == OPERATOR_NAME_WINDOW_FULL_OUTER_JOIN) {
         return CreateWindowJoinOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_WINDOW_TABLE_FUNCTION) {
         return CreateWindowTableFunctionOp(opDesc, chainOutput, task);
@@ -734,6 +739,8 @@ StreamOperator* StreamOperatorFactory::CreateWindowJoinOp(
         op = new LeftOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
     } else if (joinType == "RightOuterJoin") {
         op = new RightOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    } else if (joinType == "FullOuterJoin") {
+        op = new FullOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
     } else {
         op = new InnerJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
     }
