@@ -162,7 +162,7 @@ public:
      * 这里对 DECIMAL64 逐位置拷贝并保留类型 id（DECIMAL128 的模板默认 id 恰好正确）。
      */
     static omniruntime::vec::BaseVector* CopyPositionsKeepLogicalType(
-        omniruntime::vec::BaseVector* src, const int* positions, int offset, int length)
+        omniruntime::vec::BaseVector* src, int* positions, int offset, int length)
     {
         if (src == nullptr || src->GetTypeId() != OMNI_DECIMAL64 ||
             src->GetEncoding() == omniruntime::vec::OMNI_DICTIONARY) {
