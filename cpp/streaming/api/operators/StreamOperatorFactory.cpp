@@ -48,6 +48,8 @@
 #include "table/runtime/operators/window/processor/AbstractWindowAggProcessor.h"
 #include "table/runtime/operators/rank/FastTop1Function.h"
 #include "table/runtime/operators/join/window/InnerJoinOperator.h"
+#include "table/runtime/operators/join/window/LeftOuterJoinOperator.h"
+#include "table/runtime/operators/join/window/RightOuterJoinOperator.h"
 #include "runtime/operators/window/AggregateWindowOperator.h"
 #include "runtime/operators/window/tvf/WindowTableFunctionOperator.h"
 #include "datagen/meituan/JoinSource.h"
@@ -221,14 +223,24 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
         LOG("Operator WindowTableFunctionOperator address " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);
-    } else if (uniqueName == OPERATOR_NAME_WINDOW_INNER_JOIN) {
-        auto op =
-            new InnerJoinOperator<std::shared_ptr<RowData>>(opConfig.getDescription(), chainOutput, nullptr, nullptr);
+    } else if (uniqueName == OPERATOR_NAME_WINDOW_INNER_JOIN ||
+               uniqueName == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
+               uniqueName == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN) {
+        auto opDescriptionJSON = opConfig.getDescription();
+        std::string joinType =
+            opDescriptionJSON.contains("joinType") ? opDescriptionJSON["joinType"].get<std::string>() : "InnerJoin";
+        WindowJoinOperator<std::shared_ptr<RowData>>* op = nullptr;
+        if (joinType == "LeftOuterJoin") {
+            op = new LeftOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+        } else if (joinType == "RightOuterJoin") {
+            op = new RightOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+        } else {
+            op = new InnerJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+        }
         op->setup();
         LOG("Operator WindowJoinOperator address " + std::to_string(reinterpret_cast<long>(op)));
 
         // SP-INTEROP: 启用 WindowJoin 兼容适配器
-        auto opDescriptionJSON = opConfig.getDescription();
         const FlinkSavepointAdaptorType adaptorType =
             omnistream::StreamingJoinSavepointUtil::getWindowJoinAdaptorType(opDescriptionJSON);
         if (adaptorType == FlinkSavepointAdaptorType::None) {
@@ -284,8 +296,10 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         return CreateProcessOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_CONSTRAINTENFORCER) {
         return CreateConstraintEnforcerOp(opDesc, chainOutput, task);
-    } else if (operatorID == OPERATOR_NAME_WINDOW_INNER_JOIN) {
-        return CreateWindowInnerJoinOp(opDesc, chainOutput, task);
+    } else if (operatorID == OPERATOR_NAME_WINDOW_INNER_JOIN ||
+               operatorID == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
+               operatorID == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN) {
+        return CreateWindowJoinOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_WINDOW_TABLE_FUNCTION) {
         return CreateWindowTableFunctionOp(opDesc, chainOutput, task);
     } else if (operatorID == datastream::OPERATOR_NAME_FLATMAP) {
@@ -708,12 +722,21 @@ StreamOperator* StreamOperatorFactory::CreateConstraintEnforcerOp(
     return static_cast<OneInputStreamOperator*>(op);
 }
 
-StreamOperator* StreamOperatorFactory::CreateWindowInnerJoinOp(
+StreamOperator* StreamOperatorFactory::CreateWindowJoinOp(
     OperatorPOD& opConfig, WatermarkGaugeExposingOutput* chainOutput, std::shared_ptr<omnistream::OmniStreamTask> task)
 {
     auto description = opConfig.getDescription();
     nlohmann::json opDescriptionJSON = nlohmann::json::parse(description);
-    auto op = new InnerJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    std::string joinType =
+        opDescriptionJSON.contains("joinType") ? opDescriptionJSON["joinType"].get<std::string>() : "InnerJoin";
+    WindowJoinOperator<std::shared_ptr<RowData>>* op = nullptr;
+    if (joinType == "LeftOuterJoin") {
+        op = new LeftOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    } else if (joinType == "RightOuterJoin") {
+        op = new RightOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    } else {
+        op = new InnerJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    }
     op->setup(std::move(task));
     // SP-INTEROP: 启用 WindowJoin 兼容适配器
     const FlinkSavepointAdaptorType adaptorType =

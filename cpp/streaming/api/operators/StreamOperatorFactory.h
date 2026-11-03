@@ -83,7 +83,7 @@ private:
         omnistream::OperatorPOD& opConfig,
         WatermarkGaugeExposingOutput* chainOutput,
         std::shared_ptr<omnistream::OmniStreamTask> task);
-    static StreamOperator* CreateWindowInnerJoinOp(
+    static StreamOperator* CreateWindowJoinOp(
         omnistream::OperatorPOD& opConfig,
         WatermarkGaugeExposingOutput* chainOutput,
         std::shared_ptr<omnistream::OmniStreamTask> task);
