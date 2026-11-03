@@ -33,6 +33,7 @@
 #include "OmniOperatorJIT/core/src/vector/unsafe_vector.h"
 #include "OmniOperatorJIT/core/src/operator/execution_context.h"
 #include "table/runtime/keyselector/KeySelector.h"
+#include "core/utils/key_type_traits.h"
 #include "table/utils/TimeWindowUtil.h"
 #include "runtime/metrics/SimpleCounter.h"
 using namespace omnistream;
@@ -221,10 +222,20 @@ protected:
     // Aligns with Flink JoinConditionWithNullFilters: a row whose filtered join key column
     // is null can never match any row on the other side. isLeft selects the left/right key
     // column index list.
+    //
+    // Row keys (BinaryRowData) preserve the null flag, so NULL keys form their own key group
+    // and the planner-declared filterNullKeys is the only thing that decides whether null rows
+    // match (all-false means the null group matches, mirroring Flink exactly). Scalar keys
+    // (int32_t/int64_t) cannot carry the null flag: KeySelector reads the raw value, so a NULL
+    // key collapses into an arbitrary group and can mix with real rows. For scalar keys every
+    // actual null key is therefore treated as filtered, so the group is split instead of being
+    // fast-pathed into a false cartesian.
     bool hasFilteredNullKey(RowData* row, bool isLeft);
     // Scans a whole group for rows with a filtered null key. Used to decide whether the
     // uniform-key fast paths are safe: only when no row on either side carries a filtered
-    // null key do all rows of the group share the same (non-null) join key.
+    // null key do all rows of the group share the same (non-null) join key. For scalar keys
+    // the check is data-driven (actual nulls, independent of filterNullKeys) because the null
+    // flag cannot be represented in the key and null rows may share a group with real rows.
     bool hasAnyFilteredNull(const std::vector<RowData*>* records, bool isLeft);
     InternalTimerServiceImpl<KeyType, int64_t>* internalTimerService;
     bool isNonEquiCondition;
@@ -1068,9 +1079,24 @@ bool WindowJoinOperator<KeyType>::filter(RowData* leftRow, RowData* rightRow)
 template <typename KeyType>
 bool WindowJoinOperator<KeyType>::hasFilteredNullKey(RowData* row, bool isLeft)
 {
+    constexpr bool keyCarriesNull =
+        KeyTypeTraits<KeyType>::isRowKey || KeyTypeTraits<KeyType>::isSharedRowKey;
     const auto& keyIndexes = isLeft ? leftKeyIndex : rightKeyIndex;
     for (size_t i = 0; i < keyIndexes.size(); i++) {
-        if (i < filterNullKeys.size() && filterNullKeys[i] && row->isNullAt(keyIndexes[i])) {
+        if (!row->isNullAt(keyIndexes[i])) {
+            continue;
+        }
+        if constexpr (keyCarriesNull) {
+            // Row keys preserve NULL: the NULL row lives in its own key group, and whether it
+            // matches is decided solely by the planner-declared filterNullKeys (all-false means
+            // the null group matches, mirroring Flink's JoinConditionWithNullFilters).
+            if (i < filterNullKeys.size() && filterNullKeys[i]) {
+                return true;
+            }
+        } else {
+            // Scalar keys cannot carry the null flag: the raw value is read verbatim, so a NULL
+            // row collapses into an arbitrary key group and may mix with real rows. Any actual
+            // null key must go through the split path to avoid a false cartesian.
             return true;
         }
     }
@@ -1080,8 +1106,15 @@ bool WindowJoinOperator<KeyType>::hasFilteredNullKey(RowData* row, bool isLeft)
 template <typename KeyType>
 bool WindowJoinOperator<KeyType>::hasAnyFilteredNull(const std::vector<RowData*>* records, bool isLeft)
 {
-    if (records == nullptr || records->empty() || filterNullKeys.empty()) {
+    if (records == nullptr || records->empty()) {
         return false;
+    }
+    constexpr bool keyCarriesNull =
+        KeyTypeTraits<KeyType>::isRowKey || KeyTypeTraits<KeyType>::isSharedRowKey;
+    if constexpr (keyCarriesNull) {
+        if (filterNullKeys.empty()) {
+            return false;
+        }
     }
     for (RowData* row : *records) {
         if (hasFilteredNullKey(row, isLeft)) {

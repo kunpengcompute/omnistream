@@ -47,6 +47,8 @@
 #include "table/runtime/operators/window/processor/AbstractWindowAggProcessor.h"
 #include "table/runtime/operators/rank/FastTop1Function.h"
 #include "table/runtime/operators/join/window/InnerJoinOperator.h"
+#include "table/runtime/operators/join/window/LeftOuterJoinOperator.h"
+#include "table/runtime/operators/join/window/RightOuterJoinOperator.h"
 #include "runtime/operators/window/AggregateWindowOperator.h"
 #include "runtime/operators/window/tvf/WindowTableFunctionOperator.h"
 #include "datagen/meituan/JoinSource.h"
@@ -296,7 +298,7 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
     } else if (operatorID == OPERATOR_NAME_WINDOW_INNER_JOIN ||
                operatorID == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
                operatorID == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN) {
-        return CreateWindowInnerJoinOp(opDesc, chainOutput, task);
+        return CreateWindowJoinOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_WINDOW_TABLE_FUNCTION) {
         return CreateWindowTableFunctionOp(opDesc, chainOutput, task);
     } else if (operatorID == datastream::OPERATOR_NAME_FLATMAP) {
@@ -696,7 +698,7 @@ StreamOperator* StreamOperatorFactory::CreateConstraintEnforcerOp(
     return static_cast<OneInputStreamOperator*>(op);
 }
 
-StreamOperator* StreamOperatorFactory::CreateWindowInnerJoinOp(
+StreamOperator* StreamOperatorFactory::CreateWindowJoinOp(
     OperatorPOD& opConfig, WatermarkGaugeExposingOutput* chainOutput, std::shared_ptr<omnistream::OmniStreamTask> task)
 {
     auto description = opConfig.getDescription();

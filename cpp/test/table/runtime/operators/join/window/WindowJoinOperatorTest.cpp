@@ -2,6 +2,8 @@
 #include <memory>
 #include "table/runtime/operators/join/window/WindowJoinOperator.h"
 #include "table/runtime/operators/join/window/InnerJoinOperator.h"
+#include "table/runtime/operators/join/window/LeftOuterJoinOperator.h"
+#include "table/runtime/operators/join/window/RightOuterJoinOperator.h"
 #include "runtime/taskmanager/OmniRuntimeEnvironment.h"
 #include "test/core/operators/OutputTest.h"
 #include "core/typeutils/LongSerializer.h"
