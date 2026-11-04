@@ -28,9 +28,6 @@
 
 namespace omnistream {
 
-// restore 方向带 VectorBatch side table 的 KV 状态 writer 声明。
-class RestoreKVStateVB;
-
 // StreamingJoin NoUniqueKey 兼容 savepoint 适配器。
 //
 // 当前 Omni 和 Flink StreamingJoin 都以完整 RowData 作为 MapState user key：
@@ -97,17 +94,6 @@ public:
     // 根据 kvStateId 对应的 Flink 状态元数据构造 Omni 主状态元数据。
     StateMetaInfoSnapshot buildOmniMainMetaInfo(int kvStateId, const StateMetaInfoSnapshot& flinkMetaInfo);
 
-    std::vector<omniruntime::type::DataTypeId> columnTypes(int kvStateId) const;
-
-    int batchSize(int kvStateId) const;
-
-    // 当前 StreamingJoin 不使用该 KV_WITH_VB hook；若错误分发到旧流程则 fail-fast。
-    void retrieveKVRowData(
-        const std::vector<int8_t>& keyBytes,
-        const std::vector<int8_t>& valueBytes,
-        int kvStateId,
-        RestoreKVStateVB* writer) override;
-
     /*========== Restore ==========*/
 
 private:
@@ -140,9 +126,6 @@ private:
     // 根据状态名称返回左右两侧对应的 Join 状态计划。
     const SidePlan& sidePlanForState(const std::string& stateName) const;
 
-    // 返回 restore writer 创建阶段为 kvStateId 绑定的 Join 单侧计划。
-    const SidePlan& restoreSidePlan(int kvStateId) const;
-
     // 创建 adaptor 时确定的 StreamingJoin 兼容类型，用于区分 inner 和 left outer 状态布局。
     FlinkSavepointAdaptorType adaptorType_;
 
@@ -151,12 +134,6 @@ private:
 
     // 右侧 Join 状态的名称、输入类型和状态布局参数。
     SidePlan rightPlan_;
-
-    // 当前 restore handle 中左侧状态的 kvStateId。
-    int leftRestoreKvStateId_ = -1;
-
-    // 当前 restore handle 中右侧状态的 kvStateId。
-    int rightRestoreKvStateId_ = -1;
 };
 
 } // namespace omnistream

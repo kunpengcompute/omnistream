@@ -23,7 +23,6 @@
 #include "core/typeutils/JoinTupleSerializer.h"
 #include "core/typeutils/MapSerializer.h"
 #include "runtime/checkpoint/StateMetaInfoValidator.h"
-#include "runtime/state/restore/RestoreKVStateVB.h"
 #include "runtime/state/restore/vb/VectorBatchRestoreFlow.h"
 #include "runtime/state/vbsave/VectorBatchSaveFlow.h"
 #include "runtime/state/vbsave/VectorBatchSaveTools.h"
@@ -164,20 +163,13 @@ void StreamingJoinSavepointAdaptor::save(
 void StreamingJoinSavepointAdaptor::restore(
     SavepointRestoreResultIterator& restoreIterator, RestoreBackendDelegate& backend)
 {
-    leftRestoreKvStateId_ = -1;
-    rightRestoreKvStateId_ = -1;
     VectorBatchRestoreFlow::executeRestore(*this, restoreIterator, backend);
 }
 
 StateMetaInfoSnapshot StreamingJoinSavepointAdaptor::buildOmniMainMetaInfo(
-    int kvStateId, const StateMetaInfoSnapshot& flinkMetaInfo)
+    int /*kvStateId*/, const StateMetaInfoSnapshot& flinkMetaInfo)
 {
     const SidePlan& sidePlan = sidePlanForState(flinkMetaInfo.getName());
-    if (&sidePlan == &leftPlan_) {
-        leftRestoreKvStateId_ = kvStateId;
-    } else {
-        rightRestoreKvStateId_ = kvStateId;
-    }
     TypeSerializer* namespaceSerializer = flinkMetaInfo.getNamespaceSerializer();
     if (namespaceSerializer == nullptr) {
         ERROR_RELEASE(
@@ -234,27 +226,6 @@ RestoreStateType StreamingJoinSavepointAdaptor::getStateType(const StateMetaInfo
         return RestoreStateType::KV_TRANSFORMED;
     }
     return RestoreStateType::UNSUPPORT;
-}
-
-std::vector<omniruntime::type::DataTypeId> StreamingJoinSavepointAdaptor::columnTypes(int kvStateId) const
-{
-    return restoreSidePlan(kvStateId).inputTypeIds;
-}
-
-int StreamingJoinSavepointAdaptor::batchSize(int /*kvStateId*/) const
-{
-    return VB_RESTORE_BATCH_SIZE;
-}
-
-void StreamingJoinSavepointAdaptor::retrieveKVRowData(
-    const std::vector<int8_t>& /*keyBytes*/,
-    const std::vector<int8_t>& /*valueBytes*/,
-    int kvStateId,
-    RestoreKVStateVB* /*writer*/)
-{
-    throw std::logic_error(
-        "StreamingJoinSavepointAdaptor current RowData protocol must use KV_TRANSFORMED, kvStateId=" +
-        std::to_string(kvStateId));
 }
 
 std::vector<VectorBatchSaveStateContext> StreamingJoinSavepointAdaptor::buildSaveStateContexts(
@@ -445,22 +416,6 @@ const StreamingJoinSavepointAdaptor::SidePlan& StreamingJoinSavepointAdaptor::si
         << " stateName=" << stateName << ", leftState=" << StreamingJoinSavepointUtil::LEFT_STATE_NAME
         << ", rightState=" << StreamingJoinSavepointUtil::RIGHT_STATE_NAME);
     throw std::runtime_error("StreamingJoinSavepointAdaptor::sidePlanForState unsupported state=" + stateName);
-}
-
-const StreamingJoinSavepointAdaptor::SidePlan& StreamingJoinSavepointAdaptor::restoreSidePlan(int kvStateId) const
-{
-    if (kvStateId >= 0 && kvStateId == leftRestoreKvStateId_) {
-        return leftPlan_;
-    }
-    if (kvStateId >= 0 && kvStateId == rightRestoreKvStateId_) {
-        return rightPlan_;
-    }
-    ERROR_RELEASE(
-        "StreamingJoinSavepointAdaptor::restoreSidePlan ->" << " kvStateId=" << kvStateId
-                                                            << ", leftKvStateId=" << leftRestoreKvStateId_
-                                                            << ", rightKvStateId=" << rightRestoreKvStateId_);
-    throw std::runtime_error(
-        "StreamingJoinSavepointAdaptor::restoreSidePlan missing side plan for kvStateId=" + std::to_string(kvStateId));
 }
 
 } // namespace omnistream

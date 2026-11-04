@@ -217,13 +217,6 @@ TEST(StreamingJoinSavepointAdaptorTest, FlinkRestoreBuildsStandardRowStateMetada
     ASSERT_NE(rightMapSerializer, nullptr);
     EXPECT_EQ(rightMapSerializer->getKeySerializer()->getBackendId(), BackendDataType::ROW_BK);
     EXPECT_EQ(rightMapSerializer->getValueSerializer()->getBackendId(), BackendDataType::INT_BK);
-
-    EXPECT_EQ(
-        adaptor.columnTypes(0),
-        (std::vector<omniruntime::type::DataTypeId>{
-            omniruntime::type::DataTypeId::OMNI_LONG, omniruntime::type::DataTypeId::OMNI_VARCHAR}));
-    EXPECT_EQ(
-        adaptor.columnTypes(1), (std::vector<omniruntime::type::DataTypeId>{omniruntime::type::DataTypeId::OMNI_LONG}));
 }
 
 TEST(StreamingJoinSavepointAdaptorTest, PrepareRejectsMalformedAndUnsupportedInputTypes)

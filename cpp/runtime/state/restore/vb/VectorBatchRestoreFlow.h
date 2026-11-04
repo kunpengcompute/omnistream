@@ -25,8 +25,8 @@
 namespace omnistream {
 
 // 恢复方向公共调度流程：遍历 Flink logical source entries，通过 Adaptor 提供的
-// 按 StateType 分发到 KV / KV_TRANSFORMED / KV_WITH_VB / PQ 子流程。
-// Derived 需实现:  getStateType / buildOmniMainMetaInfo / retrieveKVRowData
+// 按 StateType 分发到 KV / KV_TRANSFORM / KV_TRANSFORMED / PQ 子流程。
+// Derived 需实现:  getStateType / buildOmniMainMetaInfo / transformKVData
 
 class VectorBatchRestoreFlow final {
 public:
@@ -45,7 +45,6 @@ public:
 
             // Step 1: 预创建所有 writer（按 kvStateId → type 分类）
             std::unordered_map<int, std::unique_ptr<RestoreKVState>> kvWriters;
-            std::unordered_map<int, std::unique_ptr<RestoreKVStateVB>> kvVbWriters;
             std::unordered_map<int, std::unique_ptr<RestorePQState>> pqWriters;
             std::unordered_map<int, RestoreStateType> stateTypeMap;
 
@@ -62,12 +61,6 @@ public:
                     case RestoreStateType::KV_TRANSFORMED: {
                         auto mainMetaInfo = derived.buildOmniMainMetaInfo(i, metaInfos[i]);
                         kvWriters[i] = backend.createKVState(i, mainMetaInfo);
-                        break;
-                    }
-                    case RestoreStateType::KV_WITH_VB: {
-                        auto mainMetaInfo = derived.buildOmniMainMetaInfo(i, metaInfos[i]);
-                        kvVbWriters[i] =
-                            backend.createKVStateVB(i, mainMetaInfo, derived.columnTypes(i), derived.batchSize(i));
                         break;
                     }
                     case RestoreStateType::PQ: {
@@ -105,12 +98,6 @@ public:
                                     w->template writeEntry<ByteView>(entry.getKey(), valueView);
                                     break;
                                 }
-                                case RestoreStateType::KV_WITH_VB: {
-                                    auto& w = kvVbWriters[kvStateId];
-                                    w->setKeyGroupId(keyGroupId);
-                                    derived.retrieveKVRowData(entry.getKey(), entry.getValue(), kvStateId, w.get());
-                                    break;
-                                }
                                 case RestoreStateType::KV_TRANSFORM: {
                                     auto& w = kvWriters[kvStateId];
                                     w->setKeyGroupId(keyGroupId);
@@ -141,22 +128,13 @@ public:
                             throw;
                         }
                     }
-                    // keyGroup 切换时强制 flush 所有 KV_WITH_VB writer 的 VB 尾批，
-                    // 避免跨 keyGroup 的数据混合到同一 VB batch 中。
-                    // flush 后重置 batchId，保证每个 keyGroup 内部从 0 开始独立递增。
-                    for (auto& [id, w] : kvVbWriters) {
-                        w->flushVB();
-                        w->resetBatchId();
-                    }
                 }
 
                 // 统一 flush 所有 writer
                 for (auto& [id, w] : kvWriters) w->flush();
-                for (auto& [id, w] : kvVbWriters) w->flush();
                 for (auto& [id, w] : pqWriters) w->flush();
             } catch (...) {
                 for (auto& [id, w] : kvWriters) w->discard();
-                for (auto& [id, w] : kvVbWriters) w->discard();
                 for (auto& [id, w] : pqWriters) w->discard();
                 throw;
             }

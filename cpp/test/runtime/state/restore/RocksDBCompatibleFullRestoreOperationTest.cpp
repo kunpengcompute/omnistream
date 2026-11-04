@@ -57,7 +57,7 @@ std::shared_ptr<KeyedStateHandle> makeKeyedStateHandle()
 
 FlinkSavepointAdaptorInfo makeAdaptorInfo()
 {
-    return {FlinkSavepointAdaptorType::DeduplicateAdaptor, "deduplicate compatible adaptor"};
+    return {FlinkSavepointAdaptorType::GroupAggAdaptor, "group agg compatible adaptor"};
 }
 
 template <typename ExpectedException, typename Action>
