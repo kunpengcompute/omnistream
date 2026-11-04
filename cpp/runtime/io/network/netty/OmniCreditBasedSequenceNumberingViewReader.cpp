@@ -422,9 +422,13 @@ void OmniCreditBasedSequenceNumberingViewReader::SerializeVectorBatchBufferToRow
         serializer.serialize(element, output);
         output.writeIntUnsafe(output.length() - 4, 0);
         auto networkBuffer = RequestNettyBuffer(output.length());
-        std::memcpy(networkBuffer->GetOriginalAddress(), output.getData(), output.length());
-        auto info = std::make_shared<SerializedBatchInfo>(
-            SerializedBatchInfo{networkBuffer->GetOriginalAddress(), networkBuffer->GetOriginalAddress(), output.length()});
+        auto* address = networkBuffer->GetOriginalAddress();
+        std::memcpy(address, output.getData(), output.length());
+        networkBuffer->IncreaseUsedBytes(output.length());
+        networkBuffer->IncreaseRefCount();
+        networkBuffer->EnableEligibleRecycling();
+        auto info = std::make_shared<SerializedBatchInfo>(SerializedBatchInfo{
+            address, address, output.length()});
         std::lock_guard<std::recursive_mutex> lock(queueMutex);
         serializedBatchQueue.push(info);
     };

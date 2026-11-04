@@ -47,7 +47,7 @@ public:
         ResultPartitionIDPOD partitionId,
         int subPartitionIndex,
         long outputBufferStatus,
-    bool downStreamIsNative,
+        bool downStreamIsNative,
         std::shared_ptr<LocalNettyBufferPool> localNettyBufferPool = nullptr);
     ~OmniCreditBasedSequenceNumberingViewReader() override;
     void notifyDataAvailable() override;

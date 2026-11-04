@@ -24,7 +24,8 @@ Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingV
     jlong nativeTask,
     jlong resultBufferAddress,
     jstring partitionIdJson,
-    jint subPartitionId, jboolean downStreamIsNative)
+    jint subPartitionId,
+    jboolean downStreamIsNative)
 {
     const char* paritionIdChars = jniEnv->GetStringUTFChars(partitionIdJson, nullptr);
     std::string paritionIdStr(paritionIdChars);

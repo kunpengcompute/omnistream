@@ -54,8 +54,14 @@ public:
     virtual std::shared_ptr<InputChannel> getChannel(int channelIndex) = 0;
 
     std::vector<InputChannelInfo> getChannelInfos();
-    void initializeInputFormat(InputFormat format) { inputFormat_.initialize(format); }
-    InputFormat getInputFormat() const { return inputFormat_.get(); }
+    void initializeInputFormat(InputFormat format)
+    {
+        inputFormat_.initialize(format);
+    }
+    InputFormat getInputFormat() const
+    {
+        return inputFormat_.get();
+    }
 
     std::shared_ptr<CompletableFuture> getPriorityEventAvailableFuture();
 
