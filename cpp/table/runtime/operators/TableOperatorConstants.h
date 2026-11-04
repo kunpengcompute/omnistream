@@ -26,6 +26,12 @@ constexpr std::string_view OPERATOR_NAME_WATERMARK_ASSIGNER =
     "org.apache.flink.table.runtime.operators.wmassigners.WatermarkAssignerOperator";
 constexpr std::string_view OPERATOR_NAME_WINDOW_INNER_JOIN =
     "org.apache.flink.table.runtime.operators.join.window.WindowJoinOperator.InnerJoinOperator";
+constexpr std::string_view OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN =
+    "org.apache.flink.table.runtime.operators.join.window.WindowJoinOperator.LeftOuterJoinOperator";
+constexpr std::string_view OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN =
+    "org.apache.flink.table.runtime.operators.join.window.WindowJoinOperator.RightOuterJoinOperator";
+constexpr std::string_view OPERATOR_NAME_WINDOW_FULL_OUTER_JOIN =
+    "org.apache.flink.table.runtime.operators.join.window.WindowJoinOperator.FullOuterJoinOperator";
 constexpr std::string_view OPERATOR_NAME_PROCESS_OPERATOR = "org.apache.flink.streaming.api.operators.ProcessOperator";
 constexpr std::string_view OPERATOR_NAME_COLLECT_SINK =
     "org.apache.flink.streaming.api.operators.collect.CollectSinkOperator";
@@ -45,6 +51,9 @@ constexpr std::string_view OPERATOR_NAME_CONSTRAINTENFORCER =
     "org.apache.flink.table.runtime.operators.sink.ConstraintEnforcer";
 constexpr std::string_view OPERATOR_NAME_GROUP_WINDOW_AGG =
     "org.apache.flink.table.runtime.operators.window.AggregateWindowOperator";
+// Flink StreamExecWindowTableFunction instantiates WindowTableFunctionOperator for standalone Window TVF.
+constexpr std::string_view OPERATOR_NAME_WINDOW_TABLE_FUNCTION =
+    "org.apache.flink.table.runtime.operators.window.WindowTableFunctionOperator";
 constexpr std::string_view OPERATOR_NAME_INPUT_CONVERSION =
     "org.apache.flink.table.runtime.operators.source.InputConversionOperator";
 constexpr std::string_view OPERATOR_NAME_FILTER = "org.apache.flink.streaming.api.operators.StreamFilter";

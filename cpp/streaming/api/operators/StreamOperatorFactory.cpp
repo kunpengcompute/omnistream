@@ -38,16 +38,22 @@
 #include "streaming/api/functions/sink/filesystem/PartitionCommitter.h"
 #include "runtime/operators/join/lookup/LookupJoinRunner.h"
 #include "table/runtime/operators/source/InputFormatSourceFunction.h"
+#include "table/runtime/operators/source/ValuesSourceFunction.h"
 #include "table/runtime/operators/source/csv/CsvInputFormat.h"
 #include "runtime/operators/window/LocalSlicingWindowAggOperator.h"
 #include "streaming/runtime/tasks/ChainingOutput.h"
 #include "datagen/nexmark/NexmarkSourceFunction.h"
 #include "runtime/operators/sink/ConstraintEnforcer.h"
 #include "table/runtime/operators/rank/AppendOnlyTopNFunction.h"
+#include "table/runtime/operators/rank/RetractableTopNFunction.h"
 #include "table/runtime/operators/window/processor/AbstractWindowAggProcessor.h"
 #include "table/runtime/operators/rank/FastTop1Function.h"
 #include "table/runtime/operators/join/window/InnerJoinOperator.h"
+#include "table/runtime/operators/join/window/LeftOuterJoinOperator.h"
+#include "table/runtime/operators/join/window/RightOuterJoinOperator.h"
+#include "table/runtime/operators/join/window/FullOuterJoinOperator.h"
 #include "runtime/operators/window/AggregateWindowOperator.h"
+#include "runtime/operators/window/tvf/WindowTableFunctionOperator.h"
 #include "datagen/meituan/JoinSource.h"
 #include "datagen/meituan/MTFilterFunc.h"
 #include "connector/kafka/source/KafkaSource.h"
@@ -218,14 +224,39 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         configureSavepoint(op, "GroupWindowAgg", description, WindowAggSavepointCompatibility::forGroup(description));
         LOG("Operator AggregateWindowOperator address " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);
-    } else if (uniqueName == OPERATOR_NAME_WINDOW_INNER_JOIN) {
-        auto op =
-            new InnerJoinOperator<std::shared_ptr<RowData>>(opConfig.getDescription(), chainOutput, nullptr, nullptr);
+    } else if (opConfig.getUniqueName() == OPERATOR_NAME_WINDOW_TABLE_FUNCTION) {
+        const auto description = opConfig.getDescription();
+        auto* op = new WindowTableFunctionOperator(description, chainOutput);
+        // WindowTableFunction supports processing-time windows, which need a
+        // ProcessingTimeService. This overload has no task to provide one, so fall
+        // back to a standalone service (same as the no-task kafka source branch).
+        op->setProcessingTimeService(new SystemProcessingTimeService());
+        op->setup();
+        op->setDescription(description);
+        op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
+        LOG("Operator WindowTableFunctionOperator address " + std::to_string(reinterpret_cast<long>(op)));
+        return static_cast<OneInputStreamOperator*>(op);
+    } else if (uniqueName == OPERATOR_NAME_WINDOW_INNER_JOIN ||
+               uniqueName == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
+               uniqueName == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN ||
+               uniqueName == OPERATOR_NAME_WINDOW_FULL_OUTER_JOIN) {
+        auto opDescriptionJSON = opConfig.getDescription();
+        std::string joinType =
+            opDescriptionJSON.contains("joinType") ? opDescriptionJSON["joinType"].get<std::string>() : "InnerJoin";
+        WindowJoinOperator<std::shared_ptr<RowData>>* op = nullptr;
+        if (joinType == "LeftOuterJoin") {
+            op = new LeftOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+        } else if (joinType == "RightOuterJoin") {
+            op = new RightOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+        } else if (joinType == "FullOuterJoin") {
+            op = new FullOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+        } else {
+            op = new InnerJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+        }
         op->setup();
         LOG("Operator WindowJoinOperator address " + std::to_string(reinterpret_cast<long>(op)));
 
         // SP-INTEROP: 启用 WindowJoin 兼容适配器
-        auto opDescriptionJSON = opConfig.getDescription();
         const FlinkSavepointAdaptorType adaptorType =
             omnistream::StreamingJoinSavepointUtil::getWindowJoinAdaptorType(opDescriptionJSON);
         if (adaptorType == FlinkSavepointAdaptorType::None) {
@@ -281,8 +312,13 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         return CreateProcessOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_CONSTRAINTENFORCER) {
         return CreateConstraintEnforcerOp(opDesc, chainOutput, task);
-    } else if (operatorID == OPERATOR_NAME_WINDOW_INNER_JOIN) {
-        return CreateWindowInnerJoinOp(opDesc, chainOutput, task);
+    } else if (operatorID == OPERATOR_NAME_WINDOW_INNER_JOIN ||
+               operatorID == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
+               operatorID == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN ||
+               operatorID == OPERATOR_NAME_WINDOW_FULL_OUTER_JOIN) {
+        return CreateWindowJoinOp(opDesc, chainOutput, task);
+    } else if (operatorID == OPERATOR_NAME_WINDOW_TABLE_FUNCTION) {
+        return CreateWindowTableFunctionOp(opDesc, chainOutput, task);
     } else if (operatorID == datastream::OPERATOR_NAME_FLATMAP) {
         return CreateFlatMapOp(opDesc, chainOutput);
     } else if (operatorID == datastream::OPERATOR_NAME_MAP) {
@@ -440,7 +476,30 @@ StreamOperator* StreamOperatorFactory::CreateKeyedProcessOp(
         AbstractTopNFunction<RowData*>* func = new AppendOnlyTopNFunction<RowData*>(opDescriptionJSON);
         auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
         op->setup(std::move(task));
-        op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::AppendOnlyTopNAdaptor);
+        if (opDescriptionJSON.contains("sortFieldIndices") && opDescriptionJSON["sortFieldIndices"].empty()) {
+            // SP-INTEROP: streaming Limit shape (empty sort key). The AppendOnlyTopN
+            // savepoint adaptor is not audited for the arity-0 sort key group, so mark
+            // unsupported instead.
+            op->setFlinkSavepointUnsupported(
+                "Streaming Limit (empty sort key) native state is not convertible by the "
+                "AppendOnlyTopN savepoint adaptor, which requires at least one sort column");
+        } else {
+            op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::AppendOnlyTopNAdaptor);
+        }
+        op->setDescription(opDescriptionJSON);
+        LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
+        return static_cast<OneInputStreamOperator*>(op);
+    } else if (
+        opDescriptionJSON.contains("processFunction") &&
+        opDescriptionJSON["processFunction"] == "RetractableTopNFunction") {
+        // Streaming Limit retract path (input contains updates/deletes).
+        LOG("RetractableTopNFunction description: " << opConfig.getDescription());
+        AbstractTopNFunction<RowData*>* func = new RetractableTopNFunction<RowData*>(opDescriptionJSON);
+        auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
+        op->setup(std::move(task));
+        // SP-INTEROP: no savepoint adaptor converts the retract state yet.
+        op->setFlinkSavepointUnsupported(
+            "Streaming Limit retract state is not convertible by any existing savepoint adaptor");
         op->setDescription(opDescriptionJSON);
         LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);
@@ -583,6 +642,15 @@ StreamOperator* StreamOperatorFactory::CreateSourceOp(
             // SP-INTEROP: StreamSource 无 managed keyed state，Omni 原生格式即为 Flink 兼容。
             source->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
             return static_cast<StreamOperator*>(source);
+        } else if (format == "values") {
+            auto* func = new ValuesSourceFunction(opDescriptionJSON);
+            auto* source = new StreamSource<omnistream::VectorBatch>(func, chainOutput, false);
+            source->setup(std::move(task));
+            source->setDescription(opDescriptionJSON);
+            // SP-INTEROP: VALUES 源与 csv/nexmark 源一致，无 managed keyed state，
+            // Omni 原生格式即为 Flink 兼容。
+            source->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
+            return static_cast<StreamOperator*>(source);
         } else if (format == "nexmark") {
             int batchSize = opDescriptionJSON["batchSize"];
             BatchEventDeserializer* eventDeserializer = new BatchEventDeserializer(batchSize);
@@ -685,12 +753,23 @@ StreamOperator* StreamOperatorFactory::CreateConstraintEnforcerOp(
     return static_cast<OneInputStreamOperator*>(op);
 }
 
-StreamOperator* StreamOperatorFactory::CreateWindowInnerJoinOp(
+StreamOperator* StreamOperatorFactory::CreateWindowJoinOp(
     OperatorPOD& opConfig, WatermarkGaugeExposingOutput* chainOutput, std::shared_ptr<omnistream::OmniStreamTask> task)
 {
     auto description = opConfig.getDescription();
     nlohmann::json opDescriptionJSON = nlohmann::json::parse(description);
-    auto op = new InnerJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    std::string joinType =
+        opDescriptionJSON.contains("joinType") ? opDescriptionJSON["joinType"].get<std::string>() : "InnerJoin";
+    WindowJoinOperator<std::shared_ptr<RowData>>* op = nullptr;
+    if (joinType == "LeftOuterJoin") {
+        op = new LeftOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    } else if (joinType == "RightOuterJoin") {
+        op = new RightOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    } else if (joinType == "FullOuterJoin") {
+        op = new FullOuterJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    } else {
+        op = new InnerJoinOperator<std::shared_ptr<RowData>>(opDescriptionJSON, chainOutput, nullptr, nullptr);
+    }
     op->setup(std::move(task));
     // SP-INTEROP: 启用 WindowJoin 兼容适配器
     const FlinkSavepointAdaptorType adaptorType =
@@ -704,6 +783,22 @@ StreamOperator* StreamOperatorFactory::CreateWindowInnerJoinOp(
     }
     LOG("Operator WindowJoinOperator address " + std::to_string(reinterpret_cast<long>(op)));
     return static_cast<TwoInputStreamOperator*>(op);
+}
+
+StreamOperator* StreamOperatorFactory::CreateWindowTableFunctionOp(
+    OperatorPOD& opConfig, WatermarkGaugeExposingOutput* chainOutput, std::shared_ptr<omnistream::OmniStreamTask> task)
+{
+    auto description = opConfig.getDescription();
+    nlohmann::json opDescriptionJSON = nlohmann::json::parse(description);
+    auto* op = new WindowTableFunctionOperator(opDescriptionJSON, chainOutput);
+    // WindowTableFunction is stateless. Processing time (if any) is served by this service.
+    auto* processingTimeService = task->createProcessingTimeService();
+    op->setProcessingTimeService(processingTimeService);
+    op->setup(std::move(task));
+    op->setDescription(opDescriptionJSON);
+    op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
+    LOG("Operator WindowTableFunctionOperator address " + std::to_string(reinterpret_cast<long>(op)));
+    return static_cast<OneInputStreamOperator*>(op);
 }
 
 StreamOperator* StreamOperatorFactory::CreateMapOp(

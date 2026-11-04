@@ -33,7 +33,9 @@
 #include "OmniOperatorJIT/core/src/vector/unsafe_vector.h"
 #include "OmniOperatorJIT/core/src/operator/execution_context.h"
 #include "table/runtime/keyselector/KeySelector.h"
+#include "core/utils/key_type_traits.h"
 #include "table/utils/TimeWindowUtil.h"
+#include "runtime/metrics/SimpleCounter.h"
 using namespace omnistream;
 using FilterFunc = bool (*)(int64_t*, bool*, int32_t*, bool*, int32_t*, int64_t);
 namespace {
@@ -72,26 +74,25 @@ inline bool getRowValue<bool>(RowData* row, int colIdx)
 {
     return *row->getInt(colIdx) != 0;
 }
-// todo:Decimal128 type casting?
 template <>
 inline omniruntime::type::Decimal128 getRowValue<omniruntime::type::Decimal128>(RowData* row, int colIdx)
 {
-    THROW_LOGIC_EXCEPTION("Extracting Decimal128 directly from RowData is not supported");
-    // Dummy return to satisfy the compiler
-    return omniruntime::type::Decimal128();
+    return *row->getDecimal128(colIdx);
 }
 
 inline void extractRowValueToFilterArray(
     RowData* row,
     int rowColIdx,    // Index inside RowData
-    int filterColIdx, // Target index inside the `vals`/`nulls` array
+    int filterColIdx, // Target index inside the `vals`/`lengths`/`nulls` arrays
     int64_t* vals,
+    int32_t* lengths,
     uint8_t* nulls,
     omniruntime::type::DataTypeId typeId)
 {
     if (row->isNullAt(rowColIdx)) {
         nulls[filterColIdx] = 1;
         vals[filterColIdx] = 0;
+        lengths[filterColIdx] = 0;
         return;
     }
 
@@ -99,6 +100,7 @@ inline void extractRowValueToFilterArray(
 
     switch (typeId) {
         case omniruntime::type::DataTypeId::OMNI_INT:
+        case omniruntime::type::DataTypeId::OMNI_DATE32:
             vals[filterColIdx] = reinterpret_cast<int64_t>(row->getInt(rowColIdx));
             break;
         case omniruntime::type::DataTypeId::OMNI_LONG:
@@ -114,8 +116,20 @@ inline void extractRowValueToFilterArray(
         case omniruntime::type::DataTypeId::OMNI_BOOLEAN:
             vals[filterColIdx] = reinterpret_cast<int64_t>(row->getInt(rowColIdx));
             break;
-        case omniruntime::type::DataTypeId::OMNI_VARCHAR:
-            vals[filterColIdx] = reinterpret_cast<int64_t>(row->getString(rowColIdx));
+        case omniruntime::type::DataTypeId::OMNI_CHAR:
+        case omniruntime::type::DataTypeId::OMNI_VARCHAR: {
+            // The codegen reads string columns as a raw `i8*` buffer plus its length from the
+            // lengths array (SimpleFilterCodeGen::Visit), so the raw data pointer and the size
+            // must be filled here.
+            std::string_view sv = row->getStringView(rowColIdx);
+            vals[filterColIdx] = reinterpret_cast<int64_t>(sv.data());
+            lengths[filterColIdx] = static_cast<int32_t>(sv.size());
+            break;
+        }
+        case omniruntime::type::DataTypeId::OMNI_DECIMAL128:
+            // The codegen loads a 128-bit decimal from the address stored in `vals`
+            // (GetPtrTypeFromInt maps OMNI_DECIMAL128 to i128*).
+            vals[filterColIdx] = reinterpret_cast<int64_t>(row->getDecimal128(rowColIdx));
             break;
         default:
             THROW_LOGIC_EXCEPTION(
@@ -198,12 +212,31 @@ protected:
     void buildInner(
         std::vector<RowData*>* leftElements,
         std::vector<RowData*>* rightElements,
-        omnistream::VectorBatch* outputBatch);
+        omnistream::VectorBatch* outputBatch,
+        bool rightMajor = false);
     void buildRightNull(std::vector<RowData*>* leftElements, omnistream::VectorBatch* outputBatch);
     void buildLeftNull(std::vector<RowData*>* rightElements, omnistream::VectorBatch* outputBatch);
     void buildSemiAnti(
         std::vector<RowData*>* elements, omnistream::VectorBatch* outputBatch, bool isSemi, std::set<int>* matchedSet);
     bool filter(RowData* leftElement, RowData* rightElement);
+    // Aligns with Flink JoinConditionWithNullFilters: a row whose filtered join key column
+    // is null can never match any row on the other side. isLeft selects the left/right key
+    // column index list.
+    //
+    // Row keys (BinaryRowData) preserve the null flag, so NULL keys form their own key group
+    // and the planner-declared filterNullKeys is the only thing that decides whether null rows
+    // match (all-false means the null group matches, mirroring Flink exactly). Scalar keys
+    // (int32_t/int64_t) cannot carry the null flag: KeySelector reads the raw value, so a NULL
+    // key collapses into an arbitrary group and can mix with real rows. For scalar keys every
+    // actual null key is therefore treated as filtered, so the group is split instead of being
+    // fast-pathed into a false cartesian.
+    bool hasFilteredNullKey(RowData* row, bool isLeft);
+    // Scans a whole group for rows with a filtered null key. Used to decide whether the
+    // uniform-key fast paths are safe: only when no row on either side carries a filtered
+    // null key do all rows of the group share the same (non-null) join key. For scalar keys
+    // the check is data-driven (actual nulls, independent of filterNullKeys) because the null
+    // flag cannot be represented in the key and null rows may share a group with real rows.
+    bool hasAnyFilteredNull(const std::vector<RowData*>* records, bool isLeft);
     InternalTimerServiceImpl<KeyType, int64_t>* internalTimerService;
     bool isNonEquiCondition;
     std::unique_ptr<KeySelector<KeyType>> keySelectorLeft{};
@@ -217,6 +250,8 @@ private:
     nlohmann::json description;
     std::set<int> colRefsForNonEquiCondition;
     int totalNumOfCols;
+    std::shared_ptr<Counter> leftNumLateRecordsDropped;
+    std::shared_ptr<Counter> rightNumLateRecordsDropped;
     struct BatchCleanupInfo {
         int32_t keyGroup;
         uint32_t sequenceNumber;
@@ -242,26 +277,30 @@ private:
         std::vector<RowData*>* leftElements,
         std::vector<RowData*>* rightElements,
         omnistream::VectorBatch* outputBatch,
-        bool isInner);
+        bool isInner,
+        bool rightMajor = false);
     template <typename TYPE>
     void insertRight(
         int colIdx,
         std::vector<RowData*>* leftElements,
         std::vector<RowData*>* rightElements,
         omnistream::VectorBatch* outputBatch,
-        bool isInner);
+        bool isInner,
+        bool rightMajor = false);
     void insertLeftVarchar(
         int colIdx,
         std::vector<RowData*>* leftElements,
         std::vector<RowData*>* rightElements,
         omnistream::VectorBatch* outputBatch,
-        bool isInner);
+        bool isInner,
+        bool rightMajor = false);
     void insertRightVarchar(
         int colIdx,
         std::vector<RowData*>* leftElements,
         std::vector<RowData*>* rightElements,
         omnistream::VectorBatch* outputBatch,
-        bool isInner);
+        bool isInner,
+        bool rightMajor = false);
 
     void processBatch(
         omnistream::VectorBatch* batch,
@@ -273,11 +312,13 @@ private:
     void BuildInnerLeft(
         std::vector<RowData*>* leftElements,
         std::vector<RowData*>* rightElements,
-        omnistream::VectorBatch* outputBatch);
+        omnistream::VectorBatch* outputBatch,
+        bool rightMajor = false);
     void BuildInnerRight(
         std::vector<RowData*>* leftElements,
         std::vector<RowData*>* rightElements,
-        omnistream::VectorBatch* outputBatch);
+        omnistream::VectorBatch* outputBatch,
+        bool rightMajor = false);
 };
 
 template <typename KeyType>
@@ -298,6 +339,12 @@ WindowJoinOperator<KeyType>::WindowJoinOperator(
     auto rightTypeStr = config["rightInputTypes"].get<std::vector<std::string>>();
     rightKeyIndex = description["rightJoinKey"].get<std::vector<int32_t>>();
     leftKeyIndex = description["leftJoinKey"].get<std::vector<int32_t>>();
+    if (description.contains("filterNulls")) {
+        filterNullKeys = description["filterNulls"].get<std::vector<bool>>();
+    } else {
+        // Default to filtering null keys on all join keys, matching SQL '=' semantics.
+        filterNullKeys.assign(leftKeyIndex.size(), true);
+    }
     for (const auto& i : leftTypeStr) {
         leftTypes.push_back(LogicalType::flinkTypeToOmniTypeId(i));
     }
@@ -380,7 +427,10 @@ void WindowJoinOperator<KeyType>::open()
         } else {
             bool leftSideState = static_cast<size_t>(i) < leftTypes.size();
             switch (leftSideState ? leftTypes[i] : rightTypes[i - leftTypes.size()]) {
-                case omniruntime::type::DataTypeId::OMNI_INT: filterFuncPtrs.push_back(getValueAddress<int32_t>); break;
+                case omniruntime::type::DataTypeId::OMNI_INT:
+                case omniruntime::type::DataTypeId::OMNI_DATE32:
+                    filterFuncPtrs.push_back(getValueAddress<int32_t>);
+                    break;
                 case omniruntime::type::DataTypeId::OMNI_LONG:
                     filterFuncPtrs.push_back(getValueAddress<int64_t>);
                     break;
@@ -390,9 +440,26 @@ void WindowJoinOperator<KeyType>::open()
                 case omniruntime::type::DataTypeId::OMNI_BOOLEAN:
                     filterFuncPtrs.push_back(getValueAddress<bool>);
                     break;
-                default: THROW_LOGIC_EXCEPTION("Type not recognized");
+                default:
+                    // filterFuncPtrs is currently unused by the row-based filter() path; keep
+                    // non-fatal for types not handled here (e.g. CHAR/VARCHAR/DECIMAL128).
+                    filterFuncPtrs.push_back(nullptr);
+                    break;
             }
         }
+    }
+
+    // Metrics (aligned with Flink WindowJoinOperator: late records dropped counters; the rate
+    // meters are not implemented natively yet).
+    // This base registration applies to all join types (Inner/Left/Right/Full/Semi/Anti),
+    // so LeftOuter and RightOuter expose the identical metric set.
+    if (this->metrics != nullptr) {
+        leftNumLateRecordsDropped = std::make_shared<omnistream::SimpleCounter>();
+        rightNumLateRecordsDropped = std::make_shared<omnistream::SimpleCounter>();
+        this->metrics->AddInternalOperatorIOMetric(
+            this->getTypeName(), "leftNumLateRecordsDropped", leftNumLateRecordsDropped);
+        this->metrics->AddInternalOperatorIOMetric(
+            this->getTypeName(), "rightNumLateRecordsDropped", rightNumLateRecordsDropped);
     }
 }
 
@@ -522,36 +589,38 @@ result:
 */
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::BuildInnerLeft(
-    std::vector<RowData*>* leftElements, std::vector<RowData*>* rightElements, omnistream::VectorBatch* outputBatch)
+    std::vector<RowData*>* leftElements, std::vector<RowData*>* rightElements, omnistream::VectorBatch* outputBatch,
+    bool rightMajor)
 {
     int colIdx = 0;
     // Left side
     for (auto dataType : leftTypes) {
         switch (dataType) {
             case omniruntime::type::DataTypeId::OMNI_SHORT:
-                insertLeft<int16_t>(colIdx, leftElements, rightElements, outputBatch, true);
+                insertLeft<int16_t>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_INT:
-                insertLeft<int32_t>(colIdx, leftElements, rightElements, outputBatch, true);
+            case omniruntime::type::DataTypeId::OMNI_DATE32:
+                insertLeft<int32_t>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
-                insertLeft<int64_t>(colIdx, leftElements, rightElements, outputBatch, true);
+                insertLeft<int64_t>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_DOUBLE:
-                insertLeft<double>(colIdx, leftElements, rightElements, outputBatch, true);
+                insertLeft<double>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_BOOLEAN:
-                insertLeft<bool>(colIdx, leftElements, rightElements, outputBatch, true);
+                insertLeft<bool>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_DECIMAL128:
-                insertLeft<omniruntime::type::Decimal128>(colIdx, leftElements, rightElements, outputBatch, true);
+                insertLeft<omniruntime::type::Decimal128>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_CHAR:
             case omniruntime::type::DataTypeId::OMNI_VARCHAR:
-                insertLeftVarchar(colIdx, leftElements, rightElements, outputBatch, true);
+                insertLeftVarchar(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             default: THROW_LOGIC_EXCEPTION("Type not recognized"); break;
         }
@@ -561,36 +630,38 @@ void WindowJoinOperator<KeyType>::BuildInnerLeft(
 
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::BuildInnerRight(
-    std::vector<RowData*>* leftElements, std::vector<RowData*>* rightElements, omnistream::VectorBatch* outputBatch)
+    std::vector<RowData*>* leftElements, std::vector<RowData*>* rightElements, omnistream::VectorBatch* outputBatch,
+    bool rightMajor)
 {
     // Right side
     int colIdx = leftTypes.size();
     for (auto dataType : rightTypes) {
         switch (dataType) {
             case omniruntime::type::DataTypeId::OMNI_SHORT:
-                insertRight<int16_t>(colIdx, leftElements, rightElements, outputBatch, true);
+                insertRight<int16_t>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_INT:
-                insertRight<int32_t>(colIdx, leftElements, rightElements, outputBatch, true);
+            case omniruntime::type::DataTypeId::OMNI_DATE32:
+                insertRight<int32_t>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
-                insertRight<int64_t>(colIdx, leftElements, rightElements, outputBatch, true);
+                insertRight<int64_t>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_DOUBLE:
-                insertRight<double>(colIdx, leftElements, rightElements, outputBatch, true);
+                insertRight<double>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_BOOLEAN:
-                insertRight<bool>(colIdx, leftElements, rightElements, outputBatch, true);
+                insertRight<bool>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_DECIMAL128:
-                insertRight<omniruntime::type::Decimal128>(colIdx, leftElements, rightElements, outputBatch, true);
+                insertRight<omniruntime::type::Decimal128>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_CHAR:
             case omniruntime::type::DataTypeId::OMNI_VARCHAR:
-                insertRightVarchar(colIdx, leftElements, rightElements, outputBatch, true);
+                insertRightVarchar(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             default: THROW_LOGIC_EXCEPTION("Type not recognized"); break;
         }
@@ -600,10 +671,11 @@ void WindowJoinOperator<KeyType>::BuildInnerRight(
 
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::buildInner(
-    std::vector<RowData*>* leftElements, std::vector<RowData*>* rightElements, omnistream::VectorBatch* outputBatch)
+    std::vector<RowData*>* leftElements, std::vector<RowData*>* rightElements, omnistream::VectorBatch* outputBatch,
+    bool rightMajor)
 {
-    BuildInnerLeft(leftElements, rightElements, outputBatch);
-    BuildInnerRight(leftElements, rightElements, outputBatch);
+    BuildInnerLeft(leftElements, rightElements, outputBatch, rightMajor);
+    BuildInnerRight(leftElements, rightElements, outputBatch, rightMajor);
 }
 
 template <typename KeyType>
@@ -617,9 +689,13 @@ void WindowJoinOperator<KeyType>::buildRightNull(
                 insertLeft<int16_t>(colIdx, leftElements, nullptr, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_INT:
+            case omniruntime::type::DataTypeId::OMNI_DATE32:
                 insertLeft<int32_t>(colIdx, leftElements, nullptr, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 insertLeft<int64_t>(colIdx, leftElements, nullptr, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_DOUBLE:
@@ -658,9 +734,13 @@ void WindowJoinOperator<KeyType>::buildLeftNull(
                 insertRight<int16_t>(colIdx, nullptr, rightElements, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_INT:
+            case omniruntime::type::DataTypeId::OMNI_DATE32:
                 insertRight<int32_t>(colIdx, nullptr, rightElements, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+            case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 insertRight<int64_t>(colIdx, nullptr, rightElements, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_DOUBLE:
@@ -712,6 +792,16 @@ void WindowJoinOperator<KeyType>::processBatch(
         int64_t windowEndTime =
             reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batchGuard->Get(windowEndIndex))->GetValue(i);
         if (TimeWindowUtil::isWindowFired(windowEndTime, internalTimerService->currentWatermark(), shiftTimeZone)) {
+            // Aligns with Flink: late elements are dropped (and counted) per side.
+            if (isLeftSide) {
+                if (leftNumLateRecordsDropped != nullptr) {
+                    leftNumLateRecordsDropped->Inc();
+                }
+            } else {
+                if (rightNumLateRecordsDropped != nullptr) {
+                    rightNumLateRecordsDropped->Inc();
+                }
+            }
             continue;
         }
         // reuseWindowEndTimes_[i] = windowEndTime;
@@ -719,6 +809,10 @@ void WindowJoinOperator<KeyType>::processBatch(
 
         this->setCurrentKey(key);
         auto inputRow = std::unique_ptr<RowData>(batchGuard->extractRowData(i));
+        if (!RowDataUtil::isAccumulateMsg(inputRow->getRowKind())) {
+            // Aligns with Flink: window join cannot handle retraction (DELETE/UPDATE_BEFORE) input.
+            THROW_LOGIC_EXCEPTION("Window join could not handle retraction input stream");
+        }
         recordState->add(windowEndTime, inputRow.get());
         if (stateType_ == omnistream::StateType::HEAP) {
             inputRow.release();
@@ -735,23 +829,38 @@ inline void WindowJoinOperator<KeyType>::insertLeft(
     std::vector<RowData*>* leftElements,
     std::vector<RowData*>* rightElements,
     omnistream::VectorBatch* outputBatch,
-    bool isInner)
+    bool isInner,
+    bool rightMajor)
 {
     auto num = leftElements->size();
     auto col = reinterpret_cast<omniruntime::vec::Vector<TYPE>*>(outputBatch->Get(colIdx));
+    auto writeRow = [&](RowData* row, int rowIdx) {
+        if (row->isNullAt(colIdx)) {
+            col->SetNull(rowIdx);
+        } else {
+            col->SetValue(rowIdx, getRowValue<TYPE>(row, colIdx));
+        }
+    };
     if (isNonEquiCondition || !isInner) {
         int rowIdx = 0;
         for (int j = 0; j < num; j++) {
-            TYPE value = getRowValue<TYPE>(leftElements->at(j), colIdx);
-            col->SetValue(rowIdx, value);
+            writeRow(leftElements->at(j), rowIdx);
             rowIdx++;
+        }
+    } else if (rightMajor) {
+        // right-major cartesian: row = i * leftSize + j (i = right index, j = left index)
+        int rowIdx = 0;
+        for (size_t i = 0; i < rightElements->size(); i++) {
+            for (int j = 0; j < num; j++) {
+                writeRow(leftElements->at(j), rowIdx);
+                rowIdx++;
+            }
         }
     } else {
         int rowIdx = 0;
         for (int j = 0; j < num; j++) {
-            TYPE value = getRowValue<TYPE>(leftElements->at(j), colIdx);
             for (size_t i = 0; i < rightElements->size(); i++) {
-                col->SetValue(i + rowIdx, value);
+                writeRow(leftElements->at(j), i + rowIdx);
             }
             rowIdx += rightElements->size();
         }
@@ -764,16 +873,33 @@ void WindowJoinOperator<KeyType>::insertLeftVarchar(
     std::vector<RowData*>* leftElements,
     std::vector<RowData*>* rightElements,
     omnistream::VectorBatch* outputBatch,
-    bool isInner)
+    bool isInner,
+    bool rightMajor)
 {
     using varcharVecType = omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>;
     auto col = reinterpret_cast<varcharVecType*>(outputBatch->Get(colIdx));
+    auto writeRow = [&](RowData* row, int rowIdx) {
+        if (row->isNullAt(colIdx)) {
+            col->SetNull(rowIdx);
+        } else {
+            col->SetValue(rowIdx, row->getStringView(colIdx));
+        }
+    };
     if (isNonEquiCondition || !isInner) {
         int rowIdx = 0;
         for (auto element : *leftElements) {
-            std::string_view strView = element->getStringView(colIdx);
-            col->SetValue(rowIdx, strView);
+            writeRow(element, rowIdx);
             rowIdx++;
+        }
+    } else if (rightMajor) {
+        // right-major cartesian: row = i * leftSize + j (i = right index, j = left index)
+        int rowIdx = 0;
+        auto num = leftElements->size();
+        for (size_t i = 0; i < rightElements->size(); i++) {
+            for (int j = 0; j < num; j++) {
+                writeRow(leftElements->at(j), rowIdx);
+                rowIdx++;
+            }
         }
     } else {
         int rowIdx = 0;
@@ -783,9 +909,8 @@ void WindowJoinOperator<KeyType>::insertLeftVarchar(
         auto rowIds = std::vector<int32_t>(num);
 
         for (int j = 0; j < num; j++) {
-            std::string_view strView = (leftElements->at(j))->getStringView(colIdx);
             for (size_t i = 0; i < rightElements->size(); i++) {
-                col->SetValue(i + rowIdx, strView);
+                writeRow(leftElements->at(j), i + rowIdx);
             }
             rowIdx += rightElements->size();
         }
@@ -799,23 +924,37 @@ inline void WindowJoinOperator<KeyType>::insertRight(
     std::vector<RowData*>* leftElements,
     std::vector<RowData*>* rightElements,
     omnistream::VectorBatch* outputBatch,
-    bool isInner)
+    bool isInner,
+    bool rightMajor)
 {
     auto num = rightElements->size();
     auto col = reinterpret_cast<omniruntime::vec::Vector<TYPE>*>(outputBatch->Get(colIdx));
+    auto writeRow = [&](RowData* row, int rowIdx) {
+        int srcCol = colIdx - leftTypes.size();
+        if (row->isNullAt(srcCol)) {
+            col->SetNull(rowIdx);
+        } else {
+            col->SetValue(rowIdx, getRowValue<TYPE>(row, srcCol));
+        }
+    };
     if (isNonEquiCondition || !isInner) {
         int rowIdx = 0;
         for (int i = 0; i < num; i++) {
-            TYPE value = getRowValue<TYPE>(rightElements->at(i), colIdx - leftTypes.size());
-            col->SetValue(rowIdx, value);
+            writeRow(rightElements->at(i), rowIdx);
             rowIdx++;
+        }
+    } else if (rightMajor) {
+        // right-major cartesian: row = i * leftSize + j (i = right index, j = left index)
+        auto leftSize = leftElements->size();
+        for (size_t i = 0; i < rightElements->size(); i++) {
+            for (size_t j = 0; j < leftSize; j++) {
+                writeRow(rightElements->at(i), i * leftSize + j);
+            }
         }
     } else {
         for (size_t i = 0; i < rightElements->size(); i++) {
-            TYPE value = getRowValue<TYPE>(rightElements->at(i), colIdx - leftTypes.size());
             for (size_t j = 0; j < leftElements->size(); j++) {
-                int valIdx = j * rightElements->size() + i;
-                col->SetValue(valIdx, value);
+                writeRow(rightElements->at(i), j * rightElements->size() + i);
             }
         }
     }
@@ -827,24 +966,44 @@ void WindowJoinOperator<KeyType>::insertRightVarchar(
     std::vector<RowData*>* leftElements,
     std::vector<RowData*>* rightElements,
     omnistream::VectorBatch* outputBatch,
-    bool isInner)
+    bool isInner,
+    bool rightMajor)
 {
     using varcharVecType = omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>;
     auto col = reinterpret_cast<varcharVecType*>(outputBatch->Get(colIdx));
+    auto writeRow = [&](RowData* row, int rowIdx) {
+        int srcCol = colIdx - leftTypes.size();
+        if (row->isNullAt(srcCol)) {
+            col->SetNull(rowIdx);
+        } else {
+            col->SetValue(rowIdx, row->getStringView(srcCol));
+        }
+    };
     if (isNonEquiCondition || !isInner) {
         int rowIdx = 0;
         for (auto element : *rightElements) {
-            std::string_view value = element->getStringView(colIdx - leftTypes.size());
-            col->SetValue(rowIdx, value);
+            writeRow(element, rowIdx);
             rowIdx++;
         }
-    } else {
-        auto num = rightElements->size();
+    } else if (rightMajor) {
+        // right-major cartesian: row = i * leftSize + j (i = right index, j = left index)
+        int rowIdx = 0;
+        auto leftSize = leftElements->size();
         for (size_t i = 0; i < rightElements->size(); i++) {
-            std::string_view value = (rightElements->at(i))->getStringView(colIdx - leftTypes.size());
-            for (size_t j = 0; j < leftElements->size(); j++) {
-                int valIdx = j * rightElements->size() + i;
-                col->SetValue(valIdx, value);
+            for (size_t j = 0; j < leftSize; j++) {
+                writeRow(rightElements->at(i), rowIdx);
+                rowIdx++;
+            }
+        }
+    } else {
+        // LargeStringContainer::SetValue only supports sequential ascending writes, so the
+        // right-side VARCHAR columns must be filled in row-major order (same layout as
+        // insertLeft/insertLeftVarchar: row = j * rightElements->size() + i).
+        int rowIdx = 0;
+        for (size_t j = 0; j < leftElements->size(); j++) {
+            for (size_t i = 0; i < rightElements->size(); i++) {
+                writeRow(rightElements->at(i), rowIdx);
+                rowIdx++;
             }
         }
     }
@@ -888,19 +1047,20 @@ bool WindowJoinOperator<KeyType>::filter(RowData* leftRow, RowData* rightRow)
     }
 
     std::vector<int64_t> vals(totalNumOfCols, 0);
+    std::vector<int32_t> lengths(totalNumOfCols, 0);
     std::vector<uint8_t> nulls(totalNumOfCols, 0);
     bool resultBool = false;
 
     const int leftColsCount = static_cast<int>(leftTypes.size());
 
-    // Populate vals and nulls directly from RowData
+    // Populate vals, lengths and nulls directly from RowData
     for (int col : colRefsForNonEquiCondition) {
         if (col < leftColsCount) {
-            extractRowValueToFilterArray(leftRow, col, col, vals.data(), nulls.data(), leftTypes[col]);
+            extractRowValueToFilterArray(leftRow, col, col, vals.data(), lengths.data(), nulls.data(), leftTypes[col]);
         } else {
             int rightColIdx = col - leftColsCount;
             extractRowValueToFilterArray(
-                rightRow, rightColIdx, col, vals.data(), nulls.data(), rightTypes[rightColIdx]);
+                rightRow, rightColIdx, col, vals.data(), lengths.data(), nulls.data(), rightTypes[rightColIdx]);
         }
     }
 
@@ -908,10 +1068,58 @@ bool WindowJoinOperator<KeyType>::filter(RowData* leftRow, RowData* rightRow)
     bool result = generatedFilter(
         vals.data(),
         reinterpret_cast<bool*>(nulls.data()),
-        nullptr,
+        lengths.data(),
         &resultBool,
         nullptr,
         reinterpret_cast<int64_t>(&context));
 
     return result;
+}
+
+template <typename KeyType>
+bool WindowJoinOperator<KeyType>::hasFilteredNullKey(RowData* row, bool isLeft)
+{
+    constexpr bool keyCarriesNull =
+        KeyTypeTraits<KeyType>::isRowKey || KeyTypeTraits<KeyType>::isSharedRowKey;
+    const auto& keyIndexes = isLeft ? leftKeyIndex : rightKeyIndex;
+    for (size_t i = 0; i < keyIndexes.size(); i++) {
+        if (!row->isNullAt(keyIndexes[i])) {
+            continue;
+        }
+        if constexpr (keyCarriesNull) {
+            // Row keys preserve NULL: the NULL row lives in its own key group, and whether it
+            // matches is decided solely by the planner-declared filterNullKeys (all-false means
+            // the null group matches, mirroring Flink's JoinConditionWithNullFilters).
+            if (i < filterNullKeys.size() && filterNullKeys[i]) {
+                return true;
+            }
+        } else {
+            // Scalar keys cannot carry the null flag: the raw value is read verbatim, so a NULL
+            // row collapses into an arbitrary key group and may mix with real rows. Any actual
+            // null key must go through the split path to avoid a false cartesian.
+            return true;
+        }
+    }
+    return false;
+}
+
+template <typename KeyType>
+bool WindowJoinOperator<KeyType>::hasAnyFilteredNull(const std::vector<RowData*>* records, bool isLeft)
+{
+    if (records == nullptr || records->empty()) {
+        return false;
+    }
+    constexpr bool keyCarriesNull =
+        KeyTypeTraits<KeyType>::isRowKey || KeyTypeTraits<KeyType>::isSharedRowKey;
+    if constexpr (keyCarriesNull) {
+        if (filterNullKeys.empty()) {
+            return false;
+        }
+    }
+    for (RowData* row : *records) {
+        if (hasFilteredNullKey(row, isLeft)) {
+            return true;
+        }
+    }
+    return false;
 }
