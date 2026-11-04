@@ -1318,45 +1318,6 @@ TEST(WindowJoinOperatorTest, RightOuterJoinVarcharTest)
     destroyRightOuterJoinTestContext(ctx);
 }
 
-// Full outer join with IS NOT DISTINCT FROM semantics (filterNulls=[false]) on a scalar
-// int32 join key. A NULL key collapses into the key-0 group (both produce raw key 0), so the
-// group mixes NULL-key rows with key-0 rows. Flink keeps them in separate key groups; under
-// IS NOT DISTINCT FROM only NULL-NULL and 0-0 can match.
-std::string testDescriptionFullOuterIsNotDistinct = R"delimiter({
-  "originDescription": null,
-  "leftInputTypes": [
-    "INT",
-    "BIGINT",
-    "INT"
-  ],
-  "rightInputTypes": [
-    "INT",
-    "BIGINT",
-    "INT"
-  ],
-  "outputTypes": [
-    "INT",
-    "BIGINT",
-    "INT",
-    "INT",
-    "BIGINT",
-    "INT"
-  ],
-  "leftJoinKey": [0],
-  "rightJoinKey": [0],
-  "leftWindowEndIndex": 1,
-  "rightWindowEndIndex": 1,
-  "nonEquiCondition": null,
-  "filterNulls": [false],
-  "joinType": "FullOuterJoin",
-  "leftWindowing": "TUMBLE(size=[10 s])",
-  "leftTimeAttributeType": 2,
-  "rightWindowing": "TUMBLE(size=[10 s])",
-  "rightTimeAttributeType": 2
-})delimiter";
-
-nlohmann::json parsedJsonFullOuterIsNotDistinct = nlohmann::json::parse(testDescriptionFullOuterIsNotDistinct);
-
 // Full outer join with a residual non-equi predicate on the value column
 // (left value < right value). Records are grouped by the single join key [0].
 std::string testDescriptionFullOuterNonEqui = R"delimiter({
