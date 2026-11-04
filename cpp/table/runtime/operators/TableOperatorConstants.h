@@ -30,6 +30,8 @@ constexpr std::string_view OPERATOR_NAME_PROCESS_OPERATOR = "org.apache.flink.st
 constexpr std::string_view OPERATOR_NAME_COLLECT_SINK =
     "org.apache.flink.streaming.api.operators.collect.CollectSinkOperator";
 constexpr std::string_view OPERATOR_NAME_SINK = "org.apache.flink.table.runtime.operators.sink.SinkOperator";
+constexpr std::string_view OPERATOR_NAME_SINK_UPSERT_MATERIALIZER =
+    "org.apache.flink.table.runtime.operators.sink.SinkUpsertMaterializer";
 constexpr std::string_view OPERATOR_NAME_STREAM_SINK = "org.apache.flink.streaming.api.operators.StreamSink";
 constexpr std::string_view OPERATOR_NAME_STREAM_SOURCE = "org.apache.flink.streaming.api.operators.StreamSource";
 constexpr std::string_view OPERATOR_NAME_SOURCE_OPERATOR = "org.apache.flink.streaming.api.operators.SourceOperator";
