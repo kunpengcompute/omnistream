@@ -272,7 +272,6 @@ private:
     bool finishedOperators{false};
     // Flags indicating the close method of all the operators are called
     bool closedOperators_{false};
-    bool cleanedUp_{false};
 
     std::atomic<bool> endOfDataReceived{false};
 
