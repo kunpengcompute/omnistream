@@ -98,42 +98,4 @@ AbstractOuterJoinOperator<KeyType>::AbstractOuterJoinOperator(
 {
 }
 
-template <typename KeyType>
-class FullOuterJoinOperator : public AbstractOuterJoinOperator<KeyType> {
-public:
-    FullOuterJoinOperator(
-        const nlohmann::json& config, Output* output, TypeSerializer* leftSerializer, TypeSerializer* rightSerializer);
-    void join(std::vector<RowData*>* leftRecords, std::vector<RowData*>* rightRecords) override;
-};
-
-template <typename KeyType>
-FullOuterJoinOperator<KeyType>::FullOuterJoinOperator(
-    const nlohmann::json& config, Output* output, TypeSerializer* leftSerializer, TypeSerializer* rightSerializer)
-    : AbstractOuterJoinOperator<KeyType>(config, output, leftSerializer, rightSerializer)
-{
-}
-
-template <typename KeyType>
-void FullOuterJoinOperator<KeyType>::join(std::vector<RowData*>* leftRecords, std::vector<RowData*>* rightRecords)
-{
-    if (leftRecords != nullptr && rightRecords != nullptr) {
-        auto outputBatch =
-            omnistream::VectorBatch::CreateVectorBatch(leftRecords->size() * rightRecords->size(), this->outputTypes);
-        this->buildInner(leftRecords, rightRecords, outputBatch);
-        AbstractStreamOperator<KeyType>::output->collect(outputBatch);
-    }
-
-    if (leftRecords != nullptr && rightRecords == nullptr) {
-        auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(leftRecords->size(), this->outputTypes);
-        this->buildRightNull(leftRecords, outputBatch);
-        AbstractStreamOperator<KeyType>::output->collect(outputBatch);
-    }
-
-    if (rightRecords != nullptr && leftRecords == nullptr) {
-        auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(rightRecords->size(), this->outputTypes);
-        this->buildLeftNull(rightRecords, outputBatch);
-        AbstractStreamOperator<KeyType>::output->collect(outputBatch);
-    }
-}
-
 #endif // OMNISTREAM_WINDOWOPERATORS_H
