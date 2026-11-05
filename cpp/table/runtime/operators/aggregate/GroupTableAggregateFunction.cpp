@@ -115,17 +115,18 @@ void GroupTableAggregateFunction::open(const Configuration& parameters)
 {
     LOG("GroupTableAggregateFunction open() running");
 
-    // The ROW_NUMBER function uses zero BinaryRowData accumulator slots (Scheme B), so the
-    // accState row type is empty; the state exists purely for firstRow / group-death
-    // bookkeeping (non-null value == group alive).
-    std::vector<std::string> accTypes = {};
+    // Scheme A, Flink state-shape parity: accState holds the accumulator row
+    // [first, second, ...] with rankEnd BIGINT slots -- the same ValueState<RowData>
+    // that plain Flink's codegen'd Top2 handler persists (Top2Accum as a row), so
+    // checkpoints/savepoints are engine-interoperable (Java job <-> native job).
+    std::vector<std::string> accTypes(static_cast<size_t>(rankEnd), std::string("BIGINT"));
     omnistream::RowType accRowType(true, accTypes);
     auto accRowTypeInfo = InternalTypeInfo::ofRowType(&accRowType);
     auto* accDesc = new ValueStateDescriptor<RowData*>("accState", accRowTypeInfo);
     accDesc->SetStateSerializer(accRowTypeInfo->getTypeSerializer());
     accState =
         static_cast<StreamingRuntimeContext<RowData*>*>(getRuntimeContext())->getState<RowData*>(accDesc);
-    accumulatorArity = 0;
+    accumulatorArity = static_cast<int>(rankEnd);
 
     // v1: single ROW_NUMBER aggregate call; multiple calls extend this into the
     // InitAggFunctions-style if-chain / factory.
@@ -147,14 +148,17 @@ void GroupTableAggregateFunction::processElement(RowData* input, Context* ctx, T
 {
     RowData* currentKey = ctx->getCurrentKey();
 
+    // Top2 semantics: the UDF declares no retract, so retraction input is not
+    // supported and is dropped silently (plain Flink's codegen would fail on a
+    // retract call to a UDF without a retract() method; the Top2 whitelist plan
+    // is append-only anyway).
+    if (RowDataUtil::isRetractMsg(input->getRowKind())) {
+        return;
+    }
+
     bool firstRow = false;
     RowData* accumulators = accState->value();
     if (accumulators == nullptr) {
-        // New group: a retract message for a group that never existed is dropped
-        // (same policy as GroupAggFunction).
-        if (RowDataUtil::isRetractMsg(input->getRowKind())) {
-            return;
-        }
         firstRow = true;
         if (currentKey != nullptr) {
             RowData* updatedKey = currentKey->copy();
@@ -162,36 +166,33 @@ void GroupTableAggregateFunction::processElement(RowData* input, Context* ctx, T
             currentKey = updatedKey;
         }
         accumulators = BinaryRowData::createBinaryRowDataWithMem(accumulatorArity);
+        // Fresh group: initialize the [first, second, ...] slots to the MIN_VALUE
+        // sentinel (Flink parity: function.createAccumulators()).
+        function->createAccumulators(accumulators);
         accState->update(accumulators);
     }
 
-    // 1. Load the current group's ledger (the function rebuilds its board from the MapView).
+    // 1. Load this group's accumulator into the function (per-key switch and the
+    //    checkpoint-recovery path both come through here).
     function->setAccumulators(accumulators);
 
-    // 2. Retract the OLD board first: still before accumulate/retract, the function sees
+    // 2. Retract the OLD board first: still before accumulate, the function sees
     //    the old ranking here (Flink GroupTableAggFunction emits UPDATE_BEFORE at this point).
     if (!firstRow && generateUpdateBefore) {
         function->emitValue(out, currentKey, true, false);
     }
 
-    // 3. Update the ledger.
-    if (RowDataUtil::isAccumulateMsg(input->getRowKind())) {
-        function->accumulate(input);
-    } else {
-        function->retract(input);
-    }
+    // 3. Accumulate the input row (append-only: retract was dropped above).
+    function->accumulate(input);
 
-    // 4. Dead or alive: board empty == group death (Top-N semantics).
-    if (!function->isGroupEmpty()) {
-        // 5. Emit the NEW board: INSERT on first row, UPDATE_AFTER afterwards.
-        function->emitValue(out, currentKey, false, firstRow);
-        // accState unchanged (zero-slot accumulator): the group stays alive in state.
-    } else {
-        // Silent group death: no row is emitted -- the old board was already retracted in
-        // step 2 (generateUpdateBefore), matching Flink's clear-without-emit behavior.
-        accState->clear();
-        function->cleanup();
-    }
+    // 4. Persist the new accumulator (Flink parity: getAccumulators -> accState.update
+    //    happens before the new board is emitted).
+    function->getAccumulators(accumulators);
+    accState->update(accumulators);
+
+    // 5. Emit the NEW board: INSERT on first row, UPDATE_AFTER afterwards. The Top2
+    //    accumulator only grows, so the group never dies and accState is kept.
+    function->emitValue(out, currentKey, false, firstRow);
 }
 
 void GroupTableAggregateFunction::processBatch(

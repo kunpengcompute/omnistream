@@ -3,52 +3,40 @@
  * You can use this software according to the terms and conditions of the Mulan PSL v2.
  * You may obtain a copy of Mulan PSL v2 at:
  *          http://license.coscl.org.cn/MulanPSL2
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
  * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PSL v2 for more details.
  *
- * Description: Native handler for the ROW_NUMBER table aggregate (Top-N leaderboard).
+ * Description: Native handler for the ROW_NUMBER table aggregate (Top-N of values).
  *
- * Accumulator model = Scheme B (StateDataView / MapView), aligned with JsonArrayAggFunction:
- *   - keyed MapView<VoidNamespace, long, long> : uniqueId -> sortKey.
- *     The type pair is dictated by the state-backend dispatch tables
- *     (HeapKeyedStateBackend / RocksdbKeyedStateBackend createOrUpdateInternalState):
- *     a MapState's <UK, UV> is chosen from a whitelist of (BackendDataType keyId, valueId)
- *     combinations, and (BIGINT_BK, BIGINT_BK) -> <int64_t, int64_t> is the combination that
- *     is registered on BOTH backends and whose serializer (LongSerializer) round-trips
- *     symmetrically. String-valued MapViews ((BIGINT, VARCHAR) -> <int64_t, std::string>,
- *     the JSON_ARRAYAGG combination) only work on the heap backend: RocksDB really calls
- *     StringSerializer, whose native payload type is std::u32string, so a std::string value
- *     is type-punned to garbage there.
- *   - NO BinaryRowData accumulator slot is used (accumulatorSlots()==0), so the operator's
- *     accStartingIndex bookkeeping stays aligned with the Flink RAW-accType plan.
+ * Accumulator model = Scheme A (BinaryRowData slots, Flink state-shape parity):
+ *   - ALL persistent state lives in the operator's ValueState<RowData> accState as a
+ *     [first, second, ...] row of rankEnd BIGINT slots. This is byte-identical to what
+ *     plain Flink's codegen'd Top2 handler persists (Top2Accum {first, second} as an
+ *     accumulator row), so checkpoints/savepoints are engine-interoperable: a Java job
+ *     can resume from a native checkpoint and vice versa.
+ *   - NO MapView / ledger / sequence-number bookkeeping: a keyed MapState would store a
+ *     different shape than the native accState and break that interoperability.
+ *   - Empty slot sentinel = LLONG_MIN, mirroring the Top2 UDF's Long.MIN_VALUE
+ *     accumulator initialization (a numeric minimum, NOT a SQL NULL).
  *
- * In-memory working copy: sortedMembers holds the current group's leaderboard in rank order
- * (index 0 = rank 1). It is rebuilt from the MapView in setAccumulators (per-key switch, also
- * the checkpoint-recovery path) and kept in sync by accumulate/retract.
- *
- * Semantics (v1 scope, documented deviations fall back to Java):
- *   - sort key: BIGINT only (POC auction bids); other types throw at construction.
- *   - unique key: BIGINT / INT column (numeric), used for retract matching and idempotence;
- *     STRING and other types throw at construction and the plan falls back to Java (a string
- *     unique key cannot be stored in the (BIGINT, BIGINT) MapView without a lossy hash,
- *     which we refuse: idempotence must be exact).
- *   - keyless mode (uniqueKeyIndex == -1): the ledger key degenerates to the insertion
- *     sequence number and the idempotence check is OFF. This mirrors plain Flink
- *     TableAggregateFunction semantics (e.g. the Top2 UDF: the same value arriving twice
- *     ranks twice), which is what the acceptance SQL produces -- its input row is
- *     [grouping key, UDF argument] with no identity column.
- *   - Top-N bounds: rankStart fixed at 1; rankEnd = N. Members beyond rankEnd are evicted from
- *     both the in-memory board and the MapView (bounded state, Flink Top-N parity).
- *   - rank order is the lexicographic (sortKey, uniqueId) order: equal sort keys are broken
- *     deterministically by ascending uniqueId, identical on both backends and across restarts
- *     (MapView iteration order itself is unspecified, so the board must never depend on it).
- *   - accumulate: filtered, idempotent by uniqueId; inserts in rank order, evicts the worst
- *     member when the board overflows.
- *   - retract: removes the member with the same uniqueId; retracting an already-evicted
- *     member is a no-op (Flink Top-N retract parity).
- *   - emitValue: emits the whole board as 0..N rows of [currentKey, sortKey, rn].
+ * Semantics (v1 scope, the Top2 point-name whitelist; other plans fall back to Java):
+ *   - sort key: BIGINT only, DESC only (the Top2 UDF accumulate() uses strict '>'
+ *     comparisons to keep the largest values). Ascending or non-BIGINT throws at
+ *     construction and the plan falls back to Java.
+ *   - keyless only (uniqueKeyIndex must be -1): the acceptance plan's input row is
+ *     [grouping key, UDF argument] with no identity column. Keyed/Top-N-member
+ *     semantics belong to the Rank operator, not to a table aggregate.
+ *   - accumulate is the Top2 UDF logic generalized to rankEnd slots: a strictly
+ *     greater value shifts the weaker slots down one place; an equal value settles
+ *     one slot lower, so the SAME value arriving twice ranks twice (plain Flink
+ *     TableAggregateFunction semantics, no idempotence). A value not greater than
+ *     any slot leaves the state untouched.
+ *   - retract: the Top2 UDF declares no retract; the operator drops retraction
+ *     messages before they reach this handler (the retract() here is defensive only).
+ *   - emitValue: emits the occupied slots as 0..N rows of [currentKey, value, rn]
+ *     (conditional output: an empty slot is not emitted).
  *     RowKind policy (mirrors Flink GroupTableAggFunction):
  *       isRetract=true  -> generateUpdateBefore ? UPDATE_BEFORE : DELETE
  *       isRetract=false -> firstRow ? INSERT : UPDATE_AFTER
@@ -79,7 +67,7 @@ public:
 
     ~RowNumberFunction() override = default;
 
-    /** Obtain the keyed MapView from the operator-provided store (JsonArrayAggFunction pattern). */
+    /** Contract hook; Scheme A needs no data view, the store is kept for future handlers. */
     void open(StateDataViewStore* store) override;
 
     // ---- TableAggsHandleFunction contract ----
@@ -93,80 +81,51 @@ public:
     void close() override;
 
     /**
-     * Emit the whole leaderboard as 0..N rows of [currentKey, sortKey, rn].
+     * Emit the occupied slots as 0..N rows of [currentKey, value, rn].
      * RowKind policy is documented in the class comment.
      */
     void emitValue(TimestampedCollector* out, RowData* currentKey, bool isRetract, bool firstRow) override;
 
-    // State lives entirely in the keyed MapView; no BinaryRowData accumulator slot is used.
+    /** State-shape parity with Flink: rankEnd BIGINT slots in the accState row. */
     int accumulatorSlots() const override
     {
-        return 0;
+        return static_cast<int>(rankEnd);
     }
 
-    /** 分组存活判断：内存榜为空 = 分组消亡（Top-N 语义：榜上无人 = 组死）。 */
+    /**
+     * Top2 never retracts, so the accumulator only grows: the group cannot die.
+     * (Flink parity: GroupTableAggFunction clears the accState only through the
+     * record-counter on retraction, which the Top2 plan cannot produce.)
+     */
     bool isGroupEmpty() const override
     {
-        return sortedMembers.empty();
+        return false;
     }
 
 private:
-    /**
-     * One leaderboard member. uniqueId is the member's identity AND the MapView ledger key:
-     * the unique-key column value in keyed mode, or the insertion sequence number in
-     * keyless mode (uniqueKeyIndex == -1).
-     */
-    struct LeaderboardMember {
-        long long uniqueId = 0;
-        long long sortKey = 0; // BIGINT sort key (v1 scope)
-    };
-
-    /** Strict ordering: does candidate `a` rank strictly before `b`? */
+    /** Strict ordering: does value `a` rank strictly before `b`? (v1: DESC, a > b.) */
     static bool betterThan(long long a, long long b, bool ascending)
     {
         return ascending ? a < b : a > b;
     }
 
-    /**
-     * Full strict rank order: (sortKey, uniqueId) lexicographic. Equal sort keys are broken
-     * by ascending uniqueId so the board never depends on MapView iteration order.
-     */
-    static bool ranksBefore(long long sortA, long long idA, long long sortB, long long idB, bool ascending)
-    {
-        if (sortA != sortB) {
-            return betterThan(sortA, sortB, ascending);
-        }
-        return idA < idB;
-    }
-
-    /** Extract the unique-key column value as a number (BIGINT / INT in v1). */
-    long long extractUniqueKey(RowData* input) const;
-
-    /** Rebuild sortedMembers from the MapView of the current key. */
-    void rebuildFromView();
-
     // ---- plan configuration ----
     int sortKeyIndex;
-    int sortKeyId = 0; // omni DataTypeId of the sort column
     bool sortAscending;
     long rankEnd; // Top-N capacity N (rankStart fixed at 1 in v1)
-    int uniqueKeyIndex; // -1 = keyless mode (see class comment)
-    std::string uniqueKeyTypeName;
     int aggFuncIndex;
     int filterIndex;
     bool hasFilter;
     bool generateUpdateBefore;
 
-    // ---- persistent layer (Scheme B) ----
+    // ---- contract-provided store (unused in Scheme A) ----
     StateDataViewStore* store = nullptr;
-    KeyedStateMapViewWithKeysNotNull<VoidNamespace, long, long>* membersView = nullptr;
 
-    // ---- in-memory working copy: rank-ordered board of the current group ----
-    std::vector<LeaderboardMember> sortedMembers;
-    // Keyless-mode ledger key generator (insertion sequence); unused in keyed mode.
-    long nextSeqNo = 0;
+    // ---- in-memory working copy of the accState row ----
+    // rankEnd BIGINT slots in rank order (index 0 = rank 1); EMPTY_SLOT = free.
+    std::vector<long long> slots;
 
-    /** typeIds of the emitted aggregate row [sortKey, rn] (both BIGINT in v1). */
+    /** typeIds of the emitted aggregate row [value, rn] (both BIGINT in v1). */
     std::vector<int> aggValueTypeIds;
 };
 

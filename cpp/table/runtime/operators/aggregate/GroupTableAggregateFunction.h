@@ -16,22 +16,26 @@
  * board"):
  *
  *   processElement (mirrors Flink GroupTableAggFunction 1:1):
- *     1. accumulators = accState.value(); null => firstRow (retract msg on a new group is
- *        dropped, same as GroupAggFunction).
- *     2. function.setAccumulators(acc)  -- the function rebuilds its in-memory board from
- *        the keyed MapView of the current group.
+ *     1. accumulators = accState.value(); null => firstRow. Retraction input is
+ *        dropped up front: the Top2 UDF declares no retract (plain Flink's codegen
+ *        would fail on it), and the whitelist plan is append-only anyway.
+ *     2. function.setAccumulators(acc)  -- the function loads its [first, second,
+ *        ...] working copy from the accState row of the current group.
  *     3. if (!firstRow && generateUpdateBefore) emitValue(true)  -- retract the OLD board
- *        BEFORE touching the ledger, so the function still sees the old ranking.
- *     4. accumulate / retract the input row (isAccumulateMsg switch).
- *     5. if (!function.isGroupEmpty()) emitValue(false, firstRow)  -- emit the NEW board
- *        (INSERT on first row, UPDATE_AFTER otherwise); keep accState.
- *        else -- silent group death: accState.clear() + function.cleanup(); no row is
- *        emitted (the old board was already retracted in step 3; parity with Flink which
- *        clears silently when recordCounter hits zero).
+ *        BEFORE accumulate, so the function still sees the old ranking.
+ *     4. accumulate the input row (append-only: retract was dropped in step 1).
+ *     5. function.getAccumulators(acc); accState.update(acc)  -- persist the new
+ *        accumulator; then emitValue(false, firstRow) emits the NEW board (INSERT
+ *        on first row, UPDATE_AFTER otherwise). The Top2 accumulator only grows,
+ *        so the group never dies and accState is never cleared.
  *
- * Accumulator state note: the ROW_NUMBER function uses zero BinaryRowData accumulator slots
- * (Scheme B, members live in a keyed MapView). accState still exists with arity 0 and serves
- * exactly one purpose: non-null value means "group alive" (firstRow / death bookkeeping).
+ * Accumulator state (Scheme A, Flink state-shape parity): accState is a
+ * ValueState<RowData> holding the accumulator row [first, second, ...] with
+ * rankEnd BIGINT slots -- byte-identical to what plain Flink's codegen'd Top2
+ * handler persists into its own accState, so checkpoints/savepoints are
+ * engine-interoperable (a Java job and a native job can resume each other's
+ * state). The handler (RowNumberFunction) keeps no private state of its own;
+ * its working copy is loaded/stored through setAccumulators/getAccumulators.
  *
  * v1 scope: single ROW_NUMBER aggregate call. Multiple table aggregate calls extend the
  * creation section into an if-chain/factory, mirroring GroupAggFunction::InitAggFunctions.
@@ -118,7 +122,7 @@ private:
     // ---- runtime state ----
     ValueState<RowData*>* accState = nullptr;
     TableAggsHandleFunction* function = nullptr; // v1: single ROW_NUMBER call
-    int accumulatorArity = 0; // arity of the accState row (0 in v1: Scheme B)
+    int accumulatorArity = 0; // arity of the accState row (= rankEnd BIGINT slots)
 };
 
 #endif // FLINK_TNEL_GROUPTABLEAGGREGATEFUNCTION_H

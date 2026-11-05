@@ -1,45 +1,52 @@
 /*
  * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
  * You can use this software according to the terms and conditions of the Mulan PSL v2.
- * You can obtain a copy of Mulan PSL v2 at:
+ * You may obtain a copy of Mulan PSL v2 at:
  *          http://license.coscl.org.cn/MulanPSL2
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
  * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
- * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PSL v2 for more details.
  */
 
 // GroupTableAggregateFunctionTest.cpp
 //
-// Unit tests for the native GroupTableAggregate operator (ROW_NUMBER Top-N leaderboard).
+// Unit tests for the native GroupTableAggregate operator (Top2 table aggregate).
 // Mirrors the GroupAggFunctionTest setup pattern: the operator is created through
 // StreamOperatorFactory from a JSON description (so the test also covers the factory
 // registration branch), then rows are fed via setKeyContextElement + processElement.
 //
-// Differences vs GroupAggFunctionTest:
-//  - GroupAgg asserts on the reused getResultRow(); this operator emits whole boards
-//    through TimestampedCollector::collect (0..N rows per input row), so assertions
-//    capture what arrives at the downstream output. TimestampedCollector wraps each
-//    emitted row into a fresh StreamRecord, hence the capturing output unwraps it.
-//  - Field values are copied out inside collect() while the row is guaranteed alive;
-//    the operator may replace its key rows later, so capturing RowData* pointers
-//    would risk dangling reads.
+// State model under test (Scheme A, Flink state-shape parity): all persistent state
+// lives in the operator's ValueState<RowData> accState as a [first, second] row of
+// rankEnd BIGINT slots -- the same shape plain Flink's codegen'd Top2 handler
+// persists, so checkpoints are engine-interoperable. No MapView/ledger exists.
 //
 // Input schema (3 BIGINT columns): [category, bidder, price]
-//   grouping=[0] (category), sortFieldIndices=[2] price DESC, uniqueKeyIndex=1 (bidder),
-//   rankRange=Top-2. Output rows: [category, price, rn] with changelog RowKind.
+//   grouping=[0] (category), sortFieldIndices=[2] price DESC, keyless (no
+//   uniqueKeyIndex -- the Top2 acceptance shape), rankRange=Top-2.
+//   Output rows: [category, price, rn] with changelog RowKind.
 //
 // Case mapping to the test-design document:
-//   1 MultiRowOutputCorrectness   (case 1: multi-row output, ordering)
-//   2 FirstRowPath                (case 2: createAccumulators branch)
-//   3 UpdateBeforeOrdering        (case 3: -U rows strictly before +U rows)
-//   4 NoUpdateBefore              (case 4: negative -- no -U row at all)
-//   5 RetractAndSilentDeath       (case 5: retract input + silent group death)
-//   6 DualBackendConsistency      (cases 6+7: HashMap vs RocksDB identical output)
-//   7 DeathAndRebuild             (case 8: state cleared on death -> firstRow rebuild;
-//                                  the StateTtlConfig variant is deferred to v2)
-//   8 RetractForUnknownGroupIsDropped  (bonus: GroupAggFunction parity guard)
-//   9 DuplicateBidIsIdempotent    (bonus: uniqueId ledger, replay does not duplicate)
+//   1 MultiRowOutputCorrectness       (case 1: multi-row output, ordering)
+//   2 FirstRowPath                    (case 2: createAccumulators branch)
+//   3 UpdateBeforeOrdering            (case 3: -U rows strictly before +U rows)
+//   4 NoUpdateBefore                  (case 4: negative -- no -U row at all)
+//   5 RetractInputIsDropped           (case 5 reworked: the Top2 UDF declares no
+//                                      retract, so -D input is dropped silently and
+//                                      the next +I row recovers normally)
+//   6 DualBackendConsistency          (cases 6+7: HashMap vs RocksDB identical output;
+//                                      RocksDB exercises the accState RowData
+//                                      serialize/deserialize round-trip)
+//   7 AccumulatorPersistsAcrossKeys   (case 8 reworked: after a key switch the
+//                                      group's [first, second] is restored from
+//                                      accState -- proves Scheme A persistence)
+//   8 RetractForUnknownGroupIsDropped (bonus guard: no output, no state creation)
+//   9 NotInTopEmitsUnchangedBoard     (bonus: a value below the board still
+//                                      re-emits the whole board -- Flink emits
+//                                      emitValue output on EVERY input row)
+//  10 NoUniqueKeyMatchesFlinkTop2     (keyless acceptance shape, 12-row changelog)
+//  11 NoUniqueKeyDuplicateValueRanksTwice (same price twice ranks twice: plain
+//                                      Flink Top2 TableAggregateFunction semantics)
 
 #include "table/runtime/operators/aggregate/GroupTableAggregateFunction.h"
 #include <nlohmann/json.hpp>
@@ -151,7 +158,10 @@ struct GroupTableAggTestRig {
     }
 };
 
-GroupTableAggTestRig makeRig(bool generateUpdateBefore, const std::string& backend, int uniqueKeyIndex = 1)
+// Keyless rig (the Top2 acceptance shape: no uniqueKeyIndex in the JSON). The
+// accTypes array mirrors the real Flink plan: the Top2 accumulator row is
+// [first BIGINT, second BIGINT].
+GroupTableAggTestRig makeRig(bool generateUpdateBefore, const std::string& backend)
 {
     std::string description = R"DELIM({
         "input_channels": [0],
@@ -164,10 +174,9 @@ GroupTableAggTestRig makeRig(bool generateUpdateBefore, const std::string& backe
                 "sortFieldIndices": [2],
                 "sortAscendingOrders": [false],
                 "rankRange": "rankStart=1, rankEnd=2",
-                "uniqueKeyIndex": 1,
                 "generateUpdateBefore": true,
                 "aggInfoList": {
-                    "accTypes": [],
+                    "accTypes": ["BIGINT", "BIGINT"],
                     "aggValueTypes": ["BIGINT", "BIGINT"],
                     "aggregateCalls": [{"aggregationFunction": "ROW_NUMBER", "argIndexes": [2],
                                         "name": "ROW_NUMBER($2)", "filterArg": -1}],
@@ -190,13 +199,6 @@ GroupTableAggTestRig makeRig(bool generateUpdateBefore, const std::string& backe
 
     json parsedJson = json::parse(description);
     parsedJson["operators"][0]["description"]["generateUpdateBefore"] = generateUpdateBefore;
-    if (uniqueKeyIndex == -1) {
-        // Keyless mode: the Java side omits the field entirely when the plan has no identity
-        // column (Top2 acceptance SQL); exercise that exact JSON shape here.
-        parsedJson["operators"][0]["description"].erase("uniqueKeyIndex");
-    } else {
-        parsedJson["operators"][0]["description"]["uniqueKeyIndex"] = uniqueKeyIndex;
-    }
 
     omnistream::OperatorConfig opConfig(
         "org.apache.flink.streaming.api.operators.KeyedProcessOperator",
@@ -361,10 +363,11 @@ TEST(GroupTableAggregateFunctionTest, NoUpdateBefore)
 }
 
 // ---------------------------------------------------------------------------
-// Case 5: -D input rows walk retract(); when the board empties the group dies
-// silently -- the old board was already retracted, and no further row appears.
+// Case 5 (reworked for Top2 semantics): the Top2 UDF declares no retract, so a -D
+// input row is dropped silently -- no output, no state change -- and the next +I
+// row proceeds normally from the preserved board.
 // ---------------------------------------------------------------------------
-TEST(GroupTableAggregateFunctionTest, RetractAndSilentDeath)
+TEST(GroupTableAggregateFunctionTest, RetractInputIsDropped)
 {
     auto rig = makeRig(true, "HashMapStateBackend");
 
@@ -372,21 +375,21 @@ TEST(GroupTableAggregateFunctionTest, RetractAndSilentDeath)
     rig.feed(1, 1, 5000); // 张三 -> board [李四8000, 张三5000]
     rig.clearCaptured();
 
-    rig.feed(1, 2, 8000, RowKind::DELETE); // -D 李四: board shrinks to [张三5000]
-    expectOutput(*rig.output,
-        {"-U|1|8000|1", "-U|1|5000|2", "+U|1|5000|1"},
-        "case5-retract-one");
+    rig.feed(1, 2, 8000, RowKind::DELETE); // -D: not supported by the Top2 UDF
+    EXPECT_TRUE(rig.output->captured.empty()) << "case5: dropped retract must emit nothing";
 
     rig.clearCaptured();
-    rig.feed(1, 1, 5000, RowKind::DELETE); // -D 张三: board empties -> group death
-    // Silent death: exactly the pre-death retraction, and nothing after it.
-    expectOutput(*rig.output, {"-U|1|5000|1"}, "case5-silent-death");
+    rig.feed(1, 3, 9000); // 赵六: board [9000, 8000] proves the old board survived
+    expectOutput(*rig.output,
+        {"-U|1|8000|1", "-U|1|5000|2", "+U|1|9000|1", "+U|1|8000|2"},
+        "case5-recover-after-retract-drop");
 }
 
 // ---------------------------------------------------------------------------
 // Cases 6+7: the same data under HashMap and RocksDB backends must produce
-// byte-identical changelog streams. RocksDB exercises the serialize/deserialize
-// path of the zero-slot accState and the MapView ledger.
+// byte-identical changelog streams. RocksDB exercises the real serialize /
+// deserialize round-trip of the Scheme A accState accumulator row
+// ([first, second] as a ValueState<RowData>) -- engine-interoperable state.
 // ---------------------------------------------------------------------------
 TEST(GroupTableAggregateFunctionTest, DualBackendConsistency)
 {
@@ -411,27 +414,32 @@ TEST(GroupTableAggregateFunctionTest, DualBackendConsistency)
 }
 
 // ---------------------------------------------------------------------------
-// Case 8 (TTL deferred to v2, replaced by programmatic death): after the group
-// dies, the same key arriving again must walk the firstRow path and emit an
-// INSERT (proving accState was cleared), not an UPDATE_AFTER.
+// Case 8 (reworked for Scheme A): switching keys back and forth must restore each
+// group's [first, second] from its accState row. category 1 builds a board, then
+// category 2 is processed (a key switch that would clobber a per-operator working
+// copy), then category 1 continues -- its board must continue from the persisted
+// accumulator, not from scratch.
 // ---------------------------------------------------------------------------
-TEST(GroupTableAggregateFunctionTest, DeathAndRebuild)
+TEST(GroupTableAggregateFunctionTest, AccumulatorPersistsAcrossKeys)
 {
     auto rig = makeRig(true, "HashMapStateBackend");
 
-    rig.feed(1, 2, 8000);                        // +I 李四
+    rig.feed(1, 1, 5000); // category 1: board [5000]
+    rig.feed(1, 2, 8000); // category 1: board [8000, 5000]
+    rig.feed(2, 3, 3000); // category 2: board [3000] (key switch in between)
     rig.clearCaptured();
-    rig.feed(1, 2, 8000, RowKind::DELETE);        // -D 李四 -> death (only the retraction row)
-    ASSERT_EQ(rig.output->captured.size(), 1u);
 
-    rig.clearCaptured();
-    rig.feed(1, 3, 6500);                         // same key, brand-new group
-    expectOutput(*rig.output, {"+I|1|6500|1"}, "case8-rebuild");
+    // Back to category 1: 6500 enters the RESTORED [8000, 5000] board (evicts 5000).
+    // If the accumulator had not persisted, the board would be [6500] alone.
+    rig.feed(1, 4, 6500);
+    expectOutput(*rig.output,
+        {"-U|1|8000|1", "-U|1|5000|2", "+U|1|8000|1", "+U|1|6500|2"},
+        "case8-accumulator-persists");
 }
 
 // ---------------------------------------------------------------------------
 // Bonus: a retract message for a group that never existed is dropped silently
-// (same policy as GroupAggFunction).
+// (covered by the unconditional retract drop, and no state must be created).
 // ---------------------------------------------------------------------------
 TEST(GroupTableAggregateFunctionTest, RetractForUnknownGroupIsDropped)
 {
@@ -443,38 +451,41 @@ TEST(GroupTableAggregateFunctionTest, RetractForUnknownGroupIsDropped)
 }
 
 // ---------------------------------------------------------------------------
-// Bonus: replaying the same bid (unique bidder + price) is idempotent -- the
-// uniqueId ledger keeps a single member; the board is not duplicated.
+// Bonus (Top2 semantics): a value that does not make the board still triggers the
+// full re-emission flow -- Flink runs emitValue on EVERY input row, so the old
+// board is retracted (-U) and the unchanged board is re-emitted (+U). This pins
+// the "every input emits, even a no-op" behavior of the acceptance changelog.
 // ---------------------------------------------------------------------------
-TEST(GroupTableAggregateFunctionTest, DuplicateBidIsIdempotent)
+TEST(GroupTableAggregateFunctionTest, NotInTopEmitsUnchangedBoard)
 {
     auto rig = makeRig(true, "HashMapStateBackend");
 
-    rig.feed(1, 1, 5000); // 张三 5000
+    rig.feed(1, 1, 8000); // board [8000]
+    rig.feed(1, 2, 5000); // board [8000, 5000]
     rig.clearCaptured();
 
-    rig.feed(1, 1, 5000); // same bid again
+    rig.feed(1, 3, 3000); // below the board: no state change, but the board is re-emitted
 
-    // One member on the board: exactly one retraction and one new-value row.
-    expectOutput(*rig.output, {"-U|1|5000|1", "+U|1|5000|1"}, "bonus-duplicate-idempotent");
+    expectOutput(*rig.output,
+        {"-U|1|8000|1", "-U|1|5000|2", "+U|1|8000|1", "+U|1|5000|2"},
+        "bonus-not-in-top-reemits");
 }
 
 // ---------------------------------------------------------------------------
-// Keyless mode (uniqueKeyIndex missing): the acceptance SQL shape. The input row of the
-// GroupTableAggregate is [grouping key, UDF argument] with no identity column, so the
-// ledger key degenerates to the insertion sequence and idempotence is off. With distinct
-// prices the changelog must be byte-identical to the keyed mode (idempotence never fires).
+// Keyless acceptance shape (uniqueKeyIndex absent, as the Top2 whitelist plan
+// writes it): four distinct prices produce the canonical 12-row changelog,
+// the exact sequence the acceptance SQL (top2_bid.csv, bidder=1 series) produces.
+// ---------------------------------------------------------------------------
 TEST(GroupTableAggregateFunctionTest, NoUniqueKeyMatchesFlinkTop2)
 {
-    auto rig = makeRig(true, "HashMapStateBackend", -1);
+    auto rig = makeRig(true, "HashMapStateBackend");
 
     rig.feed(1, 1, 5000); // 张三
     rig.feed(1, 2, 8000); // 李四
     rig.feed(1, 3, 6500); // 王五
     rig.feed(1, 4, 9000); // 赵六
 
-    // Same 12-row changelog as MultiRowOutputCorrectness (keyed mode): the board content
-    // only depends on (price, arrival order), both identical here.
+    // Same 12-row changelog as MultiRowOutputCorrectness.
     expectOutput(
         *rig.output,
         {"+I|1|5000|1",
@@ -485,18 +496,19 @@ TEST(GroupTableAggregateFunctionTest, NoUniqueKeyMatchesFlinkTop2)
 }
 
 // ---------------------------------------------------------------------------
-// Keyless mode semantics fork: the SAME price arriving twice ranks twice (plain Flink Top2
-// TableAggregateFunction semantics -- accumulate() lets an equal value take the second
-// place). The keyed mode would instead drop the second row as a duplicate identity.
+// Keyless semantics fork: the SAME price arriving twice ranks twice (plain Flink Top2
+// TableAggregateFunction semantics -- the equal value settles strictly below the
+// occupied slot instead of being deduplicated).
+// ---------------------------------------------------------------------------
 TEST(GroupTableAggregateFunctionTest, NoUniqueKeyDuplicateValueRanksTwice)
 {
-    auto rig = makeRig(true, "HashMapStateBackend", -1);
+    auto rig = makeRig(true, "HashMapStateBackend");
 
     rig.feed(1, 1, 5000);
-    rig.feed(1, 2, 5000); // same price, different bidder: still ranks twice
+    rig.feed(1, 2, 5000); // same price: still ranks twice
 
     // First row: single-member board (+I). Second row: two equal prices on the board,
-    // earlier arrival ranks first (insertion-order tie-break = seqNo ascending).
+    // earlier arrival ranks first (strict '>' keeps the earlier one at rank 1).
     expectOutput(
         *rig.output,
         {"+I|1|5000|1", "-U|1|5000|1", "+U|1|5000|1", "+U|1|5000|2"},
