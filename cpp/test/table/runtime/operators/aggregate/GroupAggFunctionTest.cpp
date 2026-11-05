@@ -6,6 +6,7 @@
 #include "core/typeutils/LongSerializer.h"
 #include <gtest/gtest.h>
 #include <chrono>
+#include <unordered_map>
 #include "table/data/binary/BinaryRowData.h"
 #include "runtime/taskmanager/OmniRuntimeEnvironment.h"
 #include "core/api/common/TaskInfoImpl.h"
@@ -1462,6 +1463,122 @@ TEST(GroupAggFunctionTest, VectorBatch_OneKeyAvgAggTest)
     4        , 5         , +I
     1        , 6         , +U
     */
+}
+
+omnistream::VectorBatch* newVectorBatchMultiKeyVarcharAvg()
+{
+    // Columns: name (VARCHAR), id (VARCHAR), num (INTEGER).
+    omnistream::VectorBatch* vbatch = new omnistream::VectorBatch(11);
+    auto colName = new omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>(11);
+    auto colId = new omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>(11);
+    auto colNum = new omniruntime::vec::Vector<int32_t>(11);
+
+    std::array<std::string_view, 11> names = {
+        "cat_a", "cat_a", "cat_a", "cat_a", "cat_a", "cat_a", "cat_a", "cat_b", "cat_b", "cat_b", "cat_c"};
+    std::array<std::string_view, 11> ids = {"p1", "p1", "p2", "p2", "p1", "p2", "p3", "q1", "q1", "q2", "r1"};
+    std::array<int32_t, 11> nums = {5, 1, 3, 3, 1, 3, 1, 4, 2, 2, 1};
+    for (int i = 0; i < 11; i++) {
+        colName->SetValue(i, names[i]);
+        colId->SetValue(i, ids[i]);
+        colNum->SetValue(i, nums[i]);
+        vbatch->setRowKind(i, RowKind::INSERT);
+    }
+    vbatch->Append(colName);
+    vbatch->Append(colId);
+    vbatch->Append(colNum);
+    return vbatch;
+}
+
+std::string MultiKeyVarcharAvgConfigStr = R"delimiter({
+        "name" : "GroupAggregate(groupBy=[name, id], select=[name, id, AVG(num) AS $2])",
+        "description":{
+        "inputTypes":["VARCHAR(2147483647)","VARCHAR(2147483647)","INTEGER"],
+        "aggInfoList":{
+        "aggregateCalls":[
+        {"name":"AVG($2)","filterArg":-1,"argIndexes":[2],"aggregationFunction":"IntAvgAggFunction","consumeRetraction":"false"}
+        ],
+        "indexOfCountStar":-1,
+        "accTypes":["BIGINT","BIGINT"],
+        "aggValueTypes":["INT"]
+        },
+        "generateUpdateBefore":true,
+        "outputTypes":["VARCHAR(2147483647)","VARCHAR(2147483647)","INTEGER"],
+        "distinctInfos":[],
+        "grouping":[0,1],
+        "originDescription":null
+        },
+        "id":"org.apache.flink.streaming.api.operators.KeyedProcessOperator"
+        })delimiter";
+
+TEST(GroupAggFunctionTest, VectorBatch_MultiKeyVarcharAvgAggTest)
+{
+    nlohmann::json parsedJson = nlohmann::json::parse(MultiKeyVarcharAvgConfigStr);
+    OperatorConfig opConfig(
+        parsedJson["id"],
+        parsedJson["name"],
+        parsedJson["description"]["inputType"],
+        parsedJson["description"]["outputType"],
+        parsedJson["description"]);
+
+    BatchOutputTest* output = new BatchOutputTest();
+    GroupAggFunction* func = new GroupAggFunction(0l, opConfig.getDescription());
+    KeyedProcessOperator<RowData*, RowData*, RowData*>* keyedOp =
+        new KeyedProcessOperator(func, output, opConfig.getDescription());
+    keyedOp->setup();
+
+    auto env2 = new omnistream::RuntimeEnvironmentV2();
+    auto taskInfo = new TaskInformationPOD();
+    taskInfo->setStateBackend("HashMapStateBackend");
+    {
+        auto configPOD = taskInfo->getStreamConfigPOD();
+        auto operatorDesc = configPOD.getOperatorDescription();
+        operatorDesc.setOperatorId("deadbeefdeadbeefdeadbeefdeadbeef");
+        configPOD.setOperatorDescription(operatorDesc);
+        taskInfo->setStreamConfigPOD(configPOD);
+    }
+    env2->SetTaskStateManager(std::make_shared<omnistream::TaskStateManager>());
+    env2->setTaskConfiguration(*taskInfo);
+    StreamTaskStateInitializerImpl* initializer = new StreamTaskStateInitializerImpl(env2);
+    std::vector<omnistream::RowField>* typeInfo = new std::vector<omnistream::RowField>(
+        {omnistream::RowField("col0", BasicLogicalType::BIGINT),
+         omnistream::RowField("col1", BasicLogicalType::BIGINT)});
+    TypeSerializer* ser = new RowDataSerializer(new omnistream::RowType(false, *typeInfo));
+    keyedOp->initializeState(initializer, ser);
+    keyedOp->open();
+
+    omnistream::VectorBatch* vbatch = newVectorBatchMultiKeyVarcharAvg();
+    keyedOp->processBatch(new StreamRecord(vbatch));
+
+    omnistream::VectorBatch* resultBatch = reinterpret_cast<omnistream::VectorBatch*>(output->getVectorBatch());
+    int rowCount = resultBatch->GetRowCount();
+    int colCount = resultBatch->GetVectorCount();
+    EXPECT_EQ(rowCount, 6);
+    EXPECT_EQ(colCount, 3);
+
+    // Regression for setInt: the AVG output column (declared INTEGER) must be a real
+    // int32 column (OMNI_INT), not an int64 (OMNI_LONG) one. Storing INT values in a
+    // Vector<int64_t> makes Calc's CAST read the column at a 4-byte stride and corrupt
+    // every other value.
+    EXPECT_EQ(resultBatch->Get(2)->GetTypeId(), omniruntime::type::DataTypeId::OMNI_INT);
+
+    std::unordered_map<std::string, int32_t> actual;
+    for (int i = 0; i < rowCount; i++) {
+        auto nameVec = reinterpret_cast<omniruntime::vec::Vector<
+            omniruntime::vec::LargeStringContainer<std::string_view>>*>(resultBatch->Get(0));
+        auto idVec = reinterpret_cast<omniruntime::vec::Vector<
+            omniruntime::vec::LargeStringContainer<std::string_view>>*>(resultBatch->Get(1));
+        std::string name(nameVec->GetValue(i));
+        std::string id(idVec->GetValue(i));
+        actual[name + "," + id] = resultBatch->GetValueAt<int32_t>(2, i);
+    }
+
+    EXPECT_EQ(actual.size(), 6u);
+    EXPECT_EQ(actual["cat_a,p1"], 2); // (5+1+1)/3 = 2
+    EXPECT_EQ(actual["cat_a,p2"], 3); // (3+3+3)/3 = 3
+    EXPECT_EQ(actual["cat_a,p3"], 1);
+    EXPECT_EQ(actual["cat_b,q1"], 3); // (4+2)/2 = 3
+    EXPECT_EQ(actual["cat_b,q2"], 2);
+    EXPECT_EQ(actual["cat_c,r1"], 1);
 }
 
 omnistream::VectorBatch* newVectorBatchForQ17WithSize(int batchSize = 10000)
