@@ -12,10 +12,108 @@
 #include <taskmanager/OmniTask.h>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <memory>
 #include "common.h"
 #include "org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader.h"
 #include "runtime/io/network/netty/OmniCreditBasedSequenceNumberingViewReader.h"
 #include "runtime/executiongraph/descriptor/ResultPartitionIDPOD.h"
+
+namespace {
+// A copied callback keeps the Java reference alive until an in-flight notification returns.
+class JavaReaderNotification {
+public:
+    JavaReaderNotification(JNIEnv* env, jobject reader)
+    {
+        env->GetJavaVM(&jvm_);
+        jclass cls = env->GetObjectClass(reader);
+        method_ = env->GetMethodID(cls, "notifyNativeDataAvailable", "()V");
+        env->DeleteLocalRef(cls);
+        if (method_) {
+            reader_ = env->NewGlobalRef(reader);
+        }
+    }
+
+    ~JavaReaderNotification()
+    {
+        bool attached = false;
+        JNIEnv* env = GetEnv(attached);
+        if (env && reader_) {
+            env->DeleteGlobalRef(reader_);
+        }
+        if (attached) {
+            jvm_->DetachCurrentThread();
+        }
+    }
+
+    bool IsValid() const
+    {
+        return reader_ && method_;
+    }
+
+    void Notify()
+    {
+        bool attached = false;
+        JNIEnv* env = GetEnv(attached);
+        if (env) {
+            env->CallVoidMethod(reader_, method_);
+            if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+                ERROR_RELEASE("Failed to notify Java network reader");
+            }
+        }
+        if (attached) {
+            jvm_->DetachCurrentThread();
+        }
+    }
+
+private:
+    JNIEnv* GetEnv(bool& attached)
+    {
+        JNIEnv* env = nullptr;
+        const jint status = jvm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_8);
+        if (status == JNI_EDETACHED) {
+            if (jvm_->AttachCurrentThread(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) {
+                return nullptr;
+            }
+            attached = true;
+        } else if (status != JNI_OK) {
+            return nullptr;
+        }
+        return env;
+    }
+
+    JavaVM* jvm_ = nullptr;
+    jobject reader_ = nullptr;
+    jmethodID method_ = nullptr;
+};
+} // namespace
+
+JNIEXPORT void JNICALL
+Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader_registerDataAvailableListener(
+    JNIEnv* env, jobject reader, jlong nativeReaderRef)
+{
+    auto* nativeReader = reinterpret_cast<omnistream::OmniCreditBasedSequenceNumberingViewReader*>(nativeReaderRef);
+    auto notification = std::make_shared<JavaReaderNotification>(env, reader);
+    if (notification->IsValid()) {
+        nativeReader->SetDataAvailableCallback([notification] { notification->Notify(); });
+    }
+}
+
+JNIEXPORT jint JNICALL
+Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader_getNextBufferType(
+    JNIEnv*, jobject, jlong nativeReaderRef)
+{
+    return reinterpret_cast<omnistream::OmniCreditBasedSequenceNumberingViewReader*>(nativeReaderRef)
+        ->GetNextBufferType();
+}
+
+JNIEXPORT void JNICALL
+Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader_stopNativeReader(
+    JNIEnv*, jobject, jlong nativeReaderRef)
+{
+    reinterpret_cast<omnistream::OmniCreditBasedSequenceNumberingViewReader*>(nativeReaderRef)->Stop();
+}
 
 JNIEXPORT jlong JNICALL
 Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader_createNativeCreditBasedSequenceNumberingViewReader(
@@ -62,6 +160,7 @@ Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingV
         creditBasedSequenceNumberingViewReaderRef);
     // Notifies the producing partition that this consumer is done, which may delete the upstream task.
     // The view reader is not owned by that task, so it is safe to free it afterwards.
+    viewReader->SetDataAvailableCallback(nullptr);
     viewReader->releaseAllResources();
     delete viewReader;
 }
@@ -84,7 +183,21 @@ Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingV
     }
     auto task = reinterpret_cast<omnistream::OmniCreditBasedSequenceNumberingViewReader*>(
         creditBasedSequenceNumberingViewReaderRef);
-    task->notifyDataAvailable();
+    try {
+        task->notifyDataAvailable();
+    } catch (const std::exception& error) {
+        jclass exceptionClass = jniEnv->FindClass("java/lang/IllegalStateException");
+        if (exceptionClass) {
+            jniEnv->ThrowNew(exceptionClass, error.what());
+            jniEnv->DeleteLocalRef(exceptionClass);
+        }
+    } catch (...) {
+        jclass exceptionClass = jniEnv->FindClass("java/lang/IllegalStateException");
+        if (exceptionClass) {
+            jniEnv->ThrowNew(exceptionClass, "Native output drain failed");
+            jniEnv->DeleteLocalRef(exceptionClass);
+        }
+    }
 }
 
 JNIEXPORT void JNICALL

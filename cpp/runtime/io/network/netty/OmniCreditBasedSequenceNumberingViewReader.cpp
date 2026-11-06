@@ -33,10 +33,14 @@ OmniCreditBasedSequenceNumberingViewReader::OmniCreditBasedSequenceNumberingView
 
 OmniCreditBasedSequenceNumberingViewReader::~OmniCreditBasedSequenceNumberingViewReader()
 {
-    stopped_.store(true, std::memory_order_release);
-    if (subpartitionView) {
-        subpartitionView->releaseAllResources();
-        subpartitionView.reset();
+    Stop();
+    std::shared_ptr<ResultSubpartitionView> view;
+    {
+        std::lock_guard<std::recursive_mutex> lock(fetchingDataMutex);
+        view = std::move(subpartitionView);
+    }
+    if (view) {
+        view->releaseAllResources();
     }
 
     DestroyNettyBufferPool();
@@ -59,6 +63,38 @@ void OmniCreditBasedSequenceNumberingViewReader::notifyDataAvailable()
 {
     LOG_TRACE("notifyDataAvailable is invoked queue size by outputflusher");
     this->getNextBufferInternal();
+}
+
+void OmniCreditBasedSequenceNumberingViewReader::SetDataAvailableCallback(std::function<void()> callback)
+{
+    std::function<void()> notify;
+    {
+        std::lock_guard<std::recursive_mutex> lock(queueMutex);
+        dataAvailableCallback_ = std::move(callback);
+        if (!stopped_.load(std::memory_order_acquire) && !serializedBatchQueue.empty()) {
+            notify = dataAvailableCallback_;
+        }
+    }
+    if (notify) {
+        notify();
+    }
+}
+
+void OmniCreditBasedSequenceNumberingViewReader::EnqueueSerializedBatch(std::shared_ptr<SerializedBatchInfo> batch)
+{
+    std::function<void()> notify;
+    {
+        std::lock_guard<std::recursive_mutex> lock(queueMutex);
+        const bool wasEmpty = serializedBatchQueue.empty();
+        serializedBatchQueue.push(std::move(batch));
+        if (wasEmpty && !stopped_.load(std::memory_order_acquire)) {
+            notify = dataAvailableCallback_;
+        }
+    }
+    // Never enter Java holding queueMutex. Publish before requesting another pool buffer.
+    if (notify) {
+        notify();
+    }
 }
 
 void OmniCreditBasedSequenceNumberingViewReader::requestSubpartitionView(
@@ -88,23 +124,56 @@ int OmniCreditBasedSequenceNumberingViewReader::getAvailabilityAndBacklog()
     return queueSize;
 }
 
+int OmniCreditBasedSequenceNumberingViewReader::GetNextBufferType()
+{
+    std::lock_guard<std::recursive_mutex> lock(queueMutex);
+    return serializedBatchQueue.empty() ? -1 : serializedBatchQueue.front()->bufferType;
+}
+
 void OmniCreditBasedSequenceNumberingViewReader::getNextBufferInternal()
 {
+    std::lock_guard<std::recursive_mutex> lock(fetchingDataMutex);
     if (stopped_.load(std::memory_order_acquire)) {
         return;
     }
+    try {
+        DrainInputBuffers();
+    } catch (...) {
+        // Destroying the pool wakes blocked requests during cancellation.
+        if (!stopped_.load(std::memory_order_acquire)) {
+            throw;
+        }
+    }
+}
+
+void OmniCreditBasedSequenceNumberingViewReader::Stop()
+{
+    stopped_.store(true, std::memory_order_release);
+    SetDataAvailableCallback(nullptr);
+    if (localNettyBufferPool_) {
+        localNettyBufferPool_->lazyDestroy();
+    }
+}
+
+void OmniCreditBasedSequenceNumberingViewReader::DrainInputBuffers()
+{
     if (!this->subpartitionView) {
         THROW_LOGIC_EXCEPTION("must be a bug , at this phase subpartitionView should not be null");
     }
 
-    std::lock_guard<std::recursive_mutex> lock(fetchingDataMutex);
-    BufferAndBacklog* bufferAndLog = this->subpartitionView->getNextBuffer();
+    std::unique_ptr<BufferAndBacklog> bufferAndLog(this->subpartitionView->getNextBuffer());
     while (bufferAndLog) {
         Buffer* buffer = bufferAndLog->getBuffer();
         if (auto vectorBatchBuffer = dynamic_cast<VectorBatchBuffer*>(buffer)) {
             if (vectorBatchBuffer->GetSize() > 0) {
                 // serialize data
-                SerializeBufferAndBacklog(vectorBatchBuffer);
+                try {
+                    SerializeBufferAndBacklog(vectorBatchBuffer);
+                } catch (...) {
+                    vectorBatchBuffer->RecycleBuffer();
+                    delete vectorBatchBuffer;
+                    throw;
+                }
             } else {
                 LOG("buffer size is 0, so i need to return " << std::this_thread::get_id());
                 break;
@@ -119,25 +188,28 @@ void OmniCreditBasedSequenceNumberingViewReader::getNextBufferInternal()
             int datasSize = nBuffer->GetSize();
             int bufferType = nBuffer->isBuffer() ? 1 : 2;
             SerializedBatchInfo serializedBatchInfo = {readableAddress, readableAddress, datasSize, bufferType};
-            std::lock_guard<std::recursive_mutex> lock(queueMutex);
             auto serializedBatchInfoPtr = std::make_shared<SerializedBatchInfo>(serializedBatchInfo);
-            std::lock_guard<std::recursive_mutex> maplock(recycleNetworkBufferMutex);
-            networkBufferPendingRecycling.insert({reinterpret_cast<int64_t>(readableAddress), nBuffer});
-            serializedBatchQueue.push(serializedBatchInfoPtr);
+            {
+                std::lock_guard<std::recursive_mutex> maplock(recycleNetworkBufferMutex);
+                networkBufferPendingRecycling.insert({reinterpret_cast<int64_t>(readableAddress), nBuffer});
+            }
+            EnqueueSerializedBatch(std::move(serializedBatchInfoPtr));
         } else {
             THROW_RUNTIME_ERROR("Unknown buffer type in getNextBufferInternal");
         }
 
-        delete bufferAndLog;
-        bufferAndLog = this->subpartitionView->getNextBuffer();
+        if (stopped_.load(std::memory_order_acquire)) {
+            break;
+        }
+        bufferAndLog.reset(this->subpartitionView->getNextBuffer());
     }
 }
 
 int OmniCreditBasedSequenceNumberingViewReader::getNextBuffer()
 {
+    std::lock_guard<std::recursive_mutex> lock(queueMutex);
     int readElementNumber = 0;
     if (!this->serializedBatchQueue.empty()) {
-        std::lock_guard<std::recursive_mutex> lock(queueMutex);
         size_t dataSize = this->serializedBatchQueue.size();
         readElementNumber = dataSize > 10 ? 10 : dataSize;
         uintptr_t dataResultContainer = this->outputBufferStatus->outputBuffer_;
@@ -256,11 +328,10 @@ void OmniCreditBasedSequenceNumberingViewReader::AddNettyBufferInfoToQueue(std::
         bufferInfo->MarkElementNumWritten();
         // bufferInfo->IncrementElementNum();//todo ? why increase here
 
-        std::lock_guard<std::recursive_mutex> lock(queueMutex);
         SerializedBatchInfo serializedBatchInfo = {
             bufferInfo->GetOriginalAddress(), bufferInfo->GetDataAddress(), bufferInfo->GetWrittenBytes()};
         auto serializedBatchInfoPtr = std::make_shared<SerializedBatchInfo>(serializedBatchInfo);
-        serializedBatchQueue.push(serializedBatchInfoPtr);
+        EnqueueSerializedBatch(std::move(serializedBatchInfoPtr));
         bufferInfo = nullptr;
     }
 }
@@ -303,10 +374,9 @@ void OmniCreditBasedSequenceNumberingViewReader::SerializeBufferAndBacklog(Vecto
 void OmniCreditBasedSequenceNumberingViewReader::SerializeEvent(VectorBatchBuffer* vectorBatchBuffer)
 {
     int evenType = vectorBatchBuffer->EventType();
-    std::lock_guard<std::recursive_mutex> lock(queueMutex);
     SerializedBatchInfo serializedBatchInfo = {nullptr, 0, evenType};
     auto serializedBatchInfoPtr = std::make_shared<SerializedBatchInfo>(serializedBatchInfo);
-    serializedBatchQueue.push(serializedBatchInfoPtr);
+    EnqueueSerializedBatch(std::move(serializedBatchInfoPtr));
     INFO_RELEASE(
         ">>>OmniCreditBasedSequenceNumberingViewReader push an event to queue type: "
         << evenType << "from subpartitionView for " << reinterpret_cast<long>(this));
@@ -379,6 +449,14 @@ void OmniCreditBasedSequenceNumberingViewReader::DestroyNettyBufferPool()
             currentInUseNettyMemorySegment->EnableEligibleRecycling();
             RecycleNettyBuffer(reinterpret_cast<long>(currentInUseNettyMemorySegment->GetOriginalAddress()));
         }
+        // Queued descriptors have not been handed to a Java recycler yet.
+        while (!serializedBatchQueue.empty()) {
+            const auto batch = serializedBatchQueue.front();
+            serializedBatchQueue.pop();
+            if (batch->bufferType == 0) {
+                RecycleNettyBuffer(reinterpret_cast<long>(batch->memorySegmentAddress));
+            }
+        }
         localNettyBufferPool_->lazyDestroy();
         localNettyBufferPool_.reset();
     }
@@ -412,7 +490,17 @@ std::shared_ptr<NettyBufferInfo> OmniCreditBasedSequenceNumberingViewReader::Cre
 
 void OmniCreditBasedSequenceNumberingViewReader::releaseAllResources()
 {
-    subpartitionView->releaseAllResources();
+    Stop();
+    std::shared_ptr<ResultSubpartitionView> view;
+    {
+        std::lock_guard<std::recursive_mutex> lock(fetchingDataMutex);
+        view = subpartitionView;
+    }
+    // Releasing the final view can join the upstream flusher. A flusher already
+    // entering this reader must be able to acquire fetchingDataMutex and exit.
+    if (view) {
+        view->releaseAllResources();
+    }
 }
 void OmniCreditBasedSequenceNumberingViewReader::SerializeVectorBatchBufferToRowData(VectorBatchBuffer* buffer)
 {
