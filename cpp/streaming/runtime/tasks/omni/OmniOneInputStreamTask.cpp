@@ -166,12 +166,14 @@ const std::string OmniOneInputStreamTask::getName() const
 std::shared_ptr<CheckpointedInputGate> OmniOneInputStreamTask::CreateCheckpointedInputGate()
 {
     auto checkpointableInputs = env_->GetAllInputGates();
-    if (taskType == 1 && checkpointableInputs.size() != 1) {
+    taskConfiguration_ = env_->taskConfiguration();
+    const bool useUnionInputGate =
+        ShouldUseUnionInputGate(taskType, checkpointableInputs.size(), HasUnionAllInput());
+    if (taskType == SQL_TASK_TYPE && checkpointableInputs.size() != 1 && !useUnionInputGate) {
         throw std::invalid_argument("SQL one-input task requires exactly one physical input gate");
     }
     std::vector<std::shared_ptr<OmniStreamTaskSourceInput>> emptySourceInputs;
 
-    taskConfiguration_ = env_->taskConfiguration();
     auto checkpointExecutionConfig = taskConfiguration_.getExecutionCheckpointConfig();
     const std::int64_t alignedCheckpointTimeoutMillis =
         checkpointExecutionConfig.getAlignedCheckpointTimeoutSecond() * 1000 +
@@ -188,8 +190,15 @@ std::shared_ptr<CheckpointedInputGate> OmniOneInputStreamTask::CreateCheckpointe
         alignedCheckpointTimeoutMillis,
         checkpointExecutionConfig.getCheckpointAfterTasksFinishEnabled());
 
-    if (ShouldUseUnionInputGate(taskType, checkpointableInputs.size(), HasUnionAllInput())) {
+    if (useUnionInputGate) {
         auto unionGate = std::make_shared<UnionInputGate>(checkpointableInputs);
+        const InputFormat unionInputFormat = checkpointableInputs.front()->getInputFormat();
+        for (const auto& inputGate : checkpointableInputs) {
+            if (inputGate->getInputFormat() != unionInputFormat) {
+                throw std::invalid_argument("UNION ALL input gates have different input formats");
+            }
+        }
+        unionGate->initializeInputFormat(unionInputFormat);
         // The union gate reports one INNER_RECOVER after all physical channels recover.
         numberOfInnerRecover = 1;
         return std::make_shared<CheckpointedInputGate>(unionGate, checkpointBarrierHandler, mainMailboxExecutor_);

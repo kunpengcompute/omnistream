@@ -10,6 +10,8 @@
  */
 
 #include "OmniLocalChannelReader.h"
+#include <cstring>
+#include <unordered_set>
 #include "runtime/streamrecord/StreamRecord.h"
 #include "table/typeutils/BinaryRowDataSerializer.h"
 #include "streaming/runtime/streamrecord/StreamElementSerializer.h"
@@ -39,6 +41,17 @@ OmniLocalChannelReader::~OmniLocalChannelReader()
         delete it->second; // this is ReadOnlySlicedNetworkBuffer, so we directly delete it
         it = pendingRecyclingBufferMap.erase(it);
     }
+    std::unordered_set<PendingSqlBuffer*> releasedBatches;
+    for (const auto& entry : pendingSqlRows) {
+        delete[] reinterpret_cast<uint8_t*>(entry.first);
+        const auto& batch = entry.second;
+        if (releasedBatches.insert(batch.get()).second) {
+            batch->buffer->RecycleBuffer();
+            delete batch->buffer;
+            delete[] batch->container;
+        }
+    }
+    pendingSqlRows.clear();
 }
 
 void OmniLocalChannelReader::requestSubpartitionView(
@@ -158,6 +171,18 @@ void OmniLocalChannelReader::recycleMemorySegment(long memorySegmentAddress)
 {
     uint64_t address = static_cast<uint64_t>(memorySegmentAddress);
     std::lock_guard<std::recursive_mutex> lock(recycleBufferMutex);
+    auto sqlRow = pendingSqlRows.find(address);
+    if (sqlRow != pendingSqlRows.end()) {
+        auto batch = sqlRow->second;
+        pendingSqlRows.erase(sqlRow);
+        delete[] reinterpret_cast<uint8_t*>(address);
+        if (--batch->remainingRows == 0) {
+            batch->buffer->RecycleBuffer();
+            delete batch->buffer;
+            delete[] batch->container;
+        }
+        return;
+    }
     auto it = pendingRecyclingBufferMap.find(address);
     if (it != pendingRecyclingBufferMap.end()) {
         it->second->RecycleBuffer();
@@ -317,6 +342,19 @@ void OmniLocalChannelReader::WrapBufferInfoIntoBinaryRowDataInfo(
     memorySegmentInfo->nextDataType = nextDataType;
     memorySegmentInfo->sequenceNumber = sequenceNumber;
     std::lock_guard<std::recursive_mutex> lock(recycleBufferMutex);
-    pendingRecyclingBufferMap.emplace(memorySegmentInfo->memorySegmentAddress, vBuffer);
+    if (totalRow == 0) {
+        vBuffer->RecycleBuffer();
+        delete vBuffer;
+        delete[] dataResultContainer;
+        memorySegmentInfo->memorySegmentAddress = static_cast<uint64_t>(-1);
+        return;
+    }
+    auto batch = std::make_shared<PendingSqlBuffer>(
+        PendingSqlBuffer{vBuffer, dataResultContainer, static_cast<size_t>(totalRow)});
+    for (int i = 0; i < totalRow; ++i) {
+        uint64_t rowAddress;
+        std::memcpy(&rowAddress, dataResultContainer + i * 12 + 4, sizeof(rowAddress));
+        pendingSqlRows.emplace(rowAddress, batch);
+    }
 }
 } // namespace omnistream
