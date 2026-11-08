@@ -186,13 +186,8 @@ void OmniTask::closeRocksDBSharedResources()
 
 void OmniTask::cancel()
 {
-    std::thread::id tid = std::this_thread::get_id();
     if (invokable_ != nullptr) {
-        auto* inputProc = invokable_->input_processor();
         invokable_->cancel();
-        if (inputProc != nullptr) {
-            inputProc->close();
-        }
     }
 }
 
