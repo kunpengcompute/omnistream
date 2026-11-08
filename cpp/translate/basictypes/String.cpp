@@ -41,11 +41,6 @@ String& String::operator=(String&& str) = default;
 
 String::~String() = default;
 
-std::string_view String::ref()
-{
-    return inner;
-}
-
 void String::putRefCount()
 {
     if (--refCount <= 0) {

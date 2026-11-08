@@ -113,7 +113,7 @@ public:
 
     inline static String* valueOf(int64_t val);
 
-    std::string_view ref();
+    inline std::string_view ref();
 
     virtual inline void setData(char* pointer);
 
@@ -313,6 +313,11 @@ inline String* String::valueOf(int32_t obj)
 inline String* String::valueOf(int64_t obj)
 {
     return new String(std::to_string(obj));
+}
+
+inline std::string_view String::ref()
+{
+    return this->inner;
 }
 
 inline void String::setData(char* pointer)
