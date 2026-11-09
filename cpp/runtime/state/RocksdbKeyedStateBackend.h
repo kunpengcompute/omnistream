@@ -37,6 +37,7 @@
 #include "runtime/state/RocksDBFullSnapshotResources.h"
 #include "RegisteredKeyValueStateBackendMetaInfo.h"
 #include "table/data/RowData.h"
+#include "table/typeutils/SortedMapValue.h"
 #include "table/runtime/operators/window/TimeWindow.h"
 #include "RocksDBConfigurableOptions.h"
 
@@ -594,6 +595,8 @@ uintptr_t RocksdbKeyedStateBackend<K>::GetValueState(TypeSerializer* namespaceSe
     } else if (dataId == BackendDataType::ROW_LIST_BK) {
         // ValueState<List<RowData>> (e.g. SinkUpsertMaterializer "values")
         return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, std::vector<RowData*>*>(
+    } else if (dataId == BackendDataType::SORTED_MAP_BK) {
+        return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, SortedMapValue*>(
             namespaceSerializer, stateDesc);
     } else if (dataId == BackendDataType::EXTERNAL_BIGINT_BK) {
         return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, int64_t>(namespaceSerializer, stateDesc);

@@ -145,7 +145,25 @@ std::vector<VBToRowSerializer> rowSerializerCenter = {
     SerializeLongIntoRowData,       // OMNI_INTERVAL_DAY_TIME
     SerializeVarcharIntoRowData,    // OMNI_VARCHAR
     SerializeVarcharIntoRowData,    // OMNI_CHAR,
-    nullptr                         // OMNI_CONTAINER,
+    nullptr,                        // OMNI_CONTAINER,
+    nullptr,                        // OMNI_BYTE
+    nullptr,                        // OMNI_FLOAT
+    nullptr,                        // OMNI_VARBINARY
+    SerializeLongIntoRowData,       // OMNI_TIME_WITHOUT_TIME_ZONE
+    SerializeLongIntoRowData,       // OMNI_TIMESTAMP_WITHOUT_TIME_ZONE
+    nullptr,                        // OMNI_TIMESTAMP_WITH_TIME_ZONE
+    SerializeLongIntoRowData,       // OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE
+    nullptr,                        // OMNI_MULTISET
+    nullptr,                        // (unused)
+    nullptr,                        // (unused)
+    nullptr,                        // (unused)
+    nullptr,                        // (unused)
+    nullptr,                        // OMNI_ARRAY
+    nullptr,                        // OMNI_MAP
+    nullptr,                        // OMNI_ROW
+    nullptr,                        // OMNI_UNKNOWN
+    nullptr,                        // OMNI_FUNCTION
+    nullptr,                        // OMNI_OPAQUE
 };
 
 std::vector<RowToVBDeSerializer> rowDeserializerCenter = {
@@ -166,5 +184,23 @@ std::vector<RowToVBDeSerializer> rowDeserializerCenter = {
     nullptr,                       // OMNI_INTERVAL_DAY_TIME
     DeserializeVarcharFromRowData, // OMNI_VARCHAR
     DeserializeVarcharFromRowData, // OMNI_CHAR,
-    nullptr                        // OMNI_CONTAINER,
+    nullptr,                       // OMNI_CONTAINER,
+    nullptr,                       // OMNI_BYTE
+    nullptr,                       // OMNI_FLOAT
+    nullptr,                       // OMNI_VARBINARY
+    DeserializeLongFromRowData,    // OMNI_TIME_WITHOUT_TIME_ZONE
+    DeserializeLongFromRowData,    // OMNI_TIMESTAMP_WITHOUT_TIME_ZONE
+    nullptr,                       // OMNI_TIMESTAMP_WITH_TIME_ZONE
+    DeserializeLongFromRowData,    // OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE
+    nullptr,                       // OMNI_MULTISET
+    nullptr,                       // (unused)
+    nullptr,                       // (unused)
+    nullptr,                       // (unused)
+    nullptr,                       // (unused)
+    nullptr,                       // OMNI_ARRAY
+    nullptr,                       // OMNI_MAP
+    nullptr,                       // OMNI_ROW
+    nullptr,                       // OMNI_UNKNOWN
+    nullptr,                       // OMNI_FUNCTION
+    nullptr,                       // OMNI_OPAQUE
 };

@@ -31,6 +31,7 @@ enum class BackendDataType {
     OBJECT_BK,
     LONG_BK,
     ROW_LIST_BK,
+    SORTED_MAP_BK,
     INVALID_BK,
     POJO_BK,
     SET_LONG,
@@ -57,6 +58,7 @@ inline std::ostream& operator<<(std::ostream& os, const BackendDataType& type)
         case BackendDataType::OBJECT_BK: return os << "OBJECT_BK";
         case BackendDataType::LONG_BK: return os << "LONG_BK";
         case BackendDataType::ROW_LIST_BK: return os << "ROW_LIST_BK";
+        case BackendDataType::SORTED_MAP_BK: return os << "SORTED_MAP_BK";
         case BackendDataType::INVALID_BK: return os << "INVALID_BK";
         case BackendDataType::POJO_BK: return os << "POJO_BK";
         case BackendDataType::SET_LONG: return os << "SET_LONG";

@@ -50,6 +50,7 @@
 #include "core/typeutils/LongSerializer.h"
 #include "core/typeutils/MapSerializer.h"
 #include "core/typeutils/ListSerializer.h"
+#include "table/typeutils/SortedMapValue.h"
 #include "core/api/common/state/RestoreStateDescriptor.h"
 
 using namespace omniruntime::type;
@@ -573,6 +574,9 @@ uintptr_t HeapKeyedStateBackend<K>::createOrUpdateInternalState(
             return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, Object*>(namespaceSerializer, stateDesc);
         } else if (dataId == BackendDataType::SET_LONG) {
             return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, std::vector<long>*>(
+                namespaceSerializer, stateDesc);
+        } else if (dataId == BackendDataType::SORTED_MAP_BK) {
+            return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, SortedMapValue*>(
                 namespaceSerializer, stateDesc);
         } else if (dataId == BackendDataType::EXTERNAL_BIGINT_BK) {
             return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, int64_t>(namespaceSerializer, stateDesc);

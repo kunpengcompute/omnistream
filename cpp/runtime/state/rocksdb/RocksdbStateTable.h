@@ -215,6 +215,24 @@ public:
         }
     };
 
+    // Presence of an entry, independent of the stored value. Mirrors the Get-based
+    // check used by RocksdbMapStateTable::contains, so a stored LONG_MAX / 0 is not
+    // mistaken for "absent" (which RocksdbStateTable::get signals via max()).
+    bool containsKey(N& nameSpace)
+    {
+        DataOutputSerializer outputSerializer;
+        OutputBufferStatus outputBufferStatus;
+        outputSerializer.setBackendBuffer(&outputBufferStatus);
+        ROCKSDB_NAMESPACE::Slice sliceKey = GetKeyNameSpaceSlice(outputSerializer, nameSpace);
+
+        std::string valueInTable;
+        ROCKSDB_NAMESPACE::Status s = rocksDb->Get(readOptions, table, sliceKey, &valueInTable);
+        if (!s.ok() || valueInTable.length() == 0) {
+            return false;
+        }
+        return true;
+    }
+
     template <typename UV>
     UV getRes(void* res)
     {
