@@ -9,7 +9,10 @@
  * See the Mulan PSL v2 for more details.
  */
 #include "CsvConverter.h"
+#include <cstdint>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 using namespace omniruntime::type;
 
@@ -39,6 +42,24 @@ bool isCsvNullValue(const std::string& value, const CsvSchema& schema)
     }
 
     return isDefaultNullLiteral(value);
+}
+
+std::int64_t parseCsvBigInt(std::string_view value)
+{
+    // Flink trims characters up to and including U+0020 before parsing.
+    while (!value.empty() && static_cast<unsigned char>(value.front()) <= ' ') {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && static_cast<unsigned char>(value.back()) <= ' ') {
+        value.remove_suffix(1);
+    }
+
+    std::size_t parsedLength = 0;
+    const auto result = std::stoll(std::string(value), &parsedLength, 10);
+    if (parsedLength != value.size()) {
+        throw std::invalid_argument("Invalid CSV BIGINT value");
+    }
+    return result;
 }
 
 } // namespace
@@ -91,7 +112,7 @@ BinaryRowData* CsvConverter::convert(const CsvRow& csvRow)
         } else if (type == omniruntime::type::DataTypeId::OMNI_LONG) {
             LOG("CsvConverter: Converting value '" << value << "' to long for column " << i);
             try {
-                rowData->setLong(i, std::stol(value));
+                rowData->setLong(i, parseCsvBigInt(value));
             } catch (const std::invalid_argument& e) {
                 LOG("CsvConverter: Invalid long value '" << value << "' for column " << i << ", setting it as null.");
                 rowData->setNullAt(i);
@@ -232,7 +253,7 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                 }
                 case omniruntime::type::DataTypeId::OMNI_LONG: {
                     try {
-                        vectorBatch->SetValueAt(colIndex, rowIndex, std::stol(nodeValue));
+                        vectorBatch->SetValueAt(colIndex, rowIndex, parseCsvBigInt(nodeValue));
                     } catch (const std::invalid_argument& e) {
                         // Not a valid number
                         vectorBatch->Get(colIndex)->SetNull(rowIndex);
