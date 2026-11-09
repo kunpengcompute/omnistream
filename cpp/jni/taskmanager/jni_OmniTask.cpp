@@ -179,8 +179,15 @@ JNIEXPORT jlong JNICALL Java_com_huawei_omniruntime_flink_runtime_taskmanager_Om
     JNIEnv*, jobject, jlong nativeTask)
 {
     auto task = reinterpret_cast<omnistream::OmniTask*>(nativeTask);
-    task->cancel();
-    return reinterpret_cast<long>(0L);
+    try {
+        task->cancel();
+        return 0;
+    } catch (const std::exception& e) {
+        ERROR_RELEASE("std::exception during native task cancellation: " << e.what());
+    } catch (...) {
+        ERROR_RELEASE("unknown error during native task cancellation");
+    }
+    return 1;
 }
 
 JNIEXPORT jlong JNICALL
