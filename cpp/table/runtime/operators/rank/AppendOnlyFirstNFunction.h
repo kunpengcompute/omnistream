@@ -29,9 +29,9 @@
  * Native AppendOnlyFirstNFunction.
  *
  * Flink uses this Rank variant when the input is append-only, the single sort
- * field is processing time, and the order is ASC. State is a per-key counter:
- * the first N arriving rows are emitted as INSERT, later rows are dropped.
- * No sort buffer and no retract.
+ * field is processing time, and the order is ASC. State is a per-key
+ * ValueState<Integer> named "counterState" (IntSerializer): the first N arriving
+ * rows are emitted as INSERT, later rows are dropped. No sort buffer and no retract.
  */
 template <typename KeyType>
 class AppendOnlyFirstNFunction : public AbstractTopNFunction<KeyType> {
@@ -56,10 +56,10 @@ public:
     }
 
 private:
-    static constexpr int64_t kUnseenRank = 0;
+    static constexpr int32_t kUnseenRank = 0;
 
     KeySelector<KeyType> partitionKeySelector;
-    ValueState<int64_t>* counterState_ = nullptr;
+    ValueState<int32_t>* counterState_ = nullptr;
     omnistream::StateType stateType_ = omnistream::StateType::HEAP;
 };
 
@@ -67,15 +67,15 @@ template <typename KeyType>
 void AppendOnlyFirstNFunction<KeyType>::open(const Configuration&)
 {
     LOG("AppendOnlyFirstNFunction open");
-    TypeSerializer* serializer = new LongSerializer();
-    auto* counterStateDesc = new ValueStateDescriptor<int64_t>("counterState", serializer);
+    TypeSerializer* serializer = new IntSerializer();
+    auto* counterStateDesc = new ValueStateDescriptor<int32_t>("counterState", serializer);
     auto* runtimeContext = static_cast<StreamingRuntimeContext<KeyType>*>(this->getRuntimeContext());
-    this->counterState_ = runtimeContext->template getState<int64_t>(counterStateDesc);
+    this->counterState_ = runtimeContext->template getState<int32_t>(counterStateDesc);
     stateType_ = runtimeContext->getStateType();
     if (stateType_ == omnistream::StateType::ROCKSDB) {
-        static_cast<RocksdbValueState<KeyType, VoidNamespace, int64_t>*>(counterState_)->setDefaultValue(kUnseenRank);
+        static_cast<RocksdbValueState<KeyType, VoidNamespace, int32_t>*>(counterState_)->setDefaultValue(kUnseenRank);
     } else if (stateType_ == omnistream::StateType::HEAP) {
-        static_cast<HeapValueState<KeyType, VoidNamespace, int64_t>*>(counterState_)->setDefaultValue(kUnseenRank);
+        static_cast<HeapValueState<KeyType, VoidNamespace, int32_t>*>(counterState_)->setDefaultValue(kUnseenRank);
     } else {
         THROW_LOGIC_EXCEPTION("AppendOnlyFirstNFunction only support heap and rocksdb state type");
     }
@@ -105,7 +105,7 @@ void AppendOnlyFirstNFunction<KeyType>::processBatch(
     for (int i = 0; i < rowCount; ++i) {
         KeyType key = partitionKeySelector.getKey(inputBatchGuard.get(), i);
         ctx.setCurrentKey(key);
-        int64_t currentRank = counterState_->value();
+        int32_t currentRank = counterState_->value();
         if (currentRank >= this->rankEnd) {
             if constexpr (std::is_pointer<KeyType>::value) {
                 delete key;

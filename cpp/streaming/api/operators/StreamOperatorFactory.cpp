@@ -105,8 +105,8 @@ void ConfigureRankSavepoint(OperatorT* op, const nlohmann::json& description)
     op->setDescription(description);
     const auto processFunction = description.value("processFunction", "");
     if (processFunction == "AppendOnlyFirstNFunction") {
-        op->setFlinkSavepointUnsupported(
-            "AppendOnlyFirstNFunction stores int64_t counterState, not Flink ValueState<Integer>");
+        // Flink AppendOnlyFirstNFunction: ValueState<Integer> "counterState" + IntSerializer.
+        op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
     } else if (processFunction == "AppendOnlyTopNFunction") {
         if (description.contains("sortFieldIndices") && description["sortFieldIndices"].empty()) {
             // SP-INTEROP: streaming Limit shape (empty sort key). The AppendOnlyTopN
