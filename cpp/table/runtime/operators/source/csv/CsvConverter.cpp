@@ -9,8 +9,10 @@
  * See the Mulan PSL v2 for more details.
  */
 #include "CsvConverter.h"
+#include <cstdint>
 #include <string>
 #include <stdexcept>
+#include <string_view>
 #include "OmniOperatorJIT/core/src/type/TimestampConversion.h"
 
 using namespace omniruntime::type;
@@ -26,8 +28,7 @@ bool isDefaultNullLiteral(const std::string& value)
 
 int32_t parseDateToEpochDays(const std::string& value)
 {
-    auto result = omniruntime::type::util::fromDateString(
-        std::string_view(value.data(), value.size()));
+    auto result = omniruntime::type::util::fromDateString(std::string_view(value.data(), value.size()));
     if (result.hasError()) {
         throw std::invalid_argument("invalid date literal: " + value);
     }
@@ -125,6 +126,24 @@ Decimal128 parseDecimal128ToValue(const std::string& value, int32_t precision, i
     return Decimal128(std::string_view(unscaledAbs));
 }
 
+std::int64_t parseCsvBigInt(std::string_view value)
+{
+    // Flink trims characters up to and including U+0020 before parsing.
+    while (!value.empty() && static_cast<unsigned char>(value.front()) <= ' ') {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && static_cast<unsigned char>(value.back()) <= ' ') {
+        value.remove_suffix(1);
+    }
+
+    std::size_t parsedLength = 0;
+    const auto result = std::stoll(std::string(value), &parsedLength, 10);
+    if (parsedLength != value.size()) {
+        throw std::invalid_argument("Invalid CSV BIGINT value");
+    }
+    return result;
+}
+
 } // namespace
 
 BinaryRowData* CsvConverter::convert(const CsvRow& csvRow)
@@ -159,25 +178,30 @@ BinaryRowData* CsvConverter::convert(const CsvRow& csvRow)
             LOG("CsvConverter: Converting value '" << value << "' to boolean for column " << i);
             try {
                 std::string trimmed = value;
-                trimmed.erase(trimmed.begin(), std::find_if(trimmed.begin(), trimmed.end(),
-                    [](unsigned char ch) { return !::isspace(ch); }));
-                trimmed.erase(std::find_if(trimmed.rbegin(), trimmed.rend(),
-                    [](unsigned char ch) { return !::isspace(ch); }).base(), trimmed.end());
-                std::transform(trimmed.begin(), trimmed.end(), trimmed.begin(),
-                    [](unsigned char ch) { return static_cast<char>(::tolower(ch)); });
+                trimmed.erase(trimmed.begin(), std::find_if(trimmed.begin(), trimmed.end(), [](unsigned char ch) {
+                                  return !::isspace(ch);
+                              }));
+                trimmed.erase(
+                    std::find_if(trimmed.rbegin(), trimmed.rend(), [](unsigned char ch) { return !::isspace(ch); })
+                        .base(),
+                    trimmed.end());
+                std::transform(trimmed.begin(), trimmed.end(), trimmed.begin(), [](unsigned char ch) {
+                    return static_cast<char>(::tolower(ch));
+                });
                 if (trimmed == "true") {
                     rowData->setBool(i, true);
                 } else {
-                    rowData->setBool(i, false); //不能识别的也默认false，不报错
+                    rowData->setBool(i, false); // 不能识别的也默认false，不报错
                 }
             } catch (const std::invalid_argument& e) {
-                LOG("CsvConverter: Invalid boolean value '" << value << "' for column " << i << ", setting it as null.");
+                LOG("CsvConverter: Invalid boolean value '" << value << "' for column " << i
+                                                            << ", setting it as null.");
                 rowData->setNullAt(i);
             }
         } else if (type == omniruntime::type::DataTypeId::OMNI_LONG) {
             LOG("CsvConverter: Converting value '" << value << "' to long for column " << i);
             try {
-                rowData->setLong(i, std::stol(value));
+                rowData->setLong(i, parseCsvBigInt(value));
             } catch (const std::invalid_argument& e) {
                 LOG("CsvConverter: Invalid long value '" << value << "' for column " << i << ", setting it as null.");
                 rowData->setNullAt(i);
@@ -193,7 +217,8 @@ BinaryRowData* CsvConverter::convert(const CsvRow& csvRow)
                 int32_t scale = schema.getScaleAtIdx(i);
                 rowData->setLong(i, parseDecimal64ToUnscaledLong(value, precision, scale));
             } catch (const std::invalid_argument& e) {
-                LOG("CsvConverter: Invalid decimal64 value '" << value << "' for column " << i << ", setting it as null.");
+                LOG("CsvConverter: Invalid decimal64 value '" << value << "' for column " << i
+                                                              << ", setting it as null.");
                 rowData->setNullAt(i);
             } catch (const std::out_of_range& e) {
                 LOG("CsvConverter: Decimal64 value '" << value << "' out of range for column " << i
@@ -208,11 +233,12 @@ BinaryRowData* CsvConverter::convert(const CsvRow& csvRow)
                 Decimal128 decimalValue = parseDecimal128ToValue(value, precision, scale);
                 rowData->setDecimal128(i, decimalValue.LowBits(), decimalValue.HighBits());
             } catch (const std::invalid_argument& e) {
-                LOG("CsvConverter: Invalid decimal128 value '" << value << "' for column " << i << ", setting it as null.");
+                LOG("CsvConverter: Invalid decimal128 value '" << value << "' for column " << i
+                                                               << ", setting it as null.");
                 rowData->setNullAt(i);
             } catch (const std::out_of_range& e) {
                 LOG("CsvConverter: Decimal128 value '" << value << "' out of range for column " << i
-                                                      << ", setting it as null.");
+                                                       << ", setting it as null.");
                 rowData->setNullAt(i);
             }
         } else if (type == omniruntime::type::DataTypeId::OMNI_DOUBLE) {
@@ -223,7 +249,8 @@ BinaryRowData* CsvConverter::convert(const CsvRow& csvRow)
                 LOG("CsvConverter: Invalid double value '" << value << "' for column " << i << ", setting it as null.");
                 rowData->setNullAt(i);
             } catch (const std::out_of_range& e) {
-                LOG("CsvConverter: Double value '" << value << "' out of range for column " << i << ", setting it as null.");
+                LOG("CsvConverter: Double value '" << value << "' out of range for column " << i
+                                                   << ", setting it as null.");
                 rowData->setNullAt(i);
             }
         } else if (type == omniruntime::type::DataTypeId::OMNI_DATE32) {
@@ -250,7 +277,8 @@ BinaryRowData* CsvConverter::convert(const CsvRow& csvRow)
             LOG("CsvConverter: Converting value '" << value << "' to timestamp for column " << i);
             try {
                 static int milliSec = 3;
-                rowData->setTimestamp(i, TimestampData::fromString(value), milliSec); //并没有读取毫秒精度以上的那部分小数点后的数据
+                rowData->setTimestamp(
+                    i, TimestampData::fromString(value), milliSec); // 并没有读取毫秒精度以上的那部分小数点后的数据
             } catch (...) {
                 rowData->setNullAt(i);
             }
@@ -385,15 +413,21 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                 case (omniruntime::type::DataTypeId::OMNI_BOOLEAN): {
                     try {
                         LOG("CsvConverter: Converting value '" << nodeValue << "' to boolean for column " << colIndex
-                                                            << " in row " << rowIndex);
+                                                               << " in row " << rowIndex);
                         bool boolVal = false;
                         std::string trimmed = nodeValue;
-                        trimmed.erase(trimmed.begin(), std::find_if(trimmed.begin(), trimmed.end(),
-                            [](unsigned char ch) { return !::isspace(ch); }));
-                        trimmed.erase(std::find_if(trimmed.rbegin(), trimmed.rend(),
-                            [](unsigned char ch) { return !::isspace(ch); }).base(), trimmed.end());
-                        std::transform(trimmed.begin(), trimmed.end(), trimmed.begin(),
-                            [](unsigned char ch) { return static_cast<char>(::tolower(ch)); });
+                        trimmed.erase(
+                            trimmed.begin(), std::find_if(trimmed.begin(), trimmed.end(), [](unsigned char ch) {
+                                return !::isspace(ch);
+                            }));
+                        trimmed.erase(
+                            std::find_if(
+                                trimmed.rbegin(), trimmed.rend(), [](unsigned char ch) { return !::isspace(ch); })
+                                .base(),
+                            trimmed.end());
+                        std::transform(trimmed.begin(), trimmed.end(), trimmed.begin(), [](unsigned char ch) {
+                            return static_cast<char>(::tolower(ch));
+                        });
                         if (trimmed == "true") {
                             boolVal = true;
                         }
@@ -408,7 +442,7 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                 }
                 case omniruntime::type::DataTypeId::OMNI_LONG: {
                     try {
-                        vectorBatch->SetValueAt(colIndex, rowIndex, std::stol(nodeValue));
+                        vectorBatch->SetValueAt(colIndex, rowIndex, parseCsvBigInt(nodeValue));
                     } catch (const std::invalid_argument& e) {
                         // Not a valid number
                         SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
@@ -422,8 +456,8 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                     try {
                         int32_t precision = schema.getPrecisionAtIdx(csvFieldIndex);
                         int32_t scale = schema.getScaleAtIdx(csvFieldIndex);
-                        vectorBatch->SetValueAt(colIndex, rowIndex,
-                            parseDecimal64ToUnscaledLong(nodeValue, precision, scale));
+                        vectorBatch->SetValueAt(
+                            colIndex, rowIndex, parseDecimal64ToUnscaledLong(nodeValue, precision, scale));
                     } catch (const std::invalid_argument& e) {
                         vectorBatch->Get(colIndex)->SetNull(rowIndex);
                     } catch (const std::out_of_range& e) {
@@ -463,7 +497,7 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                     }
                     break;
                 }
-                case omniruntime::type::DataTypeId::OMNI_DOUBLE:{
+                case omniruntime::type::DataTypeId::OMNI_DOUBLE: {
                     try {
                         vectorBatch->SetValueAt(colIndex, rowIndex, std::stod(nodeValue));
                     } catch (const std::invalid_argument& e) {
@@ -473,7 +507,7 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                     }
                     break;
                 }
-                case omniruntime::type::DataTypeId::OMNI_DATE32:{
+                case omniruntime::type::DataTypeId::OMNI_DATE32: {
                     try {
                         vectorBatch->SetValueAt(colIndex, rowIndex, parseDateToEpochDays(nodeValue));
                     } catch (const std::invalid_argument& e) {
@@ -481,9 +515,10 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                     }
                     break;
                 }
-                case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:{
+                case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE: {
                     try {
-                        vectorBatch->SetValueAt(colIndex, rowIndex, TimestampData::fromTimeString(nodeValue).getMillisecond());
+                        vectorBatch->SetValueAt(
+                            colIndex, rowIndex, TimestampData::fromTimeString(nodeValue).getMillisecond());
                     } catch (...) {
                         SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                     }
