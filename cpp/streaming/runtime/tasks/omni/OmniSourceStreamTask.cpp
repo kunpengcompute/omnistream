@@ -11,6 +11,8 @@
 
 #include "OmniSourceStreamTask.h"
 
+#include <exception>
+
 #include "common.h"
 #include "core/utils/threads/CompletableFutureV2.h"
 
@@ -67,9 +69,10 @@ void OmniSourceStreamTask::runSourceInThread()
 
         auto completionMail = std::make_shared<VoidFunctionRunnable>([this]() { mailboxProcessor_->suspend(); });
         mainMailboxExecutor_->execute(completionMail, "Source completion");
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
+        const auto exception = std::current_exception();
         auto errorMail = std::make_shared<VoidFunctionRunnable>(
-            [this, e]() { mailboxProcessor_->reportThrowable(std::make_exception_ptr(e)); });
+            [this, exception]() { mailboxProcessor_->reportThrowable(exception); });
         mainMailboxExecutor_->execute(errorMail, "Source error");
     }
 }
