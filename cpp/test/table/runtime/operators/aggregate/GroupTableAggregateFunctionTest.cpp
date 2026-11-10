@@ -300,9 +300,9 @@ TEST(GroupTableAggregateFunctionTest, MultiRowOutputCorrectness)
 
     expectOutput(*rig.output,
         {"+I|1|5000|1",
-         "-U|1|5000|1", "+U|1|8000|1", "+U|1|5000|2",
-         "-U|1|8000|1", "-U|1|5000|2", "+U|1|8000|1", "+U|1|6500|2",
-         "-U|1|8000|1", "-U|1|6500|2", "+U|1|9000|1", "+U|1|8000|2"},
+         "-D|1|5000|1", "+I|1|8000|1", "+I|1|5000|2",
+         "-D|1|8000|1", "-D|1|5000|2", "+I|1|8000|1", "+I|1|6500|2",
+         "-D|1|8000|1", "-D|1|6500|2", "+I|1|9000|1", "+I|1|8000|2"},
         "case1-multi-row");
 }
 
@@ -320,8 +320,9 @@ TEST(GroupTableAggregateFunctionTest, FirstRowPath)
 }
 
 // ---------------------------------------------------------------------------
-// Case 3: with generateUpdateBefore=true, the retraction rows (-U) for the old
-// board must be emitted strictly before the new board rows (+U).
+// Case 3: with generateUpdateBefore=true, the retraction rows (-D) for the old
+// board must be emitted strictly before the new board rows (+I).
+// (Retract-stream semantics, vanilla baseline: old board always -D, new always +I.)
 // ---------------------------------------------------------------------------
 TEST(GroupTableAggregateFunctionTest, UpdateBeforeOrdering)
 {
@@ -334,14 +335,14 @@ TEST(GroupTableAggregateFunctionTest, UpdateBeforeOrdering)
     rig.feed(1, 3, 6500); // 王五 evicts 张三
 
     expectOutput(*rig.output,
-        {"-U|1|8000|1", "-U|1|5000|2", // old board first
-         "+U|1|8000|1", "+U|1|6500|2"}, // new board after
+        {"-D|1|8000|1", "-D|1|5000|2", // old board first
+         "+I|1|8000|1", "+I|1|6500|2"}, // new board after
         "case3-update-before-order");
 }
 
 // ---------------------------------------------------------------------------
-// Case 4: with generateUpdateBefore=false the same eviction scenario emits no -U
-// row at all, while the board content stays correct.
+// Case 4: with generateUpdateBefore=false the same eviction scenario emits no -D
+// row at all, while the board content stays correct (new board still +I).
 // ---------------------------------------------------------------------------
 TEST(GroupTableAggregateFunctionTest, NoUpdateBefore)
 {
@@ -353,12 +354,13 @@ TEST(GroupTableAggregateFunctionTest, NoUpdateBefore)
 
     expectOutput(*rig.output,
         {"+I|1|5000|1",
-         "+U|1|8000|1", "+U|1|5000|2",
-         "+U|1|8000|1", "+U|1|6500|2"},
+         "+I|1|8000|1", "+I|1|5000|2",
+         "+I|1|8000|1", "+I|1|6500|2"},
         "case4-no-update-before");
-    // Negative assertion: not a single -U in the whole stream.
+    // Negative assertion: not a single retraction row in the whole stream.
     for (const auto& c : rig.output->captured) {
         EXPECT_NE(c.kind, RowKind::UPDATE_BEFORE) << "case4: -U emitted although generateUpdateBefore=false";
+        EXPECT_NE(c.kind, RowKind::DELETE) << "case4: -D emitted although generateUpdateBefore=false";
     }
 }
 
@@ -381,7 +383,7 @@ TEST(GroupTableAggregateFunctionTest, RetractInputIsDropped)
     rig.clearCaptured();
     rig.feed(1, 3, 9000); // 赵六: board [9000, 8000] proves the old board survived
     expectOutput(*rig.output,
-        {"-U|1|8000|1", "-U|1|5000|2", "+U|1|9000|1", "+U|1|8000|2"},
+        {"-D|1|8000|1", "-D|1|5000|2", "+I|1|9000|1", "+I|1|8000|2"},
         "case5-recover-after-retract-drop");
 }
 
@@ -395,8 +397,8 @@ TEST(GroupTableAggregateFunctionTest, DualBackendConsistency)
 {
     const std::vector<std::string> golden = {
         "+I|1|5000|1",
-        "-U|1|5000|1", "+U|1|8000|1", "+U|1|5000|2",
-        "-U|1|8000|1", "-U|1|5000|2", "+U|1|8000|1", "+U|1|6500|2"};
+        "-D|1|5000|1", "+I|1|8000|1", "+I|1|5000|2",
+        "-D|1|8000|1", "-D|1|5000|2", "+I|1|8000|1", "+I|1|6500|2"};
 
     auto runScenario = [](const std::string& backend) {
         auto rig = makeRig(true, backend);
@@ -433,7 +435,7 @@ TEST(GroupTableAggregateFunctionTest, AccumulatorPersistsAcrossKeys)
     // If the accumulator had not persisted, the board would be [6500] alone.
     rig.feed(1, 4, 6500);
     expectOutput(*rig.output,
-        {"-U|1|8000|1", "-U|1|5000|2", "+U|1|8000|1", "+U|1|6500|2"},
+        {"-D|1|8000|1", "-D|1|5000|2", "+I|1|8000|1", "+I|1|6500|2"},
         "case8-accumulator-persists");
 }
 
@@ -467,7 +469,7 @@ TEST(GroupTableAggregateFunctionTest, NotInTopEmitsUnchangedBoard)
     rig.feed(1, 3, 3000); // below the board: no state change, but the board is re-emitted
 
     expectOutput(*rig.output,
-        {"-U|1|8000|1", "-U|1|5000|2", "+U|1|8000|1", "+U|1|5000|2"},
+        {"-D|1|8000|1", "-D|1|5000|2", "+I|1|8000|1", "+I|1|5000|2"},
         "bonus-not-in-top-reemits");
 }
 
@@ -489,9 +491,9 @@ TEST(GroupTableAggregateFunctionTest, NoUniqueKeyMatchesFlinkTop2)
     expectOutput(
         *rig.output,
         {"+I|1|5000|1",
-         "-U|1|5000|1", "+U|1|8000|1", "+U|1|5000|2",
-         "-U|1|8000|1", "-U|1|5000|2", "+U|1|8000|1", "+U|1|6500|2",
-         "-U|1|8000|1", "-U|1|6500|2", "+U|1|9000|1", "+U|1|8000|2"},
+         "-D|1|5000|1", "+I|1|8000|1", "+I|1|5000|2",
+         "-D|1|8000|1", "-D|1|5000|2", "+I|1|8000|1", "+I|1|6500|2",
+         "-D|1|8000|1", "-D|1|6500|2", "+I|1|9000|1", "+I|1|8000|2"},
         "keyless-top2-changelog");
 }
 
@@ -511,6 +513,6 @@ TEST(GroupTableAggregateFunctionTest, NoUniqueKeyDuplicateValueRanksTwice)
     // earlier arrival ranks first (strict '>' keeps the earlier one at rank 1).
     expectOutput(
         *rig.output,
-        {"+I|1|5000|1", "-U|1|5000|1", "+U|1|5000|1", "+U|1|5000|2"},
+        {"+I|1|5000|1", "-D|1|5000|1", "+I|1|5000|1", "+I|1|5000|2"},
         "keyless-duplicate-price");
 }

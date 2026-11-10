@@ -37,9 +37,11 @@
  *     messages before they reach this handler (the retract() here is defensive only).
  *   - emitValue: emits the occupied slots as 0..N rows of [currentKey, value, rn]
  *     (conditional output: an empty slot is not emitted).
- *     RowKind policy (mirrors Flink GroupTableAggFunction):
- *       isRetract=true  -> generateUpdateBefore ? UPDATE_BEFORE : DELETE
- *       isRetract=false -> firstRow ? INSERT : UPDATE_AFTER
+ *     RowKind policy (retract-stream semantics, vanilla 1.16.3 baseline captured
+ *     empirically; differs from GroupAggFunction's -U/+U changelog on purpose):
+ *       isRetract=true  -> always DELETE (-D)   [generateUpdateBefore gates
+ *                          WHETHER the old board is emitted, not its kind]
+ *       isRetract=false -> always INSERT (+I)   [not firstRow-dependent]
  */
 
 #ifndef FLINK_TNEL_ROWNUMBERFUNCTION_H
@@ -85,6 +87,21 @@ public:
      * RowKind policy is documented in the class comment.
      */
     void emitValue(TimestampedCollector* out, RowData* currentKey, bool isRetract, bool firstRow) override;
+
+    /**
+     * Collecting variant of emitValue for the operator's batch path. Instead of
+     * collecting row-at-a-time through a TimestampedCollector (the chained native
+     * downstream, e.g. StreamCalcBatch, expects ONE VectorBatch and segfaults in
+     * VectorBatch::RearrangeColumns on a RowData), appends the aggregate part
+     * ([value, rn] GenericRowData) of every occupied slot to aggRows and its RowKind
+     * to kinds. The caller pairs these with the current key and assembles a single
+     * output VectorBatch (GroupAggFunction::createOutputBatch pattern).
+     */
+    void emitValueToRows(
+        std::vector<RowData*>& aggRows,
+        std::vector<RowKind>& kinds,
+        bool isRetract,
+        bool firstRow);
 
     /** State-shape parity with Flink: rankEnd BIGINT slots in the accState row. */
     int accumulatorSlots() const override

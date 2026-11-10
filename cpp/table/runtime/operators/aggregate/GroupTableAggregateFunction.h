@@ -74,8 +74,12 @@ public:
     void processElement(RowData* input, Context* ctx, TimestampedCollector* out) override;
 
     /**
-     * v1 batch path: per-row delegation (extract key, setCurrentKey, processElement).
-     * Correctness-first; columnar board maintenance is a follow-up optimization.
+     * Native-chain batch path (GroupAggFunction pattern). The chained downstream
+     * (e.g. StreamCalcBatch) expects ONE VectorBatch per operator output, not
+     * row-at-a-time RowData collects (the latter segfaults in
+     * VectorBatch::RearrangeColumns). Every input row still runs the full
+     * processElement flow (Top2 semantics: each row re-emits the whole board),
+     * but the board rows are collected and assembled into a single output batch.
      */
     void processBatch(
         omnistream::VectorBatch* inputBatch,
@@ -99,6 +103,30 @@ private:
     /** Parse the plan JSON: rankRange / sort fields / unique key / grouping. */
     void parseDescription(const nlohmann::json& config);
 
+    /**
+     * Batch-path core: the same five steps as processElement, but the old/new boards
+     * are collected into vectors (emitValueToRows) instead of being collected
+     * row-at-a-time. rowKeys tracks one key RowData per input row for cleanup
+     * (resultKeys may hold the same pointer twice: old board + new board).
+     */
+    void processElementToRows(
+        RowData* input,
+        Context* ctx,
+        std::vector<RowData*>& rowKeys,
+        std::vector<RowData*>& resultKeys,
+        std::vector<RowData*>& resultAggRows,
+        std::vector<RowKind>& resultRowKinds);
+
+    /**
+     * Assemble the collected rows into ONE output VectorBatch:
+     * [grouping key columns | value, rank] (GroupAggFunction::createOutputBatch
+     * pattern; all v1 columns are int64-backed). RowKinds ride on the batch rows.
+     */
+    omnistream::VectorBatch* createOutputBatch(
+        const std::vector<RowData*>& resultKeys,
+        const std::vector<RowData*>& resultAggRows,
+        const std::vector<RowKind>& resultRowKinds);
+
     // ---- plan configuration ----
     long stateRetentionTime;
     nlohmann::json description;
@@ -119,9 +147,15 @@ private:
     std::vector<int32_t> keyedTypes;
     KeySelector<RowData*>* groupByKeySelector = nullptr;
 
+    // output row type [grouping key | value, rank] (batch-path output assembly)
+    std::vector<std::string> outputTypes;
+
     // ---- runtime state ----
     ValueState<RowData*>* accState = nullptr;
     TableAggsHandleFunction* function = nullptr; // v1: single ROW_NUMBER call
+    // Concrete-type view of `function` for the batch path: emitValueToRows is a
+    // RowNumberFunction extension, not part of the TableAggsHandleFunction contract.
+    RowNumberFunction* rowNumberFunction = nullptr;
     int accumulatorArity = 0; // arity of the accState row (= rankEnd BIGINT slots)
 };
 

@@ -150,18 +150,21 @@ void RowNumberFunction::cleanup()
 
 void RowNumberFunction::close() {}
 
-void RowNumberFunction::emitValue(
-    TimestampedCollector* out,
-    RowData* currentKey,
+void RowNumberFunction::emitValueToRows(
+    std::vector<RowData*>& aggRows,
+    std::vector<RowKind>& kinds,
     bool isRetract,
     bool firstRow)
 {
-    RowKind kind;
-    if (isRetract) {
-        kind = generateUpdateBefore ? RowKind::UPDATE_BEFORE : RowKind::DELETE;
-    } else {
-        kind = firstRow ? RowKind::INSERT : RowKind::UPDATE_AFTER;
-    }
+    // Retract-stream semantics of flatAggregate -- the vanilla 1.16.3 baseline,
+    // empirically captured on 7 input rows: the old board is always DELETE (-D) and
+    // the new board is always INSERT (+I), NOT the -U/+U update-stream kinds. This
+    // differs from GroupAggFunction's changelog policy on purpose: plain Flink's
+    // GroupTableAggFunction emits the whole board per input row as delete+insert
+    // pairs, regardless of firstRow. generateUpdateBefore still gates WHETHER the
+    // old board is emitted at all (operator level); the emitted kind is always -D.
+    (void)firstRow;
+    RowKind kind = isRetract ? RowKind::DELETE : RowKind::INSERT;
 
     // Conditional output (Top2 UDF emitValue): only occupied slots are emitted.
     // Slots are ordered, so the first EMPTY_SLOT ends the board.
@@ -173,9 +176,26 @@ void RowNumberFunction::emitValue(
         auto* aggRow = new GenericRowData(aggValueTypeIds);
         aggRow->setField(0, static_cast<long>(value));
         aggRow->setField(1, rn);
-        // TODO(perf): reuse a member JoinedRowData/aggRow pair and only refresh fields.
-        auto* resultRow = new JoinedRowData(kind, currentKey, aggRow);
-        out->collect(resultRow);
+        aggRows.push_back(aggRow);
+        kinds.push_back(kind);
         ++rn;
+    }
+}
+
+void RowNumberFunction::emitValue(
+    TimestampedCollector* out,
+    RowData* currentKey,
+    bool isRetract,
+    bool firstRow)
+{
+    // Row-at-a-time path (per-element operator path / unit tests). The operator's
+    // batch path calls emitValueToRows instead and assembles ONE VectorBatch.
+    std::vector<RowData*> aggRows;
+    std::vector<RowKind> kinds;
+    emitValueToRows(aggRows, kinds, isRetract, firstRow);
+    for (size_t i = 0; i < aggRows.size(); ++i) {
+        // TODO(perf): reuse a member JoinedRowData/aggRow pair and only refresh fields.
+        auto* resultRow = new JoinedRowData(kinds[i], currentKey, aggRows[i]);
+        out->collect(resultRow);
     }
 }
