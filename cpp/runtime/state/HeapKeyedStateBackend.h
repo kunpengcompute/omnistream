@@ -225,6 +225,10 @@ public:
                     auto stateTable =
                         reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, int64_t>*>(stateTablePtr);
                     delete stateTable;
+                } else if (dataId == BackendDataType::SORTED_MAP_BK) {
+                    auto stateTable =
+                        reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, SortedMapValue*>*>(stateTablePtr);
+                    delete stateTable;
                 } else {
                     NOT_IMPL_EXCEPTION;
                 }

@@ -335,8 +335,10 @@ private:
                 case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
                 case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
-                case omniruntime::type::DataTypeId::OMNI_DOUBLE:
                     key->setLong(static_cast<int>(i), *row->getLong(col));
+                    break;
+                case omniruntime::type::DataTypeId::OMNI_DOUBLE:
+                    key->setDouble(static_cast<int>(i), *row->getDouble(col));
                     break;
                 case omniruntime::type::DataTypeId::OMNI_DECIMAL128: {
                     const omniruntime::type::Decimal128* value = row->getDecimal128(col);

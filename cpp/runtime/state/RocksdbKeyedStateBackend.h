@@ -280,6 +280,10 @@ public:
                             stateTablePtr);
                     } else if (dataId == BackendDataType::EXTERNAL_BIGINT_BK) {
                         delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, int64_t>*>(stateTablePtr);
+                    } else if (dataId == BackendDataType::SORTED_MAP_BK) {
+                        delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, SortedMapValue*>*>(stateTablePtr);
+                    } else if (dataId == BackendDataType::SET_LONG) {
+                        delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, std::vector<long>*>*>(stateTablePtr);
                     } else {
                         GErrorLog("Unhandled VALUE state type in dispose: dataId=" + std::to_string((int)dataId));
                     }

@@ -227,8 +227,11 @@ public:
 
         std::string valueInTable;
         ROCKSDB_NAMESPACE::Status s = rocksDb->Get(readOptions, table, sliceKey, &valueInTable);
-        if (!s.ok() || valueInTable.length() == 0) {
+        if (s.IsNotFound()) {
             return false;
+        }
+        if (!s.ok()) {
+            THROW_RUNTIME_ERROR("rocksdb state table containsKey failed, status is << " << s.ToString());
         }
         return true;
     }

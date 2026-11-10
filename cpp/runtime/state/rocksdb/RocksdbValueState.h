@@ -463,13 +463,25 @@ bool RocksdbValueState<K, N, V>::getIfPresent(V& out)
         return false;
     }
     if (stateCache->getSizeLimit() == 0) {
-        // Raw read: RocksdbStateTable::get returns max() only for an absent entry,
-        // so a present LONG_MAX is returned unchanged here.
-        out = stateTable->get(currentNamespace);
+        if constexpr (std::is_pointer_v<V>) {
+            // Pointer types: go through getValue() to keep the RowData-derived
+            // (e.g. BinaryRowData) copy() semantics. RocksdbStateTable::get()
+            // hands back a shared deserialize buffer that the next read
+            // overwrites, so returning it directly would allow use-after-overwrite.
+            out = getValue();
+        } else {
+            // Raw read: RocksdbStateTable::get returns max() only for an absent entry,
+            // so a present LONG_MAX is returned unchanged here.
+            out = stateTable->get(currentNamespace);
+        }
     } else if (stateCache->contains(getCurrentKey(), getNamespace())) {
         out = stateCache->get(getCurrentKey(), getNamespace());
     } else {
-        out = stateTable->get(currentNamespace);
+        if constexpr (std::is_pointer_v<V>) {
+            out = getValue();
+        } else {
+            out = stateTable->get(currentNamespace);
+        }
     }
     return true;
 }

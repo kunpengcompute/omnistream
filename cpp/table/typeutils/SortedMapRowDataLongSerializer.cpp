@@ -11,6 +11,7 @@
 
 #include "SortedMapRowDataLongSerializer.h"
 
+#include <memory>
 #include <utility>
 
 #include "core/include/common.h"
@@ -46,19 +47,21 @@ void SortedMapRowDataLongSerializer::serialize(void* record, DataOutputSerialize
 void* SortedMapRowDataLongSerializer::deserialize(DataInputView& source)
 {
     const int size = source.readInt();
-    auto* value = new SortedMapValue(cmp_);
+    auto value = std::make_unique<SortedMapValue>(cmp_);
     for (int i = 0; i < size; ++i) {
-        // BinaryRowDataSerializer returns a reused buffer; copy so the map owns its key.
+        // BinaryRowDataSerializer returns its reusable buffer (reUse_); it is owned by the
+        // serializer and must NOT be deleted here. Copy so the map owns its key.
         auto* key = static_cast<RowData*>(sortKeySerializer_->deserialize(source));
         const bool isNull = source.readBoolean();
         if (isNull) {
-            delete value;
             THROW_LOGIC_EXCEPTION("SortedMapRowDataLongSerializer: unexpected null map value");
         }
         const int64_t count = source.readLong();
-        value->map()[key->copy()] = count;
+        std::unique_ptr<RowData> ownedKey(key->copy());
+        value->map()[ownedKey.get()] = count;
+        ownedKey.release(); // map 接管所有权
     }
-    return value;
+    return value.release();
 }
 
 std::string SortedMapRowDataLongSerializer::toJson()
