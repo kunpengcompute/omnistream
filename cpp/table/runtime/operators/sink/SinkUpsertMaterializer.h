@@ -15,7 +15,6 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -24,31 +23,40 @@
 #include "table/data/RowData.h"
 #include "core/api/common/state/ValueState.h"
 #include "core/api/common/state/ValueStateDescriptor.h"
-#include "runtime/state/KeyGroupRangeAssignment.h"
 #include "streaming/api/functions/KeyedProcessFunction.h"
 #include "streaming/api/operators/StreamingRuntimeContext.h"
 #include "streaming/api/operators/TimestampedCollector.h"
 #include "table/data/RowKind.h"
-#include "table/data/util/VectorBatchUtil.h"
 #include "table/runtime/keyselector/KeySelector.h"
-#include "table/typeutils/SortedVectorLong.h"
+#include "table/typeutils/BinaryRowDataListSerializer.h"
+#include "table/typeutils/RowDataSerializer.h"
 #include "table/types/logical/LogicalType.h"
+#include "table/types/logical/RowType.h"
+#include "vector/vector_helper.h"
 
 /**
  * Materializes a retract changelog into an upsert changelog before the sink.
  *
  * Flink: org.apache.flink.table.runtime.operators.sink.SinkUpsertMaterializer
  * - keyed by the sink primary key (description JSON "grouping");
- * - state: per-key ordered list of rows (comboId list + VectorBatch side tables,
- *   state name "values"; the row order is the arrival order and is preserved);
+ * - state: ValueState<List<RowData>> (state name "values"; the row objects are
+ *   stored directly in the state list, like Flink's ListSerializer(RowDataSerializer));
  * - +I/+U appends the row (or replaces the stored row with the same upsert key when
  *   "inputUpsertKey" is present): the first row of a key emits +I, otherwise +U;
  * - -U/-D removes the first stored row equal on the compare columns (ignoring
- *   RowKind): removing the last row emits -D, removing the latest row additionally
- *   re-emits the new latest row as +U, removing a middle row emits nothing;
+ *   RowKind): removing the last row emits the retract input row as -D, removing
+ *   the latest row additionally re-emits the new latest row as +U, removing a
+ *   middle row emits nothing;
  * - a retract that finds no equal row is logged and swallowed (Flink 1.16.3
  *   behavior for state cleared by TTL);
  * - output rows keep the input schema, only the RowKind changes.
+ *
+ * Row ownership (HashMapStateBackend): rows appended into the state list are
+ * owned by the state; rows replaced/removed from the list are deleted at batch
+ * end; the retract input row is deleted once compared (and after the output
+ * batch is assembled when it is emitted as -D). The (possibly empty) list stays
+ * in state after a removal-to-empty, which is observably equivalent to Flink's
+ * state.clear() (the next accumulate of the same key emits +I again).
  *
  * State backend: HashMapStateBackend only (fail-fast otherwise). TTL is not
  * implemented; savepoints are marked unsupported by the factory.
@@ -90,45 +98,13 @@ private:
         return kind == RowKind::INSERT || kind == RowKind::UPDATE_AFTER;
     }
 
-    static std::string_view getStringValue(omniruntime::vec::BaseVector* vector, int rowId)
-    {
-        if (vector->GetEncoding() == omniruntime::vec::OMNI_FLAT) {
-            return reinterpret_cast<omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(
-                vector)
-                ->GetValue(rowId);
-        }
-        return reinterpret_cast<
-            omniruntime::vec::Vector<
-                omniruntime::vec::DictionaryContainer<std::string_view, omniruntime::vec::LargeStringContainer>>*>(
-            vector)
-            ->GetValue(rowId);
-    }
-
-    omnistream::VectorBatch* getVectorBatch(ComboId comboId)
-    {
-        auto keyGroup = VectorBatchUtil::getKeyGroup(comboId);
-        auto sequenceNumber = VectorBatchUtil::getSequenceNumber(comboId);
-        auto vectorBatchId = VectorBatchUtil::getVectorBatchId(keyGroup, sequenceNumber);
-        auto it = vectorBatchCacheMap_.find(vectorBatchId);
-        if (it != vectorBatchCacheMap_.end()) {
-            return it->second;
-        }
-        auto* vb = state_->getVectorBatch(keyGroup, sequenceNumber);
-        if (vb == nullptr) {
-            GErrorLog("SinkUpsertMaterializer: cannot find vector batch for comboId " + std::to_string(comboId));
-            return nullptr;
-        }
-        vectorBatchCacheMap_.emplace(vectorBatchId, vb);
-        return vb;
-    }
-
     // Flink equalsIgnoreRowKind: compare the given columns (upsert-key projection
     // when present, otherwise the whole row), two nulls compare equal.
-    bool rowsEqual(omnistream::VectorBatch* vb1, int rowId1, omnistream::VectorBatch* vb2, int rowId2)
+    bool rowsEqual(RowData* a, RowData* b)
     {
         for (auto col : compareIndices_) {
-            bool null1 = vb1->Get(col)->IsNull(rowId1);
-            bool null2 = vb2->Get(col)->IsNull(rowId2);
+            bool null1 = a->isNullAt(col);
+            bool null2 = b->isNullAt(col);
             if (null1 != null2) {
                 return false;
             }
@@ -137,9 +113,7 @@ private:
             }
             switch (inputTypeIds_[col]) {
                 case omniruntime::type::DataTypeId::OMNI_INT: {
-                    auto val1 = reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(vb1->Get(col))->GetValue(rowId1);
-                    auto val2 = reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(vb2->Get(col))->GetValue(rowId2);
-                    if (val1 != val2) {
+                    if (*a->getInt(col) != *b->getInt(col)) {
                         return false;
                     }
                     break;
@@ -147,32 +121,26 @@ private:
                 case omniruntime::type::DataTypeId::OMNI_LONG:
                 case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
                 case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE: {
-                    auto val1 = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(vb1->Get(col))->GetValue(rowId1);
-                    auto val2 = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(vb2->Get(col))->GetValue(rowId2);
-                    if (val1 != val2) {
+                    if (*a->getLong(col) != *b->getLong(col)) {
                         return false;
                     }
                     break;
                 }
                 case omniruntime::type::DataTypeId::OMNI_DOUBLE: {
-                    auto val1 = reinterpret_cast<omniruntime::vec::Vector<double>*>(vb1->Get(col))->GetValue(rowId1);
-                    auto val2 = reinterpret_cast<omniruntime::vec::Vector<double>*>(vb2->Get(col))->GetValue(rowId2);
-                    if (val1 != val2) {
+                    if (*a->getDouble(col) != *b->getDouble(col)) {
                         return false;
                     }
                     break;
                 }
                 case omniruntime::type::DataTypeId::OMNI_BOOLEAN: {
-                    auto val1 = reinterpret_cast<omniruntime::vec::Vector<bool>*>(vb1->Get(col))->GetValue(rowId1);
-                    auto val2 = reinterpret_cast<omniruntime::vec::Vector<bool>*>(vb2->Get(col))->GetValue(rowId2);
-                    if (val1 != val2) {
+                    if (*a->getBool(col) != *b->getBool(col)) {
                         return false;
                     }
                     break;
                 }
                 case omniruntime::type::DataTypeId::OMNI_CHAR:
                 case omniruntime::type::DataTypeId::OMNI_VARCHAR: {
-                    if (getStringValue(vb1->Get(col), rowId1) != getStringValue(vb2->Get(col), rowId2)) {
+                    if (a->getStringView(col) != b->getStringView(col)) {
                         return false;
                     }
                     break;
@@ -184,183 +152,184 @@ private:
         return true;
     }
 
-    int findEqualRow(const std::vector<int64_t>& values, omnistream::VectorBatch* inputBatch, int inputRowId)
+    // Flink findFirst: index of the first stored row equal to the target, -1 if none.
+    int findEqualRow(const std::vector<RowData*>& values, RowData* target)
     {
         for (size_t idx = 0; idx < values.size(); idx++) {
-            auto comboId = static_cast<ComboId>(values[idx]);
-            auto* storedBatch = getVectorBatch(comboId);
-            if (storedBatch == nullptr) {
-                continue;
-            }
-            if (rowsEqual(storedBatch, VectorBatchUtil::getRowId(comboId), inputBatch, inputRowId)) {
+            if (rowsEqual(values[idx], target)) {
                 return static_cast<int>(idx);
             }
         }
         return -1;
     }
 
-    void initOutputVector(omnistream::VectorBatch* out, int rowCount)
-    {
-        if (rowCount <= 0) {
-            return;
-        }
-        for (auto typeId : inputTypeIds_) {
-            switch (typeId) {
-                case omniruntime::type::DataTypeId::OMNI_INT: {
-                    out->Append(new omniruntime::vec::Vector<int32_t>(rowCount));
-                    break;
-                }
-                case omniruntime::type::DataTypeId::OMNI_LONG:
-                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
-                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE: {
-                    out->Append(new omniruntime::vec::Vector<int64_t>(rowCount));
-                    break;
-                }
-                case omniruntime::type::DataTypeId::OMNI_DOUBLE: {
-                    out->Append(new omniruntime::vec::Vector<double>(rowCount));
-                    break;
-                }
-                case omniruntime::type::DataTypeId::OMNI_BOOLEAN: {
-                    out->Append(new omniruntime::vec::Vector<bool>(rowCount));
-                    break;
-                }
-                case omniruntime::type::DataTypeId::OMNI_CHAR:
-                case omniruntime::type::DataTypeId::OMNI_VARCHAR: {
-                    out->Append(new omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>(
-                        rowCount));
-                    break;
-                }
-                default: THROW_LOGIC_EXCEPTION("SinkUpsertMaterializer: unsupported output column type");
-            }
-        }
-    }
-
-    void copyRowToOutput(omnistream::VectorBatch* outputVB, ComboId comboId, int rowIndex)
-    {
-        int rowId = VectorBatchUtil::getRowId(comboId);
-        auto* batch = getVectorBatch(comboId);
-        outputVB->setTimestamp(rowIndex, batch->getTimestamp(rowId));
-        for (size_t col = 0; col < inputTypeIds_.size(); col++) {
-            auto* src = batch->Get(col);
-            auto* dst = outputVB->Get(col);
-            if (src->IsNull(rowId)) {
-                if (inputTypeIds_[col] == omniruntime::type::DataTypeId::OMNI_CHAR ||
-                    inputTypeIds_[col] == omniruntime::type::DataTypeId::OMNI_VARCHAR) {
-                    // string vectors keep nulls in the container as well
-                    reinterpret_cast<
-                        omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(dst)
-                        ->SetNull(rowIndex);
-                } else {
-                    dst->SetNull(rowIndex);
-                }
-                continue;
-            }
-            switch (inputTypeIds_[col]) {
-                case omniruntime::type::DataTypeId::OMNI_INT: {
-                    auto val = reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(src)->GetValue(rowId);
-                    reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(dst)->SetValue(rowIndex, val);
-                    break;
-                }
-                case omniruntime::type::DataTypeId::OMNI_LONG:
-                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
-                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE: {
-                    auto val = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(src)->GetValue(rowId);
-                    reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(dst)->SetValue(rowIndex, val);
-                    break;
-                }
-                case omniruntime::type::DataTypeId::OMNI_DOUBLE: {
-                    auto val = reinterpret_cast<omniruntime::vec::Vector<double>*>(src)->GetValue(rowId);
-                    reinterpret_cast<omniruntime::vec::Vector<double>*>(dst)->SetValue(rowIndex, val);
-                    break;
-                }
-                case omniruntime::type::DataTypeId::OMNI_BOOLEAN: {
-                    auto val = reinterpret_cast<omniruntime::vec::Vector<bool>*>(src)->GetValue(rowId);
-                    reinterpret_cast<omniruntime::vec::Vector<bool>*>(dst)->SetValue(rowIndex, val);
-                    break;
-                }
-                case omniruntime::type::DataTypeId::OMNI_CHAR:
-                case omniruntime::type::DataTypeId::OMNI_VARCHAR: {
-                    reinterpret_cast<omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(
-                        dst)
-                        ->SetValue(rowIndex, getStringValue(src, rowId));
-                    break;
-                }
-                default: THROW_LOGIC_EXCEPTION("SinkUpsertMaterializer: unsupported copy column type");
-            }
-        }
-    }
-
-    void processAccumulate(
-        typename KeyedProcessFunction<K, RowData*, omnistream::VectorBatch*>::Context& ctx,
-        omnistream::VectorBatch* inputBatch,
-        int rowId)
+    // Flink addRow: appends (or replaces the row with the same upsert key); the
+    // row itself is emitted with the kind decided by the pre-add list state.
+    void processAccumulate(RowData* row, int64_t timestamp)
     {
         auto* values = state_->value();
         bool existed = values != nullptr;
         if (!existed) {
-            values = new std::vector<int64_t>();
+            values = new std::vector<RowData*>();
         }
         RowKind outKind = values->empty() ? RowKind::INSERT : RowKind::UPDATE_AFTER;
-        auto newComboId = reuseComboIds_[rowId];
         if (hasUpsertKey_) {
-            int index = findEqualRow(*values, inputBatch, rowId);
+            int index = findEqualRow(*values, row);
             if (index >= 0) {
-                (*values)[index] = newComboId;
+                deleteAfterOutput_.push_back((*values)[index]);
+                (*values)[index] = row;
             } else {
-                values->push_back(newComboId);
+                values->push_back(row);
             }
         } else {
-            values->push_back(newComboId);
+            values->push_back(row);
         }
         if (!existed) {
             // Fresh key: hand the new vector over to the state. For an existing key
             // the in-place mutation of the stored vector is already visible (HEAP).
             state_->update(values);
         }
-        collectedIds_.push_back(newComboId);
-        collectedRowKinds_.push_back(outKind);
+        emit(row, outKind, timestamp);
     }
 
-    void processRetract(
-        typename KeyedProcessFunction<K, RowData*, omnistream::VectorBatch*>::Context& ctx,
-        omnistream::VectorBatch* inputBatch,
-        int rowId)
+    // Flink retractRow: removes the first equal row; emits the retract input row
+    // as -D when the list becomes empty, re-emits the new latest row as +U when
+    // the latest row was removed and rows remain.
+    void processRetract(RowData* row, int64_t timestamp)
     {
         auto* values = state_->value();
         if (values == nullptr || values->empty()) {
             WARN_RELEASE("SinkUpsertMaterializer: retract matches no stored row (state cleared?); swallowed");
+            deleteAfterOutput_.push_back(row);
             return;
         }
-        int index = findEqualRow(*values, inputBatch, rowId);
+        int index = findEqualRow(*values, row);
         if (index < 0) {
             WARN_RELEASE("SinkUpsertMaterializer: retract matches no stored row (state cleared?); swallowed");
+            deleteAfterOutput_.push_back(row);
             return;
         }
-        auto removedComboId = (*values)[index];
         int lastIndexBeforeRemove = static_cast<int>(values->size()) - 1;
+        RowData* removed = (*values)[index];
         values->erase(values->begin() + index);
+        deleteAfterOutput_.push_back(removed);
         if (values->empty()) {
-            collectedIds_.push_back(removedComboId);
-            collectedRowKinds_.push_back(RowKind::DELETE);
+            emit(row, RowKind::DELETE, timestamp);
         } else if (index == lastIndexBeforeRemove) {
             // Removed the latest row: re-emit the new latest row as +U (Flink retractRow).
-            collectedIds_.push_back(values->back());
-            collectedRowKinds_.push_back(RowKind::UPDATE_AFTER);
+            emit(values->back(), RowKind::UPDATE_AFTER, timestamp);
+            deleteAfterOutput_.push_back(row);
+        } else {
+            // Removing a middle row emits nothing. The (possibly empty) list stays in
+            // state so the next accumulate of the same key emits +I again.
+            deleteAfterOutput_.push_back(row);
         }
-        // Removing a middle row emits nothing. The (possibly empty) list stays in
-        // state so the next accumulate of the same key emits +I again.
+    }
+
+    void emit(RowData* row, RowKind kind, int64_t timestamp)
+    {
+        row->setRowKind(kind);
+        collectedRows_.push_back(row);
+        collectedRowKinds_.push_back(kind);
+        collectedTimestamps_.push_back(timestamp);
+    }
+
+    // Assembles the output batch from the collected rows: column values and nulls
+    // are copied per column, only the RowKind is rewritten.
+    omnistream::VectorBatch* buildOutput()
+    {
+        int numRows = static_cast<int>(collectedRows_.size());
+        auto* outputVB = new omnistream::VectorBatch(numRows);
+        for (size_t col = 0; col < inputTypeIds_.size(); col++) {
+            switch (inputTypeIds_[col]) {
+                case omniruntime::type::DataTypeId::OMNI_INT: {
+                    auto* vector = new omniruntime::vec::Vector<int32_t>(numRows);
+                    for (int rowIndex = 0; rowIndex < numRows; rowIndex++) {
+                        RowData* row = collectedRows_[rowIndex];
+                        if (row->isNullAt(col)) {
+                            vector->SetNull(rowIndex);
+                        } else {
+                            vector->SetValue(rowIndex, *row->getInt(col));
+                        }
+                    }
+                    outputVB->Append(vector);
+                    break;
+                }
+                case omniruntime::type::DataTypeId::OMNI_LONG:
+                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
+                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE: {
+                    auto* vector = new omniruntime::vec::Vector<int64_t>(numRows);
+                    for (int rowIndex = 0; rowIndex < numRows; rowIndex++) {
+                        RowData* row = collectedRows_[rowIndex];
+                        if (row->isNullAt(col)) {
+                            vector->SetNull(rowIndex);
+                        } else {
+                            vector->SetValue(rowIndex, *row->getLong(col));
+                        }
+                    }
+                    outputVB->Append(vector);
+                    break;
+                }
+                case omniruntime::type::DataTypeId::OMNI_DOUBLE: {
+                    auto* vector = new omniruntime::vec::Vector<double>(numRows);
+                    for (int rowIndex = 0; rowIndex < numRows; rowIndex++) {
+                        RowData* row = collectedRows_[rowIndex];
+                        if (row->isNullAt(col)) {
+                            vector->SetNull(rowIndex);
+                        } else {
+                            vector->SetValue(rowIndex, *row->getDouble(col));
+                        }
+                    }
+                    outputVB->Append(vector);
+                    break;
+                }
+                case omniruntime::type::DataTypeId::OMNI_BOOLEAN: {
+                    auto* vector = new omniruntime::vec::Vector<bool>(numRows);
+                    for (int rowIndex = 0; rowIndex < numRows; rowIndex++) {
+                        RowData* row = collectedRows_[rowIndex];
+                        if (row->isNullAt(col)) {
+                            vector->SetNull(rowIndex);
+                        } else {
+                            vector->SetValue(rowIndex, *row->getBool(col));
+                        }
+                    }
+                    outputVB->Append(vector);
+                    break;
+                }
+                case omniruntime::type::DataTypeId::OMNI_CHAR:
+                case omniruntime::type::DataTypeId::OMNI_VARCHAR: {
+                    auto* vector =
+                        new omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>(
+                            numRows);
+                    for (int rowIndex = 0; rowIndex < numRows; rowIndex++) {
+                        RowData* row = collectedRows_[rowIndex];
+                        if (row->isNullAt(col)) {
+                            vector->SetNull(rowIndex);
+                        } else {
+                            auto value = std::string(row->getStringView(col));
+                            omniruntime::vec::VectorHelper::VectorSetValue<omniruntime::type::DataTypeId::OMNI_VARCHAR>(
+                                vector, rowIndex, (void*)&value);
+                        }
+                    }
+                    outputVB->Append(vector);
+                    break;
+                }
+                default: THROW_LOGIC_EXCEPTION("SinkUpsertMaterializer: unsupported output column type");
+            }
+        }
+        if (numRows > 0) {
+            outputVB->setTimestamps(0, collectedTimestamps_.data(), numRows);
+            outputVB->setRowKinds(0, collectedRowKinds_.data(), numRows);
+        }
+        return outputVB;
     }
 
     void cleanup()
     {
-        reuseVectorBatchByKeyGroup_.clear();
-        reuseOldRowIdsByKeyGroup_.clear();
-        reuseKeys_.clear();
-        reuseComboIds_.clear();
-        collectedIds_.clear();
+        collectedRows_.clear();
         collectedRowKinds_.clear();
-        // HEAP side batches are owned by the state table; the cache only borrows them.
-        vectorBatchCacheMap_.clear();
+        collectedTimestamps_.clear();
+        deleteAfterOutput_.clear();
     }
 
     std::vector<std::string> inputTypes_;
@@ -371,17 +340,13 @@ private:
     std::vector<int32_t> compareIndices_;
     std::unique_ptr<KeySelector<K>> keySelector_ = nullptr;
 
-    ValueState<std::vector<int64_t>*>* state_ = nullptr;
+    ValueState<std::vector<RowData*>*>* state_ = nullptr;
     omnistream::StateType stateType_ = omnistream::StateType::HEAP;
-    int32_t maxParallelism_ = 0;
 
-    std::unordered_map<uint64_t, omnistream::VectorBatch*> vectorBatchCacheMap_{};
-    std::unordered_map<int32_t, omnistream::VectorBatch*> reuseVectorBatchByKeyGroup_{};
-    std::unordered_map<int32_t, std::vector<int32_t>> reuseOldRowIdsByKeyGroup_{};
-    std::vector<K> reuseKeys_{};
-    std::vector<ComboId> reuseComboIds_{};
-    std::vector<int64_t> collectedIds_{};
+    std::vector<RowData*> collectedRows_{};
     std::vector<RowKind> collectedRowKinds_{};
+    std::vector<int64_t> collectedTimestamps_{};
+    std::vector<RowData*> deleteAfterOutput_{};
 };
 
 template <typename K>
@@ -446,9 +411,13 @@ void SinkUpsertMaterializer<K>::open(const Configuration& context)
         // AppendOnlyTopNFunction plus ownership verification; tracked as follow-up.
         THROW_LOGIC_EXCEPTION("SinkUpsertMaterializer currently only supports HashMapStateBackend");
     }
-    maxParallelism_ = runtimeContext->getMaxNumberOfSubtasks();
-    auto* stateDescriptor = new ValueStateDescriptor<std::vector<int64_t>*>("values", new SortedVectorLong());
-    state_ = runtimeContext->template getState<std::vector<int64_t>*>(stateDescriptor);
+    // Flink: ValueStateDescriptor<List<RowData>>("values", new ListSerializer<>(serializer))
+    // - rows are stored directly in the state list (no comboId / side tables).
+    int inputArity = static_cast<int>(inputTypeIds_.size());
+    auto* inputType = new omnistream::RowType(false, inputTypes_);
+    auto* rowListSerializer = new BinaryRowDataListSerializer(inputArity, new RowDataSerializer(inputType));
+    auto* stateDescriptor = new ValueStateDescriptor<std::vector<RowData*>*>("values", rowListSerializer);
+    state_ = runtimeContext->template getState<std::vector<RowData*>*>(stateDescriptor);
 }
 
 template <typename K>
@@ -459,63 +428,31 @@ void SinkUpsertMaterializer<K>::processBatch(
 {
     auto inputBatchGuard = std::unique_ptr<omnistream::VectorBatch>(inputBatch);
     int rowCnt = inputBatchGuard->GetRowCount();
-    collectedIds_.clear();
-    collectedRowKinds_.clear();
+    cleanup();
 
-    // Register the input rows in the side tables and assign a comboId per row,
-    // so emissions can reference both input rows and previously stored rows.
+    // Row-by-row materialization: each input row is extracted into an independent
+    // BinaryRowData (we take ownership); accumulate stores it into the state list,
+    // retract uses it for the equality match. Emissions keep the input schema and
+    // only rewrite the RowKind.
     for (int i = 0; i < rowCnt; i++) {
         auto key = keySelector_->getKey(inputBatchGuard.get(), i);
-        reuseKeys_.push_back(key);
-        auto keyGroup = KeyGroupRangeAssignment<K>::assignToKeyGroup(key, maxParallelism_);
-        auto& oldRowIds = reuseOldRowIdsByKeyGroup_[keyGroup];
-        auto newRowId = static_cast<int32_t>(oldRowIds.size());
-        auto comboId = VectorBatchUtil::getComboId(keyGroup, state_->getNextSequenceNumber(keyGroup), newRowId);
-        reuseComboIds_.push_back(comboId);
-        oldRowIds.push_back(i);
-    }
-    bool shouldSplitVectorBatch = reuseOldRowIdsByKeyGroup_.size() > 1 ||
-        (reuseOldRowIdsByKeyGroup_.size() == 1 && reuseOldRowIdsByKeyGroup_.begin()->second.size() !=
-                                                      static_cast<size_t>(rowCnt));
-    for (auto& [keyGroup, oldRowIds] : reuseOldRowIdsByKeyGroup_) {
-        omnistream::VectorBatch* splitBatch = nullptr;
-        if (shouldSplitVectorBatch) {
-            splitBatch = VectorBatchUtil::buildNewVectorBatchByRowIds(inputBatchGuard.get(), oldRowIds);
+        ctx.setCurrentKey(key);
+        RowData* row = inputBatchGuard->extractRowData(i);
+        int64_t timestamp = inputBatchGuard->getTimestamp(i);
+        if (isAccumulateMsg(row->getRowKind())) {
+            processAccumulate(row, timestamp);
         } else {
-            splitBatch = inputBatchGuard.get();
-        }
-        auto sequenceNumber = state_->getNextSequenceNumber(keyGroup);
-        auto vectorBatchId = VectorBatchUtil::getVectorBatchId(keyGroup, sequenceNumber);
-        reuseVectorBatchByKeyGroup_[keyGroup] = splitBatch;
-        vectorBatchCacheMap_.emplace(vectorBatchId, splitBatch);
-    }
-    state_->addVectorBatches(reuseVectorBatchByKeyGroup_);
-
-    // Row-by-row materialization: keyed state is addressed by key value, so rows
-    // sharing a key chain through the same state slot in arrival order.
-    for (int i = 0; i < rowCnt; i++) {
-        ctx.setCurrentKey(reuseKeys_[i]);
-        if (isAccumulateMsg(inputBatchGuard->getRowKind(i))) {
-            processAccumulate(ctx, inputBatchGuard.get(), i);
-        } else {
-            processRetract(ctx, inputBatchGuard.get(), i);
+            processRetract(row, timestamp);
         }
     }
 
-    auto* outputVB = new omnistream::VectorBatch(static_cast<int32_t>(collectedIds_.size()));
-    initOutputVector(outputVB, static_cast<int32_t>(collectedIds_.size()));
-    for (size_t i = 0; i < collectedIds_.size(); i++) {
-        copyRowToOutput(outputVB, static_cast<ComboId>(collectedIds_[i]), static_cast<int32_t>(i));
-    }
-    if (!collectedRowKinds_.empty()) {
-        outputVB->setRowKinds(0, collectedRowKinds_.data(), collectedRowKinds_.size());
-    }
+    auto* outputVB = buildOutput();
     out.collect(outputVB);
 
-    if (!shouldSplitVectorBatch) {
-        // The input batch itself was registered as a side-table batch and is now
-        // owned by the state.
-        inputBatchGuard.release();
+    // Rows replaced or removed from the state and retract input rows that were
+    // only used for the comparison are freed after the output batch is assembled.
+    for (RowData* row : deleteAfterOutput_) {
+        delete row;
     }
     cleanup();
 }
