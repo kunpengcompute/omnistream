@@ -474,6 +474,14 @@ void RocksdbKeyedStateBackend<K>::flushFalconCacheBeforeCheckpoint()
                 state->stateCache->flush();
                 state->stateCache->clearAll();
             }
+        } else if (dataId == BackendDataType::ROW_LIST_BK) {
+            // ValueState<List<RowData>> (e.g. SinkUpsertMaterializer "values")
+            auto* state =
+                reinterpret_cast<RocksdbValueState<K, VoidNamespace, std::vector<RowData*>*>*>(entry.second);
+            if (state != nullptr && state->stateCache != nullptr) {
+                state->stateCache->flush();
+                state->stateCache->clearAll();
+            }
         } else {
             NOT_IMPL_EXCEPTION;
         }
