@@ -21,8 +21,12 @@ BarrierHandlerState* AbstractAlternatingAlignedBarrierHandlerState::BarrierRecei
 {
     LOG_DEBUG("AbstractAlternatingAlignedBarrierHandlerState::BarrierReceived");
     if (barrier->GetCheckpointOptions()->IsUnalignedCheckpoint()) {
-        return AlignedCheckpointTimeout(controller, barrier)
-            ->BarrierReceived(controller, channelInfo, barrier, markChannelBlocked);
+        std::unique_ptr<BarrierHandlerState> oldState(AlignedCheckpointTimeout(controller, barrier));
+        auto* newState = oldState->BarrierReceived(controller, channelInfo, barrier, markChannelBlocked);
+        if (oldState.get() == newState) {
+            oldState.release();
+        }
+        return newState;
     }
 
     state.removeSeenAnnouncement(channelInfo);

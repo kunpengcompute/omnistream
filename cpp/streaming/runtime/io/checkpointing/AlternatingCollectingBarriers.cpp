@@ -60,8 +60,14 @@ BarrierHandlerState* AlternatingCollectingBarriers::endOfPartitionReceived(
         controller->TriggerGlobalCheckpoint(*pending);
         return FinishCheckpoint();
     } else if (controller->IsTimedOut(*pending)) {
-        return AlignedCheckpointTimeout(controller, const_cast<CheckpointBarrier*>(pending))
-            ->BarrierReceived(controller, channelInfo, const_cast<CheckpointBarrier*>(pending), false);
+        std::unique_ptr<BarrierHandlerState> oldState(
+            AlignedCheckpointTimeout(controller, const_cast<CheckpointBarrier*>(pending)));
+        auto* newState =
+            oldState->BarrierReceived(controller, channelInfo, const_cast<CheckpointBarrier*>(pending), false);
+        if (oldState.get() == newState) {
+            oldState.release();
+        }
+        return newState;
     }
     return this;
 }
