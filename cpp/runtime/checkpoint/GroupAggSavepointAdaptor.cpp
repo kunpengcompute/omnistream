@@ -75,6 +75,7 @@ void GroupAggSavepointAdaptor::prepareAccumulatorTypes(const nlohmann::json& des
 void GroupAggSavepointAdaptor::validateForSave(const std::vector<std::shared_ptr<StateMetaInfoSnapshot>>& metaInfos)
 {
     StateMetaInfoValidator validator{metaInfos};
+    // TODO: 状态后端停止注册 vb 侧表后，删除保存侧对可选侧表的接纳。
     validator.requireKeyedValueStateWithVB(ACC_STATE_NAME);
     validator.requirePriorityQueueStates();
     validator.consumeAllKeyedStatesWithPrefix("distinctAcc");
@@ -102,7 +103,7 @@ VectorBatchSavePlan GroupAggSavepointAdaptor::buildSavePlan(FullSnapshotResource
         if (meta == nullptr) {
             continue;
         }
-        // VB 侧表不写入 target Flink metadata，只作为 accessor 的 source side table
+        // TODO: 状态后端停止注册 vb 侧表后，删除保存侧的侧表过滤。
         if (VectorBatchSaveTools::isVbStateName(meta->getName())) {
             continue;
         }
@@ -366,7 +367,7 @@ void GroupAggSavepointAdaptor::transformKVData(
     DataOutputSerializer output(128);
     omniAccSerializer_->serialize(omniAccumulator.get(), output);
     ByteView valueView(reinterpret_cast<const int8_t*>(output.getData()), output.getPosition());
-    writer->writeEntry<ByteView>(key, valueView);
+    writer->writeEntry(key, valueView);
 }
 
 void GroupAggSavepointAdaptor::restore(SavepointRestoreResultIterator& restoreIterator, RestoreBackendDelegate& backend)

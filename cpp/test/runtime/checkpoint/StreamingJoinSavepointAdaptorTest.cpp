@@ -178,18 +178,9 @@ public:
         return nullptr;
     }
 
-    std::shared_ptr<VectorBatchStateAccessor> createVectorBatchStateAccessor(
-        const std::string&, const VectorBatchAccessorOptions&) override
-    {
-        accessorCreateCount++;
-        return nullptr;
-    }
-
     void cleanup() override
     {
     }
-
-    int accessorCreateCount = 0;
 
 private:
     std::vector<std::shared_ptr<StateMetaInfoSnapshot>> metaInfos_;
@@ -276,7 +267,20 @@ TEST(StreamingJoinSavepointAdaptorTest, SaveValidationAcceptsCurrentSchemaAndRej
     EXPECT_THROW(adaptor.validateForSave(legacyMetaInfos), std::runtime_error);
 }
 
-TEST(StreamingJoinSavepointAdaptorTest, SaveContextsNeverCreateVectorBatchAccessor)
+TEST(StreamingJoinSavepointAdaptorTest, SaveValidationAcceptsOptionalRegisteredSideTables)
+{
+    StreamingJoinSavepointAdaptor adaptor(FlinkSavepointAdaptorType::StreamingLeftOuterJoinNoUniqueKeyAdaptor);
+    adaptor.prepareForSave(leftOuterDescription());
+    auto metaInfos = makeOmniLeftOuterMetaInfos();
+    metaInfos.push_back(makeMapMetaInfo(
+        std::string(StreamingJoinSavepointUtil::LEFT_STATE_NAME) + "vb", {"BIGINT"}, IntSerializer::INSTANCE));
+    metaInfos.push_back(makeMapMetaInfo(
+        std::string(StreamingJoinSavepointUtil::RIGHT_STATE_NAME) + "vb", {"BIGINT"}, IntSerializer::INSTANCE));
+
+    EXPECT_NO_THROW(adaptor.validateForSave(metaInfos));
+}
+
+TEST(StreamingJoinSavepointAdaptorTest, SaveContextsUseRowStateConversion)
 {
     StreamingJoinSavepointAdaptor adaptor(FlinkSavepointAdaptorType::StreamingJoinNoUniqueKeyAdaptor);
     NoVbSnapshotResources resources(2);
@@ -284,24 +288,13 @@ TEST(StreamingJoinSavepointAdaptorTest, SaveContextsNeverCreateVectorBatchAccess
     plan.kvStateIdMapping.emplace(0, 0);
     plan.kvStateIdMapping.emplace(1, 1);
     plan.stateContextSpecs.push_back(
-        {0,
-         StreamingJoinSavepointUtil::LEFT_STATE_NAME,
-         IntSerializer::INSTANCE,
-         {},
-         VectorBatchStateType::KV_TRANSFORM});
+        {0, StreamingJoinSavepointUtil::LEFT_STATE_NAME, IntSerializer::INSTANCE, VectorBatchStateType::KV_TRANSFORM});
     plan.stateContextSpecs.push_back(
-        {1,
-         StreamingJoinSavepointUtil::RIGHT_STATE_NAME,
-         IntSerializer::INSTANCE,
-         {},
-         VectorBatchStateType::KV_TRANSFORM});
+        {1, StreamingJoinSavepointUtil::RIGHT_STATE_NAME, IntSerializer::INSTANCE, VectorBatchStateType::KV_TRANSFORM});
 
     auto contexts = adaptor.buildSaveStateContexts(resources, plan);
 
     ASSERT_EQ(contexts.size(), 2);
     EXPECT_TRUE(contexts[0].isValid());
     EXPECT_TRUE(contexts[1].isValid());
-    EXPECT_EQ(contexts[0].vbAccessor, nullptr);
-    EXPECT_EQ(contexts[1].vbAccessor, nullptr);
-    EXPECT_EQ(resources.accessorCreateCount, 0);
 }

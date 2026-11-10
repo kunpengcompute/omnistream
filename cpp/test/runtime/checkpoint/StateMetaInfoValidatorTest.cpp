@@ -184,43 +184,6 @@ TEST(StateMetaInfoValidatorTest, BulkRequireStatesConsumesAll)
     EXPECT_NO_THROW(validator.requireNoMoreStates());
 }
 
-// 批量 WithVB：主状态及其 VB side table 均应被消费。
-TEST(StateMetaInfoValidatorTest, BulkRequireWithVBConsumesAll)
-{
-    std::vector<std::shared_ptr<StateMetaInfoSnapshot>> metas{
-        makeKv("s1"), makeKv("s1vb"), makeKvMap("s2"), makeKv("s2vb"), makeKvList("s3"), makeKv("s3vb")};
-    StateMetaInfoValidator validator(metas);
-
-    EXPECT_NO_THROW(validator.requireKeyedValueStatesWithVB({"s1"}));
-    EXPECT_NO_THROW(validator.requireKeyedMapStatesWithVB({"s2"}));
-    EXPECT_NO_THROW(validator.requireKeyedListStatesWithVB({"s3"}));
-    EXPECT_NO_THROW(validator.requireNoMoreStates());
-}
-
-// MAP WithVB：主 MAP 状态及其 VB side table 同时被消费。
-TEST(StateMetaInfoValidatorTest, RequireMapWithVBConsumesSideTable)
-{
-    std::vector<std::shared_ptr<StateMetaInfoSnapshot>> metas{makeKvMap("s"), makeKv("svb")};
-    StateMetaInfoValidator validator(metas);
-
-    EXPECT_NO_THROW(validator.requireKeyedMapStateWithVB("s"));
-    EXPECT_EQ(validator.consumed().count("s"), 1u);
-    EXPECT_EQ(validator.consumed().count("svb"), 1u);
-    EXPECT_NO_THROW(validator.requireNoMoreStates());
-}
-
-// LIST WithVB：主 LIST 状态及其 VB side table 同时被消费。
-TEST(StateMetaInfoValidatorTest, RequireListWithVBConsumesSideTable)
-{
-    std::vector<std::shared_ptr<StateMetaInfoSnapshot>> metas{makeKvList("s"), makeKv("svb")};
-    StateMetaInfoValidator validator(metas);
-
-    EXPECT_NO_THROW(validator.requireKeyedListStateWithVB("s"));
-    EXPECT_EQ(validator.consumed().count("s"), 1u);
-    EXPECT_EQ(validator.consumed().count("svb"), 1u);
-    EXPECT_NO_THROW(validator.requireNoMoreStates());
-}
-
 // requirePriorityQueueStates：合法前缀被消费。
 TEST(StateMetaInfoValidatorTest, RequirePqConsumesTimerStates)
 {

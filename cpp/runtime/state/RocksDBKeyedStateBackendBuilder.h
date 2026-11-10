@@ -40,7 +40,6 @@
 #include "runtime/snapshot/RocksNativeFullSnapshotStrategy.h"
 #include "runtime/snapshot/RocksIncrementalSnapshotStrategy.h"
 #include "runtime/state/rocksdb/RocksDBStateUploader.h"
-#include "runtime/state/StateRestoreValidation.h"
 
 namespace fs = std::filesystem;
 template <typename K>
@@ -183,11 +182,6 @@ private:
         } catch (const fs::filesystem_error& e) {
             throw std::runtime_error("Failed to prepare directories: " + std::string(e.what()));
         }
-    }
-
-    bool validateRestoreStateHandles()
-    {
-        return omnistream::validateRestoreStateHandles(restoreStateHandles, omniTaskBridge);
     }
 
     std::shared_ptr<RocksDBRestoreOperation> getRocksDBRestoreOperation(

@@ -37,8 +37,7 @@ public:
 
     virtual std::shared_ptr<SavepointResources> savepoint() = 0;
 
-    // 为需要 adaptor 转换的 compatible savepoint 准备后端专用资源。默认复用普通 savepoint()，不要求所有后端
-    // 都实现额外语义；只有像 Heap 这类需要为 compatible 转换保留 VectorBatch accessor 数据的后端才应 override。
+    // 为需要 adaptor 转换的 compatible savepoint 准备快照资源，默认复用普通 savepoint()。
     // OmniIsCompatible 分支语义上仍复用普通 savepoint()，不应因为请求格式为 COMPATIBLE 而自动调用本入口。
     virtual std::shared_ptr<SavepointResources> compatibleSavepoint()
     {

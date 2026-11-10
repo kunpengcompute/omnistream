@@ -35,7 +35,7 @@ namespace omnistream {
 //   Outer 保留侧：RowData -> (count, numAssociations)
 // 两者的 entry payload 布局一致，差异只在 Omni Heap 快照会把同一 keyed key 下的 MapState
 // entry 聚合到一个 value 中。该适配器负责转换 metadata，并在保存 Heap 状态时展开聚合 Map；
-// 当前协议不再读取或写入 XXH128、ComboId 和 VectorBatch side table。
+// 遗留侧表仅在保存侧过滤。
 class StreamingJoinSavepointAdaptor : public OperatorSavepointAdaptor,
                                       public VectorBatchSaveHooks,
                                       public VectorBatchRestoreHooks {
@@ -73,7 +73,7 @@ public:
     /*========== OperatorSavepointAdaptor ==========*/
     /*========== VectorBatchSaveHooks ==========*/
 
-    // 根据保存计划创建无 VB accessor 的 MapState 转换上下文。
+    // 根据保存计划创建 MapState 转换上下文。
     std::vector<VectorBatchSaveStateContext> buildSaveStateContexts(
         FullSnapshotResources& snapshotResources, const VectorBatchSavePlan& plan) override;
 

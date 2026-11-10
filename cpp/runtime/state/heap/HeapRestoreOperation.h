@@ -35,8 +35,6 @@
 #include "runtime/checkpoint/FlinkSavepointAdaptorInfo.h"
 #include "runtime/checkpoint/OperatorSavepointAdaptorFactory.h"
 #include "core/typeutils/LongSerializer.h"
-#include "table/utils/VectorBatchDeserializationUtils.h"
-#include "table/data/util/SequenceNumberHelper.h"
 #include "runtime/state/VoidNamespace.h"
 #include "table/data/RowData.h"
 #include "table/runtime/operators/window/TimeWindow.h"

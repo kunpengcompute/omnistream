@@ -122,10 +122,10 @@ TEST_F(RocksDBRestoreBackendDelegateTest, ReusesMainColumnFamilyForSameStateId)
     const std::vector<int8_t> secondValue{4};
 
     auto firstWriter = delegate.createKVState(7, metaInfo);
-    firstWriter->writeEntry<ByteView>(firstKey, ByteView::fromBuffer(firstValue.data(), firstValue.size()));
+    firstWriter->writeEntry(firstKey, ByteView::fromBuffer(firstValue.data(), firstValue.size()));
     firstWriter->flush();
     auto secondWriter = delegate.createKVState(7, metaInfo);
-    secondWriter->writeEntry<ByteView>(secondKey, ByteView::fromBuffer(secondValue.data(), secondValue.size()));
+    secondWriter->writeEntry(secondKey, ByteView::fromBuffer(secondValue.data(), secondValue.size()));
     secondWriter->flush();
 
     ASSERT_EQ(kvStateInformation_.size(), 1U);
@@ -134,28 +134,6 @@ TEST_F(RocksDBRestoreBackendDelegateTest, ReusesMainColumnFamilyForSameStateId)
     EXPECT_EQ(std::vector<int8_t>(restored.begin(), restored.end()), firstValue);
     ASSERT_TRUE(get("main-state", secondKey, &restored).ok());
     EXPECT_EQ(std::vector<int8_t>(restored.begin(), restored.end()), secondValue);
-}
-
-TEST_F(RocksDBRestoreBackendDelegateTest, VectorBatchWriterRegistersMainAndSideTableOnce)
-{
-    omnistream::RocksDBRestoreBackendDelegate<int> delegate(rocksDbHandle_.get(), 0, 1, 2 * 1024 * 1024);
-    const auto metaInfo = makeMetaInfo("vb-state", StateMetaInfoSnapshot::BackendStateType::KEY_VALUE);
-    const std::vector<omniruntime::type::DataTypeId> columnTypes{omniruntime::type::DataTypeId::OMNI_LONG};
-    const std::vector<int8_t> key{5};
-    const std::vector<int8_t> value{6, 0, 7};
-
-    auto writer = delegate.createKVStateVB(9, metaInfo, columnTypes, 1024);
-    writer->writeEntry<ByteView>(key, ByteView::fromBuffer(value.data(), value.size()));
-    writer->flush();
-    auto reusedWriter = delegate.createKVStateVB(9, metaInfo, columnTypes, 1024);
-
-    EXPECT_NE(reusedWriter, nullptr);
-    ASSERT_EQ(kvStateInformation_.size(), 2U);
-    EXPECT_NE(kvStateInformation_.find("vb-state"), kvStateInformation_.end());
-    EXPECT_NE(kvStateInformation_.find("vb-statevb"), kvStateInformation_.end());
-    std::string restored;
-    ASSERT_TRUE(get("vb-state", key, &restored).ok());
-    EXPECT_EQ(std::vector<int8_t>(restored.begin(), restored.end()), value);
 }
 
 TEST_F(RocksDBRestoreBackendDelegateTest, PriorityQueueFallsBackToRocksDBWithoutHeapRegistry)

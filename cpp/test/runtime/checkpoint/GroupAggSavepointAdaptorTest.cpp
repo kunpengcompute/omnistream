@@ -222,12 +222,6 @@ public:
         return nullptr;
     }
 
-    std::unique_ptr<RestoreKVStateVB> createKVStateVB(
-        int, const StateMetaInfoSnapshot&, const std::vector<omniruntime::type::DataTypeId>&, int) override
-    {
-        return nullptr;
-    }
-
     std::unique_ptr<RestorePQState> createPQState(int, const StateMetaInfoSnapshot&) override
     {
         return nullptr;
@@ -250,13 +244,6 @@ public:
     std::vector<int8_t> value;
 
 protected:
-    void writeLongEntry(const std::vector<int8_t>& keyBytes, int64_t longValue) override
-    {
-        key = keyBytes;
-        value.resize(sizeof(longValue));
-        std::memcpy(value.data(), &longValue, sizeof(longValue));
-    }
-
     void writeBytesEntry(const std::vector<int8_t>& keyBytes, ByteView bytes) override
     {
         key = keyBytes;
@@ -323,12 +310,7 @@ std::unique_ptr<HeapFullSnapshotResources> makeHeapResources(
     std::vector<std::shared_ptr<StateMetaInfoSnapshot>> metas, KeyGroupRange& range)
 {
     return std::make_unique<HeapFullSnapshotResources>(
-        std::move(metas),
-        std::vector<std::unique_ptr<SingleStateIterator>>{},
-        &range,
-        nullptr,
-        1,
-        std::unordered_map<std::string, std::shared_ptr<HeapSnapshotStateData>>{});
+        std::move(metas), std::vector<std::unique_ptr<SingleStateIterator>>{}, &range, nullptr, 1);
 }
 
 } // namespace

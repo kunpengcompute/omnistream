@@ -11,116 +11,19 @@
 
 #pragma once
 
-#include <cstdint>
-#include <cstring>
-#include <stdexcept>
 #include <string>
-#include <vector>
-
-#include "common.h"
-#include "core/memory/DataOutputSerializer.h"
-#include "core/memory/DataInputDeserializer.h"
-#include "core/typeutils/TypeSerializer.h"
-#include "core/utils/ByteView.h"
-#include "table/data/RowData.h"
-#include "table/data/util/ComboIdUtil.h"
-#include "table/data/vectorbatch/VectorBatchStorageInfo.h"
 
 namespace omnistream {
 
-// VectorBatch 保存流程使用的无状态工具函数集合。
-//
-// 本类仅提供通用字节处理与序列化辅助能力，不依赖具体算子语义，
-// 不访问 Adaptor 内部状态，也不根据 state name 推断算子类型。
+// 保存阶段的状态过滤工具。
+// TODO: adaptor 保存侧移除 vb 侧表过滤后，删除此工具类及对应头文件。
 class VectorBatchSaveTools {
 public:
-    // 判定状态名是否符合 VectorBatch 侧表命名约定：以 "vb" 结尾的状态名视为侧表。
+    // TODO: 状态后端停止注册 vb 侧表后，删除保存侧的侧表过滤及此方法。
+    // 以 "vb" 结尾的遗留侧表不写入兼容 savepoint。
     static bool isVbStateName(const std::string& stateName)
     {
         return stateName.size() >= 2 && stateName.substr(stateName.size() - 2) == "vb";
-    }
-
-    // 从 ByteView 中解析 big-endian uint64_t comboId，调用方需保证 value 至少包含 8 字节。
-    // 适用于主状态 value 直接保存 comboId 的 parseVectorBatchReference() 实现。
-    static omnistream::ComboId parseComboId(ByteView value)
-    {
-        if (value.data() == nullptr || value.size() < sizeof(int64_t)) {
-            INFO_RELEASE("Error: VectorBatchSaveTools::parseComboId -> invalid comboId bytes, size=" << value.size());
-            throw std::runtime_error(
-                "VectorBatchSaveTools::parseComboId comboId value must contain at least 8 bytes, actual size=" +
-                std::to_string(value.size()));
-        }
-        DataInputDeserializer input(value.data(), static_cast<int>(value.size()), 0);
-        return ComboIdUtil::readComboId(input);
-    }
-
-    // 解析 Flink ListDelimitedSerializer 格式的 ComboId 列表。
-    // 格式: [comboId (8B BigInt)][delimiter ',']... ，与 RocksDB/Heap 恢复路径的 writeComboIdList 格式对应。
-    static std::vector<omnistream::ComboId> parseComboIdList(ByteView value)
-    {
-        std::vector<omnistream::ComboId> result;
-        if (value.data() == nullptr || value.size() < static_cast<size_t>(sizeof(int64_t))) {
-            ERROR_RELEASE("VectorBatchSaveTools::parseComboIdList -> invalid bytes, size=" << value.size());
-            throw std::runtime_error(
-                "VectorBatchSaveTools::parseComboIdList value must contain at least 8 bytes, actual size=" +
-                std::to_string(value.size()));
-        }
-
-        DataInputDeserializer input(value.data(), static_cast<int>(value.size()), 0);
-        while (input.Available() >= static_cast<int>(sizeof(int64_t))) {
-            result.push_back(ComboIdUtil::readComboId(input));
-            if (input.Available() > 0) {
-                int8_t delimiter = input.readByte();
-                if (static_cast<uint8_t>(delimiter) != static_cast<uint8_t>(',')) {
-                    ERROR_RELEASE(
-                        "VectorBatchSaveTools::parseComboIdList -> invalid delimiter byte=0x"
-                        << std::hex << static_cast<int>(delimiter) << std::dec
-                        << ", expected ',' (0x2C), comboIdCount=" << result.size());
-                    throw std::runtime_error(
-                        "VectorBatchSaveTools::parseComboIdList invalid delimiter byte=0x" +
-                        std::to_string(static_cast<int>(delimiter)) + ", expected ','");
-                }
-            }
-        }
-        if (input.Available() > 0) {
-            ERROR_RELEASE(
-                "VectorBatchSaveTools::parseComboIdList -> trailing bytes, available="
-                << input.Available() << ", comboIdCount=" << result.size());
-            throw std::runtime_error(
-                "VectorBatchSaveTools::parseComboIdList trailing bytes, available=" +
-                std::to_string(input.Available()));
-        }
-        return result;
-    }
-
-    // 使用指定 serializer 将 RowData 同步序列化为 std::vector<int8_t>。
-    // 适用于 encodeFlinkLogicalValue() 中直接使用单一 RowData serializer 的场景。
-    // serializer 需非空，并且能够处理 RowData* 类型输入。
-    static std::vector<int8_t> serializeRowData(RowData* row, TypeSerializer* serializer)
-    {
-        if (row == nullptr || serializer == nullptr) {
-            return {};
-        }
-        // 预估容量：每列约 8 字节 header，加上实际字段内容。
-        DataOutputSerializer target(256);
-        serializer->serialize(static_cast<void*>(row), target);
-
-        std::vector<int8_t> result;
-        result.resize(target.getPosition());
-        if (target.getPosition() > 0) {
-            std::memcpy(result.data(), target.getData(), target.getPosition());
-        }
-        return result;
-    }
-
-    // 跳过 VectorBatch 侧表 value 的首字节 StreamElementTag。
-    // 返回的 ByteView 指向原始 value 中 tag 之后的 payload 区域。
-    static ByteView skipVbValueTag(ByteView vbValue)
-    {
-        if (vbValue.size() <= sizeof(int8_t)) {
-            return ByteView();
-        }
-        return ByteView(vbValue.data() + sizeof(int8_t), vbValue.size() - sizeof(int8_t));
     }
 };
 

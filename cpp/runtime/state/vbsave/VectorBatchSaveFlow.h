@@ -35,9 +35,8 @@
 
 namespace omnistream {
 
-// VectorBatch 保存方向公共调度流程。
-// 以 NON_VB 主状态迭代为驱动，根据 stateType 分发普通状态和 VB 状态。
-// 具体 Adaptor 提供算子语义，VB 状态支持一条 source entry 输出 0-N 条 target entry。
+// 兼容 savepoint 保存方向公共调度流程。
+// 根据 stateType 透传状态或调用 Adaptor 转换，每条 source entry 可以输出 0-N 条 target entry。
 class VectorBatchSaveFlow final {
 public:
     template <typename Hooks>

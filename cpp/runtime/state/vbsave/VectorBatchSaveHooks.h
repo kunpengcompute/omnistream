@@ -19,48 +19,19 @@
 #include "runtime/state/vbsave/VectorBatchSavePlan.h"
 #include "runtime/state/FullSnapshotResources.h"
 #include "runtime/state/KeyValueStateIterator.h"
-#include "table/data/vectorbatch/VectorBatchStorageInfo.h"
 
 namespace omnistream {
 
-// VectorBatch 保存方向的算子语义扩展接口。
-// VectorBatchSaveFlow 负责状态遍历、结果写出和资源生命周期，具体 Adaptor 负责 comboId 解析、
-// VectorBatch 行解引用以及 Flink logical key/value 编码。
+// 兼容 savepoint 保存方向的算子语义扩展接口。
+// VectorBatchSaveFlow 负责状态遍历和结果写出，具体 Adaptor 负责 Flink logical key/value 编码。
 class VectorBatchSaveHooks {
 public:
     virtual ~VectorBatchSaveHooks() = default;
 
     // 构造按 source kvStateId 下标访问的保存上下文数组。
-    // Adaptor 负责设置 stateType、mappedKvStateId、serializer 和所需的 VectorBatch accessor。
+    // Adaptor 负责设置 stateType、mappedKvStateId 和 serializer。
     virtual std::vector<VectorBatchSaveStateContext> buildSaveStateContexts(
         FullSnapshotResources& snapshotResources, const VectorBatchSavePlan& plan) = 0;
-
-    // 从主状态 value 中解析单个 comboId，供 Deduplicate、StreamingJoin 等单引用状态使用。
-    virtual omnistream::ComboId parseVectorBatchReference(
-        ByteView value, const VectorBatchSaveStateContext& context, const VectorBatchSavePlan& plan)
-    {
-        return -1;
-    };
-
-    // 将 source key 编码为 target Flink logical key，默认直接透传原 key。
-    virtual std::vector<int8_t> encodeFlinkLogicalKey(
-        const KeyValueStateIterator::CurrentEntry& entry,
-        RowData& row,
-        const VectorBatchSaveStateContext& context,
-        const VectorBatchSavePlan& plan)
-    {
-        return std::vector<int8_t>(entry.key.begin(), entry.key.end());
-    }
-
-    // 将解引用得到的 RowData 编码为 target Flink logical value。
-    virtual std::vector<int8_t> encodeFlinkLogicalValue(
-        const KeyValueStateIterator::CurrentEntry& entry,
-        RowData& row,
-        const VectorBatchSaveStateContext& context,
-        const VectorBatchSavePlan& plan)
-    {
-        return {};
-    }
 };
 
 } // namespace omnistream

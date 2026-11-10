@@ -37,10 +37,8 @@
 #include "table/data/RowData.h"
 #include "streaming/runtime/streamrecord/StreamElement.h"
 #include "runtime/state/InternalKeyContextImpl.h"
-#include "table/utils/VectorBatchDeserializationUtils.h"
 #include "table/typeutils/SortedVectorLong.h"
 #include "core/utils/MathUtils.h"
-#include "runtime/state/StateRestoreValidation.h"
 #include "runtime/state/OperatorRuntimeStateSchemaProvider.h"
 
 template <typename K>
@@ -85,13 +83,6 @@ public:
     {
         this->taskType_ = taskType;
         return *this;
-    }
-
-    bool validateRestoreStateHandles()
-    {
-        std::vector<std::shared_ptr<KeyedStateHandle>> handleVec(
-            restoreStateHandles.begin(), restoreStateHandles.end());
-        return omnistream::validateRestoreStateHandles(handleVec, omniTaskBridge);
     }
 
     HeapKeyedStateBackend<K>* build();
@@ -206,13 +197,6 @@ private:
         HeapKeyedStateBackend<K>* backend,
         const RestoreStateInfo& info,
         int keyGroupId,
-        int keyGroupPrefixBytes,
-        const std::vector<int8_t>& keyBytes,
-        const std::vector<int8_t>& valueBytes);
-
-    void restoreVbEntryToHeap(
-        HeapKeyedStateBackend<K>* backend,
-        const RestoreStateInfo& info,
         int keyGroupPrefixBytes,
         const std::vector<int8_t>& keyBytes,
         const std::vector<int8_t>& valueBytes);
@@ -472,6 +456,15 @@ HeapKeyedStateBackend<K>* HeapKeyedStateBackendBuilder<K>::build()
                         << ", backendStateType=" << static_cast<int>(backendStateType));
                 }
 
+                // TODO: 状态后端停止注册 vb 侧表后，删除此过滤分支。
+                // 当前 RocksDB 后端创建普通SP时，会原样写出 vb 侧表元数据，Heap 后端恢复时需要过滤。
+                // 保留 source kvStateId 的空占位，避免注册遗留侧表，Phase 2 会跳过其条目。
+                const auto& stateName = metaInfo.getName();
+                if (stateName.size() >= 2 && stateName.compare(stateName.size() - 2, 2, "vb") == 0) {
+                    stateInfos.push_back({backendStateType, stateName, nullptr, nullptr, nullptr});
+                    continue;
+                }
+
                 std::string stateTypeStr =
                     metaInfo.getOption(StateMetaInfoSnapshot::CommonOptionsKeys::KEYED_STATE_TYPE);
                 StateDescriptor::Type stateType = StateDescriptor::StringToType(stateTypeStr);
@@ -486,13 +479,6 @@ HeapKeyedStateBackend<K>* HeapKeyedStateBackendBuilder<K>::build()
                     THROW_RUNTIME_ERROR(
                         "HeapKeyedStateBackendBuilder::build skipping state '" << metaInfo.getName()
                                                                                << "' — missing serializer(s)");
-                }
-                auto stateName = metaInfo.getName();
-                if (stateName.size() >= 2 && stateName.compare(stateName.size() - 2, 2, "vb") == 0) {
-                    StateDescriptor* desc =
-                        createRestoreDescriptor(metaInfo, stateType, nsSerializer, valSerializer, nullptr);
-                    stateInfos.push_back({backendStateType, stateName, desc, nsSerializer, valSerializer});
-                    continue;
                 }
 
                 StateDescriptor* desc = createRestoreDescriptor(
@@ -530,13 +516,8 @@ HeapKeyedStateBackend<K>* HeapKeyedStateBackendBuilder<K>::build()
                     if (info.stateDesc == nullptr) {
                         continue; // State was skipped in Phase 1
                     }
-                    if (info.stateName.size() >= 2 && info.stateName.substr(info.stateName.size() - 2) == "vb") {
-                        restoreVbEntryToHeap(
-                            backend.get(), info, keyGroupPrefixBytes, entry.getKey(), entry.getValue());
-                    } else {
-                        restoreEntryToHeap(
-                            backend.get(), info, keyGroupId, keyGroupPrefixBytes, entry.getKey(), entry.getValue());
-                    }
+                    restoreEntryToHeap(
+                        backend.get(), info, keyGroupId, keyGroupPrefixBytes, entry.getKey(), entry.getValue());
                 }
             }
         }
@@ -829,74 +810,4 @@ void HeapKeyedStateBackendBuilder<K>::restoreEntryToHeap(
         delete static_cast<K*>(rawKey);
         delete static_cast<VoidNamespace*>(rawNs);
     }
-}
-
-template <typename K>
-void HeapKeyedStateBackendBuilder<K>::restoreVbEntryToHeap(
-    HeapKeyedStateBackend<K>* backend,
-    const RestoreStateInfo& info,
-    int keyGroupPrefixBytes,
-    const std::vector<int8_t>& keyBytes,
-    const std::vector<int8_t>& valueBytes)
-{
-    // vb key format: [keyGroup] + [8 bytes sequenceNumber via LongSerializer]
-    const auto expectedKeySize = static_cast<size_t>(keyGroupPrefixBytes) + sizeof(int64_t);
-    if (keyGroupPrefixBytes <= 0 || keyBytes.size() != expectedKeySize) {
-        THROW_RUNTIME_ERROR(
-            "Invalid VectorBatch key size while restoring to heap: expected " << expectedKeySize << ", actual "
-                                                                              << keyBytes.size());
-    }
-    const auto* keyData = reinterpret_cast<const uint8_t*>(keyBytes.data());
-    int vbKeyGroup = CompositeKeySerializationUtils::readKeyGroup(keyData, keyGroupPrefixBytes);
-    DataInputDeserializer keyInput(keyData, static_cast<int>(keyBytes.size()), keyGroupPrefixBytes);
-
-    LongSerializer longSerializer;
-    void* rawSequenceNumber = longSerializer.deserialize(keyInput);
-    int64_t sequenceNumber = *static_cast<int64_t*>(rawSequenceNumber);
-    delete static_cast<int64_t*>(rawSequenceNumber);
-    if (sequenceNumber < 0 || sequenceNumber > static_cast<int64_t>(SequenceNumberHelper::MAX_SEQUENCE_NUMBER)) {
-        THROW_RUNTIME_ERROR("Invalid VectorBatch sequenceNumber while restoring: " << sequenceNumber);
-    }
-    auto sequenceNumberU32 = static_cast<uint32_t>(sequenceNumber);
-    auto nextSequenceNumber = sequenceNumberU32 + 1;
-
-    // Deserialize VectorBatch from value bytes
-    std::vector<uint8_t> valueBuf(valueBytes.size());
-    for (size_t i = 0; i < valueBytes.size(); i++) {
-        valueBuf[i] = static_cast<uint8_t>(valueBytes[i]);
-    }
-    if (valueBuf.size() <= sizeof(int8_t) || valueBuf[0] != static_cast<uint8_t>(StreamElementTag::VECTOR_BATCH)) {
-        ERROR_RELEASE(
-            "Invalid VectorBatch state value while restoring state '" << info.stateName << "': size=" << valueBuf.size()
-                                                                      << ", missing VectorBatch tag");
-        THROW_RUNTIME_ERROR(
-            "Invalid VectorBatch state value while restoring state '" << info.stateName << "': size=" << valueBuf.size()
-                                                                      << ", missing VectorBatch tag");
-    }
-    uint8_t* cursor = valueBuf.data() + sizeof(int8_t);
-    omnistream::VectorBatch* vectorBatch = nullptr;
-    try {
-        vectorBatch = VectorBatchDeserializationUtils::deserializeVectorBatch(cursor, valueBuf.size() - sizeof(int8_t));
-    } catch (const std::exception& error) {
-        ERROR_RELEASE(
-            "Heap VectorBatch restore failed: state='"
-            << info.stateName << "', keyGroup=" << vbKeyGroup << ", sequenceNumber=" << sequenceNumberU32
-            << ", serializedSize=" << valueBuf.size() << ", reason=" << error.what());
-        throw;
-    }
-
-    uintptr_t vbStateTablePtr = backend->getStateTablePtr(info.stateName);
-    if (vbStateTablePtr == 0) {
-        INFO_RELEASE(
-            "Error:HeapKeyedStateBackendBuilder: vb state table not found for '" << info.stateName
-                                                                                 << "', skipping entry");
-        delete vectorBatch;
-        return;
-    }
-
-    auto* table =
-        reinterpret_cast<CopyOnWriteStateTable<uint32_t, VoidNamespace, omnistream::VectorBatch*>*>(vbStateTablePtr);
-    VoidNamespace ns;
-    table->put(sequenceNumberU32, vbKeyGroup, ns, vectorBatch);
-    table->updateNextSequenceNumber(vbKeyGroup, nextSequenceNumber);
 }

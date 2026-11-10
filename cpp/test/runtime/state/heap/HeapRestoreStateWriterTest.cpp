@@ -34,12 +34,10 @@
 #include "runtime/state/heap/HeapRestoreBackendDelegate.h"
 #include "runtime/state/heap/HeapSingleStateIterator.h"
 #include "runtime/state/heap/HeapRestoreKVState.h"
-#include "runtime/state/heap/HeapRestoreKVStateVB.h"
 #include "runtime/state/heap/HeapRestorePQState.h"
 #include "runtime/state/metainfo/StateMetaInfoSnapshot.h"
 #include "runtime/state/restore/RestoreBackendDelegate.h"
 #include "runtime/state/restore/RestoreKVState.h"
-#include "runtime/state/restore/RestoreKVStateVB.h"
 #include "runtime/state/restore/RestorePQState.h"
 #include "table/data/binary/BinaryRowData.h"
 #include "table/typeutils/RowDataSerializer.h"
@@ -169,17 +167,6 @@ TEST_F(HeapRestoreStateWriterTest, DelegateCreateKvStateRegistersStateInfo)
     EXPECT_EQ(delegate_->getStateInfos()[0].stateName, "kvState");
 }
 
-TEST_F(HeapRestoreStateWriterTest, DelegateCreateKvStateVbReturnsNonNull)
-{
-    auto metaInfo = makeKvMetaInfo("kvVbState");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {
-        omniruntime::type::DataTypeId::OMNI_LONG, omniruntime::type::DataTypeId::OMNI_VARCHAR};
-    int batchSize = 1024;
-
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, batchSize);
-    ASSERT_NE(kvVb, nullptr);
-}
-
 // 看护 LIST 类型注册：mainStateDesc 正确创建
 TEST_F(HeapRestoreStateWriterTest, DelegateCreateKvStateRegistersListStateInfo)
 {
@@ -211,31 +198,6 @@ TEST_F(HeapRestoreStateWriterTest, KvStateSetKeyGroupIdDoesNotThrow)
     auto kv = delegate_->createKVState(0, metaInfo);
 
     EXPECT_NO_THROW(kv->setKeyGroupId(5));
-}
-
-// ============================================================================
-// HeapRestoreKVStateVB 基本构造测试
-// ============================================================================
-
-TEST_F(HeapRestoreStateWriterTest, KvStateVbFlushAndDiscardDoNotThrow)
-{
-    auto metaInfo = makeKvMetaInfo("vbFlushState");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {omniruntime::type::DataTypeId::OMNI_LONG};
-
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, 1024);
-
-    EXPECT_NO_THROW(kvVb->flush());
-    EXPECT_NO_THROW(kvVb->discard());
-}
-
-TEST_F(HeapRestoreStateWriterTest, KvStateVbSetKeyGroupIdDoesNotThrow)
-{
-    auto metaInfo = makeKvMetaInfo("vbKgState");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {omniruntime::type::DataTypeId::OMNI_LONG};
-
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, 1024);
-
-    EXPECT_NO_THROW(kvVb->setKeyGroupId(3));
 }
 
 // ============================================================================
@@ -318,7 +280,7 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteValueEntryBigintBackend)
     auto valueBytes = makeLongValueBytes(100);
 
     // 通过 writeBytesEntry 写入: 路由到 writeValueEntry → BIGINT_BK
-    EXPECT_NO_THROW(kv->writeEntry<ByteView>(keyBytes, ByteView(valueBytes.data(), valueBytes.size())));
+    EXPECT_NO_THROW(kv->writeEntry(keyBytes, ByteView(valueBytes.data(), valueBytes.size())));
 
     // Verify entry count
     ASSERT_GE(delegate_->getStateInfos().size(), 1u);
@@ -330,6 +292,34 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteValueEntryBigintBackend)
         delegate_->getStateInfos()[0].mainTablePtr);
     ASSERT_NE(restoredTable, nullptr);
     EXPECT_EQ(restoredTable->get(42, 0, VoidNamespace()), 100L);
+}
+
+TEST_F(HeapRestoreStateWriterTest, SavepointSnapshotsExcludeRegisteredVbSideTables)
+{
+    auto metaInfo = makeKvMetaInfo("rowState");
+    auto kv = delegate_->createKVState(0, metaInfo);
+    kv->setKeyGroupId(0);
+    const auto keyBytes = makeKeyBytes(42, 0, 2);
+    const auto valueBytes = makeLongValueBytes(100);
+    kv->writeEntry(keyBytes, ByteView(valueBytes.data(), valueBytes.size()));
+    ASSERT_NE(backend_->getStateTablePtr("rowStatevb"), 0U);
+
+    for (const auto& savepointResources : {backend_->savepoint(), backend_->compatibleSavepoint()}) {
+        const auto& resources = savepointResources->getSnapshotResources();
+        const auto& metaInfos = resources->getMetaInfoSnapshots();
+        ASSERT_EQ(metaInfos.size(), 1U);
+        EXPECT_EQ(metaInfos[0]->getName(), "rowState");
+
+        auto iterator = resources->createKVStateIterator();
+        ASSERT_TRUE(iterator->isValid());
+        EXPECT_EQ(iterator->current().kvStateId, 0);
+        EXPECT_EQ(iterator->current().value.size(), valueBytes.size());
+        EXPECT_EQ(std::vector<int8_t>(iterator->current().value.begin(), iterator->current().value.end()), valueBytes);
+        iterator->next();
+        EXPECT_FALSE(iterator->isValid());
+        iterator->close();
+        resources->cleanup();
+    }
 }
 
 // ============================================================================
@@ -347,7 +337,7 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteValueEntryIntBackend)
     auto keyBytes = makeKeyBytes(7, 0, 2);
     auto valueBytes = makeIntValueBytes(999);
 
-    EXPECT_NO_THROW(kv->writeEntry<ByteView>(keyBytes, ByteView(valueBytes.data(), valueBytes.size())));
+    EXPECT_NO_THROW(kv->writeEntry(keyBytes, ByteView(valueBytes.data(), valueBytes.size())));
 
     ASSERT_GE(delegate_->getStateInfos().size(), 1u);
     EXPECT_EQ(delegate_->getStateInfos()[0].mainEntryCount, 1);
@@ -357,21 +347,6 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteValueEntryIntBackend)
         reinterpret_cast<CopyOnWriteStateTable<int, VoidNamespace, int>*>(delegate_->getStateInfos()[0].mainTablePtr);
     ASSERT_NE(restoredTable, nullptr);
     EXPECT_EQ(restoredTable->get(7, 0, VoidNamespace()), 999);
-}
-
-// ============================================================================
-// HeapRestoreKVState writeLongEntry 测试 — 非 VB 状态应抛出异常
-// ============================================================================
-
-TEST_F(HeapRestoreStateWriterTest, KvStateWriteLongEntryThrowsForNonVbState)
-{
-    auto metaInfo = makeKvMetaInfo("longEntry");
-    auto kv = delegate_->createKVState(0, metaInfo);
-    kv->setKeyGroupId(0);
-
-    auto keyBytes = makeKeyBytes(1, 0, 2);
-    // writeLongEntry 在非 VB 状态下抛出异常
-    EXPECT_THROW(kv->writeEntry<int64_t>(keyBytes, 42L), std::runtime_error);
 }
 
 // ============================================================================
@@ -395,7 +370,7 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteBytesEntryRoutesToListEntry)
     std::memcpy(listValueBytes.data(), valOut.getData(), valOut.length());
 
     // writeBytesEntry 检测 stateType=LIST 路由到 writeListEntry
-    EXPECT_NO_THROW(kv->writeEntry<ByteView>(keyBytes, ByteView(listValueBytes.data(), listValueBytes.size())));
+    EXPECT_NO_THROW(kv->writeEntry(keyBytes, ByteView(listValueBytes.data(), listValueBytes.size())));
 
     ASSERT_GE(delegate_->getStateInfos().size(), 1u);
     EXPECT_EQ(delegate_->getStateInfos()[0].mainEntryCount, 1);
@@ -439,7 +414,7 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteMapEntryIntInt)
     std::memcpy(mapValueBytes.data(), valOut.getData(), valOut.length());
 
     // 通过 writeBytesEntry 路由到 writeMapEntry
-    EXPECT_NO_THROW(kv->writeEntry<ByteView>(keyBytes, ByteView(mapValueBytes.data(), mapValueBytes.size())));
+    EXPECT_NO_THROW(kv->writeEntry(keyBytes, ByteView(mapValueBytes.data(), mapValueBytes.size())));
 
     ASSERT_GE(delegate_->getStateInfos().size(), 1u);
     EXPECT_EQ(delegate_->getStateInfos()[0].mainEntryCount, 1);
@@ -471,7 +446,7 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteMapEntryBigintBigint)
     std::vector<int8_t> mapValueBytes(valOut.length());
     std::memcpy(mapValueBytes.data(), valOut.getData(), valOut.length());
 
-    EXPECT_NO_THROW(kv->writeEntry<ByteView>(keyBytes, ByteView(mapValueBytes.data(), mapValueBytes.size())));
+    EXPECT_NO_THROW(kv->writeEntry(keyBytes, ByteView(mapValueBytes.data(), mapValueBytes.size())));
 
     ASSERT_GE(delegate_->getStateInfos().size(), 1u);
     EXPECT_EQ(delegate_->getStateInfos()[0].mainEntryCount, 1);
@@ -515,7 +490,7 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteMapEntryUsesRuntimeSchemaForShare
         std::vector<int8_t> mapValueBytes(valOut.length());
         std::memcpy(mapValueBytes.data(), valOut.getData(), valOut.length());
 
-        ASSERT_NO_THROW(kv->writeEntry<ByteView>(keyBytes, ByteView(mapValueBytes.data(), mapValueBytes.size())));
+        ASSERT_NO_THROW(kv->writeEntry(keyBytes, ByteView(mapValueBytes.data(), mapValueBytes.size())));
     }
 
     using SharedRowMap = emhash7::HashMap<std::shared_ptr<RowData>, int32_t>;
@@ -624,7 +599,7 @@ TEST_F(HeapRestoreStateWriterTest, SharedRowMapSnapshotSerializePerEntryAndResto
     auto kv = runtimeDelegate.createKVState(0, metaInfoSnap);
     kv->setKeyGroupId(keyGroupId);
     for (const auto& [keyBytes, valBytes] : actual) {
-        EXPECT_NO_THROW(kv->writeEntry<ByteView>(keyBytes, ByteView(valBytes.data(), valBytes.size())));
+        EXPECT_NO_THROW(kv->writeEntry(keyBytes, ByteView(valBytes.data(), valBytes.size())));
     }
 
     const auto& stateInfo = runtimeDelegate.getStateInfos()[0];
@@ -710,7 +685,7 @@ TEST_F(HeapRestoreStateWriterTest, BigintListSnapshotSerializeAndRestoreRoundTri
     auto metaInfoSnap = makeKvMetaInfoWithSerializer("test-list", listSer, "LIST");
     auto kv = delegate_->createKVState(0, metaInfoSnap);
     kv->setKeyGroupId(keyGroupId);
-    EXPECT_NO_THROW(kv->writeEntry<ByteView>(actualKey, ByteView(actualValue.data(), actualValue.size())));
+    EXPECT_NO_THROW(kv->writeEntry(actualKey, ByteView(actualValue.data(), actualValue.size())));
 
     const auto& stateInfo = delegate_->getStateInfos()[0];
     EXPECT_EQ(stateInfo.mainEntryCount, 1);
@@ -739,7 +714,7 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteMultipleEntriesIncrementsCount)
     auto valueBytes = makeLongValueBytes(42);
     for (int k = 0; k < 3; ++k) {
         auto keyBytes = makeKeyBytes(k, 0, 2);
-        EXPECT_NO_THROW(kv->writeEntry<ByteView>(keyBytes, ByteView(valueBytes.data(), valueBytes.size())));
+        EXPECT_NO_THROW(kv->writeEntry(keyBytes, ByteView(valueBytes.data(), valueBytes.size())));
     }
 
     ASSERT_GE(delegate_->getStateInfos().size(), 1u);
@@ -759,12 +734,12 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteWithDifferentKeyGroups)
     // 写入 keyGroup 0
     kv->setKeyGroupId(0);
     auto keyBytes0 = makeKeyBytes(1, 0, 2);
-    EXPECT_NO_THROW(kv->writeEntry<ByteView>(keyBytes0, ByteView(valueBytes.data(), valueBytes.size())));
+    EXPECT_NO_THROW(kv->writeEntry(keyBytes0, ByteView(valueBytes.data(), valueBytes.size())));
 
     // 写入 keyGroup 5
     kv->setKeyGroupId(5);
     auto keyBytes5 = makeKeyBytes(1, 5, 2);
-    EXPECT_NO_THROW(kv->writeEntry<ByteView>(keyBytes5, ByteView(valueBytes.data(), valueBytes.size())));
+    EXPECT_NO_THROW(kv->writeEntry(keyBytes5, ByteView(valueBytes.data(), valueBytes.size())));
 
     ASSERT_GE(delegate_->getStateInfos().size(), 1u);
     EXPECT_EQ(delegate_->getStateInfos()[0].mainEntryCount, 2);
@@ -800,7 +775,7 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteBytesEntryRoutesToValueEntry)
     auto valueBytes = makeLongValueBytes(777);
 
     // writeBytesEntry 检测 stateType=VALUE 路由到 writeValueEntry
-    EXPECT_NO_THROW(kv->writeEntry<ByteView>(keyBytes, ByteView(valueBytes.data(), valueBytes.size())));
+    EXPECT_NO_THROW(kv->writeEntry(keyBytes, ByteView(valueBytes.data(), valueBytes.size())));
 
     ASSERT_GE(delegate_->getStateInfos().size(), 1u);
     EXPECT_EQ(delegate_->getStateInfos()[0].mainEntryCount, 1);
@@ -847,8 +822,7 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteMapEntryWithoutSerializersThrows)
     std::memcpy(mapValueBytes.data(), valOut.getData(), valOut.length());
 
     // writeMapEntry 检测 mapKeySerializer/mapValueSerializer 为 nullptr 抛出异常
-    EXPECT_THROW(
-        kv->writeEntry<ByteView>(keyBytes, ByteView(mapValueBytes.data(), mapValueBytes.size())), std::runtime_error);
+    EXPECT_THROW(kv->writeEntry(keyBytes, ByteView(mapValueBytes.data(), mapValueBytes.size())), std::runtime_error);
 }
 
 // ============================================================================
@@ -877,126 +851,7 @@ TEST_F(HeapRestoreStateWriterTest, KvStateWriteMapEntryNullValueThrows)
     std::vector<int8_t> mapValueBytes(valOut.length());
     std::memcpy(mapValueBytes.data(), valOut.getData(), valOut.length());
 
-    EXPECT_THROW(
-        kv->writeEntry<ByteView>(keyBytes, ByteView(mapValueBytes.data(), mapValueBytes.size())), std::runtime_error);
-}
-
-// ============================================================================
-// HeapRestoreKVStateVB 测试 — writeLongEntry (VB 覆写)
-// ============================================================================
-
-TEST_F(HeapRestoreStateWriterTest, KvStateVbWriteLongEntrySucceeds)
-{
-    auto metaInfo = makeKvMetaInfo("vbLongEntry");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {omniruntime::type::DataTypeId::OMNI_LONG};
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, 1024);
-    kvVb->setKeyGroupId(0);
-
-    auto keyBytes = makeKeyBytes(5, 0, 2);
-
-    // VB 的 writeLongEntry 应成功写入主表
-    EXPECT_NO_THROW(kvVb->writeEntry<int64_t>(keyBytes, 42L));
-
-    ASSERT_GE(delegate_->getStateInfos().size(), 1u);
-    EXPECT_EQ(delegate_->getStateInfos()[0].mainEntryCount, 1);
-}
-
-// ============================================================================
-// HeapRestoreKVStateVB 测试 — appendRowToVectorBatch 异常路径
-// ============================================================================
-
-TEST_F(HeapRestoreStateWriterTest, KvStateVbAppendRowWithNullValueBytesThrows)
-{
-    auto metaInfo = makeKvMetaInfo("vbNullRow");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {omniruntime::type::DataTypeId::OMNI_LONG};
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, 1024);
-
-    RowDataView row;
-    row.valueBytes = nullptr;
-    row.columnTypes = &columnTypes;
-    EXPECT_THROW(kvVb->appendRowToVectorBatch(row), std::runtime_error);
-}
-
-TEST_F(HeapRestoreStateWriterTest, KvStateVbAppendRowWithNullColumnTypesThrows)
-{
-    auto metaInfo = makeKvMetaInfo("vbNullCol");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {omniruntime::type::DataTypeId::OMNI_LONG};
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, 1024);
-
-    std::vector<int8_t> dummyValue = {0, 1, 2};
-    RowDataView row;
-    row.valueBytes = &dummyValue;
-    row.columnTypes = nullptr;
-    EXPECT_THROW(kvVb->appendRowToVectorBatch(row), std::runtime_error);
-}
-
-// ============================================================================
-// HeapRestoreKVStateVB 测试 — flush 和 discard 生命周期
-// ============================================================================
-
-TEST_F(HeapRestoreStateWriterTest, KvStateVbFlushAndDiscardMultipleTimes)
-{
-    auto metaInfo = makeKvMetaInfo("vbLifecycle");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {omniruntime::type::DataTypeId::OMNI_LONG};
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, 1024);
-
-    // 多轮 flush/discard 不应抛出异常
-    for (int i = 0; i < 3; ++i) {
-        EXPECT_NO_THROW(kvVb->flush());
-        EXPECT_NO_THROW(kvVb->discard());
-    }
-}
-
-TEST_F(HeapRestoreStateWriterTest, KvStateVbResetBatchId)
-{
-    auto metaInfo = makeKvMetaInfo("vbResetBatch");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {omniruntime::type::DataTypeId::OMNI_LONG};
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, 1024);
-
-    EXPECT_NO_THROW(kvVb->resetBatchId());
-}
-
-TEST_F(HeapRestoreStateWriterTest, KvStateVbGetKeyGroupPrefixBytes)
-{
-    auto metaInfo = makeKvMetaInfo("vbPrefix");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {omniruntime::type::DataTypeId::OMNI_LONG};
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, 1024);
-
-    EXPECT_EQ(kvVb->getKeyGroupPrefixBytes(), 2);
-}
-
-// ============================================================================
-// HeapRestoreKVStateVB 测试 — writeRowData 组合写入
-// ============================================================================
-
-TEST_F(HeapRestoreStateWriterTest, KvStateVbWriteRowData)
-{
-    auto metaInfo = makeKvMetaInfo("vbWriteRow");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {omniruntime::type::DataTypeId::OMNI_LONG};
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, 1024);
-    kvVb->setKeyGroupId(0);
-
-    auto keyBytes = makeKeyBytes(6, 0, 2);
-
-    // 构造 RowDataView: valueBytes 需要是 serialized BinaryRowData 格式
-    // BinaryRowData(1 field, OMNI_LONG, value=42):
-    //   null-bitmap(8 bytes, 64-bit aligned) + fixed-length(8 bytes) = 16 bytes segment
-    //   valueBytes = rowLen(int32, 4 bytes) + segment(16 bytes) = 20 bytes
-    std::vector<int8_t> rowValue = {
-        0, 0, 0, 16,             // rowLen = 16 (int32, big-endian)
-        0, 0, 0, 0,  0, 0, 0, 0, // null-bitmap: 8 bytes, all zeros (no nulls)
-        0, 0, 0, 0,  0, 0, 0, 42 // int64_t = 42
-    };
-    RowDataView row;
-    row.valueBytes = &rowValue;
-    row.columnTypes = &columnTypes;
-
-    // writeRowData 内部调用 appendRowToVectorBatch + writeEntry<ComboId>
-    EXPECT_NO_THROW(kvVb->writeRowData(keyBytes, row));
-
-    ASSERT_GE(delegate_->getStateInfos().size(), 1u);
-    // writeEntry 会递增 mainEntryCount
-    EXPECT_EQ(delegate_->getStateInfos()[0].mainEntryCount, 1);
+    EXPECT_THROW(kv->writeEntry(keyBytes, ByteView(mapValueBytes.data(), mapValueBytes.size())), std::runtime_error);
 }
 
 // ============================================================================
@@ -1052,21 +907,6 @@ TEST_F(HeapRestoreStateWriterTest, DelegateCreateKvStateWithListType)
     ASSERT_GE(delegate_->getStateInfos().size(), 1u);
     EXPECT_EQ(delegate_->getStateInfos()[0].stateType, StateDescriptor::Type::LIST);
     EXPECT_EQ(delegate_->getStateInfos()[0].stateName, "listState");
-}
-
-TEST_F(HeapRestoreStateWriterTest, DelegateCreateKvStateVbWithMultipleColumnTypes)
-{
-    auto metaInfo = makeKvMetaInfo("vbMultiCol");
-    std::vector<omniruntime::type::DataTypeId> columnTypes = {
-        omniruntime::type::DataTypeId::OMNI_LONG,
-        omniruntime::type::DataTypeId::OMNI_INT,
-        omniruntime::type::DataTypeId::OMNI_VARCHAR};
-    auto kvVb = delegate_->createKVStateVB(0, metaInfo, columnTypes, 2048);
-    ASSERT_NE(kvVb, nullptr);
-
-    ASSERT_GE(delegate_->getStateInfos().size(), 1u);
-    EXPECT_EQ(delegate_->getStateInfos()[0].stateType, StateDescriptor::Type::VALUE);
-    EXPECT_EQ(delegate_->getStateInfos()[0].columnTypes.size(), 3u);
 }
 
 TEST_F(HeapRestoreStateWriterTest, DelegateCreatePqStateWithDelegate)

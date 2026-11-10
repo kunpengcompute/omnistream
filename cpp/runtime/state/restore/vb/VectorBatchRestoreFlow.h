@@ -95,7 +95,7 @@ public:
                                     auto& w = kvWriters[kvStateId];
                                     w->setKeyGroupId(keyGroupId);
                                     ByteView valueView(entry.getValue().data(), entry.getValue().size());
-                                    w->template writeEntry<ByteView>(entry.getKey(), valueView);
+                                    w->writeEntry(entry.getKey(), valueView);
                                     break;
                                 }
                                 case RestoreStateType::KV_TRANSFORM: {

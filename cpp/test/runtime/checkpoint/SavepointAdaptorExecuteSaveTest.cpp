@@ -29,7 +29,6 @@
 #include "runtime/state/CheckpointStateOutputStreamProxy.h"
 #include "runtime/state/FullSnapshotResources.h"
 #include "runtime/state/KeyGroupRangeOffsets.h"
-#include "runtime/state/VectorBatchStateAccessor.h"
 #include "runtime/state/VoidNamespaceSerializer.h"
 #include "runtime/state/metainfo/StateMetaInfoSnapshot.h"
 #include "table/data/binary/BinaryRowData.h"
@@ -141,40 +140,6 @@ private:
     bool valid_ = true;
 };
 
-class RecordingVectorBatchAccessor final : public VectorBatchStateAccessor {
-public:
-    explicit RecordingVectorBatchAccessor(int arity = 1, int64_t value = 42) : arity_(arity), value_(value)
-    {
-    }
-
-    bool getSerializedBatch(omnistream::VectorBatchId, ByteView*) override
-    {
-        return false;
-    }
-
-    std::unique_ptr<RowData> getRow(omnistream::VectorBatchId batchId, int32_t rowId) override
-    {
-        requestedRows.emplace_back(batchId, rowId);
-        std::unique_ptr<BinaryRowData> row(BinaryRowData::createBinaryRowDataWithMem(arity_));
-        for (int i = 0; i < arity_; ++i) {
-            row->setLong(i, value_ + i);
-        }
-        return row;
-    }
-
-    void close() override
-    {
-        ++closeCalls;
-    }
-
-    std::vector<std::pair<omnistream::VectorBatchId, int32_t>> requestedRows;
-    int closeCalls = 0;
-
-private:
-    int arity_;
-    int64_t value_;
-};
-
 class TestSnapshotResources : public FullSnapshotResources {
 public:
     const std::vector<std::shared_ptr<StateMetaInfoSnapshot>>& getMetaInfoSnapshots() override
@@ -197,13 +162,6 @@ public:
         return iterator;
     }
 
-    std::shared_ptr<VectorBatchStateAccessor> createVectorBatchStateAccessor(
-        const std::string& logicalStateName, const VectorBatchAccessorOptions&) override
-    {
-        requestedLogicalStateName = logicalStateName;
-        return accessor;
-    }
-
     void cleanup() override
     {
     }
@@ -211,8 +169,6 @@ public:
     std::vector<std::shared_ptr<StateMetaInfoSnapshot>> metaInfos;
     KeyGroupRange keyGroupRange{0, 0};
     std::shared_ptr<SingleEntryIterator> iterator;
-    std::shared_ptr<RecordingVectorBatchAccessor> accessor;
-    std::string requestedLogicalStateName;
 };
 
 class SavepointAdaptorExecuteSaveTest : public ::testing::Test {
@@ -251,14 +207,19 @@ TEST_F(SavepointAdaptorExecuteSaveTest, GroupAggSaveExecutesAccumulatorExpansion
     row->setLong(0, 37);
     DataOutputSerializer valueOutput(128);
     serializer.serialize(row.get(), valueOutput);
-    auto iterator = std::make_shared<SingleEntryIterator>(std::vector<int8_t>{0x01}, copyOutput(valueOutput), 0);
+    auto iterator = std::make_shared<SingleEntryIterator>(std::vector<int8_t>{0x01}, copyOutput(valueOutput), 1);
     TestSnapshotResources resources;
-    resources.metaInfos = {makeKeyValueMeta("accState", "VALUE", &serializer)};
+    resources.metaInfos = {
+        makeKeyValueMeta("accStatevb", "VALUE", LongSerializer::INSTANCE),
+        makeKeyValueMeta("accState", "VALUE", &serializer)};
     resources.iterator = iterator;
 
+    EXPECT_CALL(*bridge_, WriteSavepointMetadata(_, _, _)).WillOnce([](jobject, const auto& metaInfos, std::string) {
+        ASSERT_EQ(metaInfos.size(), 1U);
+        EXPECT_EQ(metaInfos[0]->getName(), "accState");
+    });
     EXPECT_GT(saveAndGetPosition(adaptor, resources), 0U);
     EXPECT_TRUE(iterator->closed);
-    EXPECT_TRUE(resources.requestedLogicalStateName.empty());
 }
 
 TEST_F(SavepointAdaptorExecuteSaveTest, GroupAggSaveRejectsMalformedAccumulator)
@@ -286,18 +247,22 @@ TEST_F(SavepointAdaptorExecuteSaveTest, StreamingJoinSaveExecutesConvertKVRowDat
     valueOutput.writeBoolean(false);
     valueOutput.writeInt(3);
     auto valueBytes = copyOutput(valueOutput);
-    auto iterator = std::make_shared<SingleEntryIterator>(std::move(keyBytes), std::move(valueBytes), 0);
-    auto accessor = std::make_shared<RecordingVectorBatchAccessor>();
+    auto iterator = std::make_shared<SingleEntryIterator>(std::move(keyBytes), std::move(valueBytes), 1);
     TestSnapshotResources resources;
     resources.metaInfos = {
+        makeKeyValueMeta(
+            std::string(omnistream::StreamingJoinSavepointUtil::LEFT_STATE_NAME) + "vb",
+            "VALUE",
+            LongSerializer::INSTANCE),
         makeKeyValueMeta(omnistream::StreamingJoinSavepointUtil::LEFT_STATE_NAME, "MAP", LongSerializer::INSTANCE)};
     resources.iterator = iterator;
-    resources.accessor = accessor;
 
+    EXPECT_CALL(*bridge_, WriteSavepointMetadata(_, _, _)).WillOnce([](jobject, const auto& metaInfos, std::string) {
+        ASSERT_EQ(metaInfos.size(), 1U);
+        EXPECT_EQ(metaInfos[0]->getName(), omnistream::StreamingJoinSavepointUtil::LEFT_STATE_NAME);
+    });
     EXPECT_GT(saveAndGetPosition(adaptor, resources), 0U);
     EXPECT_TRUE(iterator->closed);
-    EXPECT_TRUE(accessor->requestedRows.empty());
-    EXPECT_EQ(accessor->closeCalls, 0);
 }
 
 } // namespace
