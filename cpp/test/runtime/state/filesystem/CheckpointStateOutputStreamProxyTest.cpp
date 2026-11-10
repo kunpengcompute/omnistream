@@ -43,7 +43,7 @@ protected:
     void SetUp() override
     {
         mockBridge_ = std::make_shared<NiceMock<MockSavepointBridge>>();
-        savepointType_.reset(SavepointType::savepoint(SavepointFormatType::CANONICAL));
+        savepointType_ = SavepointType::savepoint(SavepointFormatType::CANONICAL);
         checkpointOptions_ =
             CheckpointOptions::AlignedNoTimeout(*savepointType_, CheckpointStorageLocationReference::GetDefault());
     }
@@ -69,7 +69,7 @@ protected:
     }
 
     std::shared_ptr<NiceMock<MockSavepointBridge>> mockBridge_;
-    std::unique_ptr<SavepointType> savepointType_;
+    std::shared_ptr<SavepointType> savepointType_;
     CheckpointOptions* checkpointOptions_ = nullptr;
 };
 

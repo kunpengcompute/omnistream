@@ -258,7 +258,7 @@ TEST(CheckpointingCombinedTest, DISABLED_Test1)
     // Prepare checkpoint barrier
     // ---------------------------
     auto checkpointOptions = new CheckpointOptions(
-        new CheckpointType("FullCheckpoint", SnapshotType::SharingFilesStrategy::FORWARD),
+        std::make_shared<CheckpointType>("FullCheckpoint", SnapshotType::SharingFilesStrategy::FORWARD),
         CheckpointStorageLocationReference::GetDefault());
     auto barrier = std::make_shared<CheckpointBarrier>(0, 10000, checkpointOptions);
 

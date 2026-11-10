@@ -30,12 +30,14 @@ public:
     };
     static constexpr long NO_ALIGNED_CHECKPOINT_TIME_OUT = std::numeric_limits<long>::max();
     CheckpointOptions(
-        SnapshotType* checkpointType,
+        std::shared_ptr<SnapshotType> checkpointType,
         std::shared_ptr<CheckpointStorageLocationReference> targetLocation,
         AlignmentType alignmentType,
         long alignedCheckpointTimeout);
 
-    CheckpointOptions(SnapshotType* checkpointType, std::shared_ptr<CheckpointStorageLocationReference> targetLocation);
+    CheckpointOptions(
+        std::shared_ptr<SnapshotType> checkpointType,
+        std::shared_ptr<CheckpointStorageLocationReference> targetLocation);
 
     static CheckpointOptions* NotExactlyOnce(
         SnapshotType& type, std::shared_ptr<CheckpointStorageLocationReference> location);
@@ -46,8 +48,16 @@ public:
     static CheckpointOptions* Unaligned(
         SnapshotType& type, std::shared_ptr<CheckpointStorageLocationReference> location);
 
+    static CheckpointOptions* Unaligned(
+        std::shared_ptr<SnapshotType> type, std::shared_ptr<CheckpointStorageLocationReference> location);
+
     static CheckpointOptions* AlignedWithTimeout(
         SnapshotType& type,
+        std::shared_ptr<CheckpointStorageLocationReference> location,
+        long alignedCheckpointTimeout);
+
+    static CheckpointOptions* AlignedWithTimeout(
+        std::shared_ptr<SnapshotType> type,
         std::shared_ptr<CheckpointStorageLocationReference> location,
         long alignedCheckpointTimeout);
 
@@ -82,11 +92,11 @@ public:
 
 private:
     static CheckpointOptions* ForceAligned(
-        SnapshotType& type,
+        std::shared_ptr<SnapshotType> type,
         std::shared_ptr<CheckpointStorageLocationReference> location,
         long alignedCheckpointTimeout);
 
-    SnapshotType* checkpointType_;
+    std::shared_ptr<SnapshotType> checkpointType_;
     std::shared_ptr<CheckpointStorageLocationReference> targetLocation_;
     const AlignmentType alignmentType_;
     const long alignedCheckpointTimeout_;

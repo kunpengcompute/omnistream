@@ -14,7 +14,7 @@
 #include "state/heap/HeapPriorityQueueDataDigest.h"
 #include "common.h"
 FullSnapshotAsyncWriter::FullSnapshotAsyncWriter(
-    SnapshotType* snapshotType,
+    std::shared_ptr<SnapshotType> snapshotType,
     CheckpointOptions* checkpointOptions,
     long checkpointId,
     const std::shared_ptr<FullSnapshotResources>& snapshotResources,
@@ -22,7 +22,7 @@ FullSnapshotAsyncWriter::FullSnapshotAsyncWriter(
     : snapshotResources_(snapshotResources),
       checkpointOptions_(checkpointOptions),
       checkpointId_(checkpointId),
-      snapshotType_(snapshotType),
+      snapshotType_(std::move(snapshotType)),
       keySerializer_(keySerializer)
 {
 }

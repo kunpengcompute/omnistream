@@ -206,7 +206,7 @@ TEST(StreamOperatorStateHandlerCompatibleSavepointTest, CompatibleSavepointWithN
     auto* backend = new CountingCheckpointableKeyedStateBackend();
     auto handler = makeStateHandler(backend);
     ConfigurableCheckpointedOperator op({FlinkSavepointAdaptorType::None, "unsupported operator"});
-    std::unique_ptr<SavepointType> savepointType(SavepointType::savepoint(SavepointFormatType::COMPATIBLE));
+    auto savepointType = SavepointType::savepoint(SavepointFormatType::COMPATIBLE);
     auto checkpointOptions = makeCheckpointOptions(*savepointType);
 
     auto futures = snapshot(*handler, &op, checkpointOptions.get());
@@ -228,7 +228,7 @@ TEST(StreamOperatorStateHandlerCompatibleSavepointTest, CompatibleSavepointWithO
     auto* backend = new CountingCheckpointableKeyedStateBackend();
     auto handler = makeStateHandler(backend);
     ConfigurableCheckpointedOperator op({FlinkSavepointAdaptorType::OmniIsCompatible, ""});
-    std::unique_ptr<SavepointType> savepointType(SavepointType::savepoint(SavepointFormatType::COMPATIBLE));
+    auto savepointType = SavepointType::savepoint(SavepointFormatType::COMPATIBLE);
     auto checkpointOptions = makeCheckpointOptions(*savepointType);
 
     auto futures = snapshot(*handler, &op, checkpointOptions.get());

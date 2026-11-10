@@ -754,7 +754,7 @@ TEST(GroupAggSavepointAdaptorTest, SaveDelegatesEmptySnapshotToVectorBatchFlow)
     EXPECT_CALL(*bridge, CreateSavepointOutputDirectBuffer(_, _)).WillOnce(Return(static_cast<jobject>(nullptr)));
     EXPECT_CALL(*bridge, WriteSavepointMetadata(kMockProvider, _, "key-serializer"));
     EXPECT_CALL(*bridge, GetSavepointOutputStreamPos(kMockProvider)).WillOnce(Return(0L));
-    std::unique_ptr<SavepointType> savepointType(SavepointType::savepoint(SavepointFormatType::CANONICAL));
+    auto savepointType = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     std::unique_ptr<CheckpointOptions> checkpointOptions(
         CheckpointOptions::AlignedNoTimeout(*savepointType, CheckpointStorageLocationReference::GetDefault()));
     CheckpointStateOutputStreamProxy stream(bridge, 1L, checkpointOptions.get());
