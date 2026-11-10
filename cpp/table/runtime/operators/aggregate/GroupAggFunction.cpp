@@ -578,7 +578,7 @@ void GroupAggFunction::deleteRowData(vector<RowData*>& rowVector)
 void GroupAggFunction::setInt(
     omniruntime::vec::VectorBatch* outputBatch, int numRows, int colIndex, std::vector<RowData*> vec)
 {
-    auto* vector = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto* vector = new omniruntime::vec::Vector<int32_t>(numRows);
     for (int rowIndex = 0; rowIndex < numRows; ++rowIndex) {
         if (vec[rowIndex]->isNullAt(colIndex)) {
             vector->SetNull(rowIndex);
