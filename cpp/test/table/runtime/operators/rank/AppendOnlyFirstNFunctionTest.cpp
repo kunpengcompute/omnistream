@@ -189,7 +189,7 @@ TEST(AppendOnlyFirstNFunctionTest, KeepFirstNInBatchAndAcrossBatches)
     auto* input3 = MakeBatch({0, 1}, {99, 88}, {"drop0", "drop1"}, {7, 8});
     keyedOp->processBatch(new StreamRecord(input3));
     auto* actual3 = reinterpret_cast<omnistream::VectorBatch*>(output->getVectorBatch());
-    EXPECT_EQ(0, actual3->GetRowCount());
+    EXPECT_EQ(actual2, actual3);
 
     delete expect1;
     delete expect2;

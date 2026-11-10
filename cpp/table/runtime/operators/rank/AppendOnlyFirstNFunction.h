@@ -20,6 +20,9 @@
 #include "core/typeutils/LongSerializer.h"
 #include "runtime/state/heap/HeapValueState.h"
 #include "runtime/state/rocksdb/RocksdbValueState.h"
+#ifdef WITH_OMNISTATESTORE
+#include "runtime/state/bss/BssValueState.h"
+#endif
 #include "streaming/api/operators/StreamingRuntimeContext.h"
 #include "table/data/RowKind.h"
 #include "table/data/util/VectorBatchUtil.h"
@@ -72,12 +75,15 @@ void AppendOnlyFirstNFunction<KeyType>::open(const Configuration&)
     auto* runtimeContext = static_cast<StreamingRuntimeContext<KeyType>*>(this->getRuntimeContext());
     this->counterState_ = runtimeContext->template getState<int32_t>(counterStateDesc);
     stateType_ = runtimeContext->getStateType();
+    omnistream::checkStateType(stateType_, "AppendOnlyFirstNFunction");
     if (stateType_ == omnistream::StateType::ROCKSDB) {
         static_cast<RocksdbValueState<KeyType, VoidNamespace, int32_t>*>(counterState_)->setDefaultValue(kUnseenRank);
     } else if (stateType_ == omnistream::StateType::HEAP) {
         static_cast<HeapValueState<KeyType, VoidNamespace, int32_t>*>(counterState_)->setDefaultValue(kUnseenRank);
-    } else {
-        THROW_LOGIC_EXCEPTION("AppendOnlyFirstNFunction only support heap and rocksdb state type");
+#ifdef WITH_OMNISTATESTORE
+    } else if (stateType_ == omnistream::StateType::BSS) {
+        static_cast<BssValueState<KeyType, VoidNamespace, int32_t>*>(counterState_)->setDefaultValue(kUnseenRank);
+#endif
     }
     LOG("AppendOnlyFirstNFunction open finish");
 }
@@ -92,7 +98,6 @@ void AppendOnlyFirstNFunction<KeyType>::processBatch(
     this->initRankEnd(nullptr);
     const int rowCount = inputBatchGuard->GetRowCount();
     if (rowCount <= 0) {
-        out.collect(new omnistream::VectorBatch(0));
         return;
     }
 
@@ -123,21 +128,22 @@ void AppendOnlyFirstNFunction<KeyType>::processBatch(
         }
     }
 
-    omnistream::VectorBatch* outputBatch = nullptr;
     if (outputRowIds.empty()) {
-        outputBatch = new omnistream::VectorBatch(0);
-    } else {
-        outputBatch = VectorBatchUtil::buildNewVectorBatchByRowIds(inputBatchGuard.get(), outputRowIds);
-        for (int i = 0; i < outputBatch->GetRowCount(); ++i) {
-            outputBatch->setRowKind(i, RowKind::INSERT);
+        INFO_RELEASE("AppendOnlyFirstNFunction processBatch collected no rows");
+        return;
+    }
+
+    omnistream::VectorBatch* outputBatch =
+        VectorBatchUtil::buildNewVectorBatchByRowIds(inputBatchGuard.get(), outputRowIds);
+    for (int i = 0; i < outputBatch->GetRowCount(); ++i) {
+        outputBatch->setRowKind(i, RowKind::INSERT);
+    }
+    if (this->outputRankNumber) {
+        auto* rankVec = new omniruntime::vec::Vector<int64_t>(static_cast<int>(outputRanks.size()));
+        for (size_t i = 0; i < outputRanks.size(); ++i) {
+            rankVec->SetValue(static_cast<int>(i), outputRanks[i]);
         }
-        if (this->outputRankNumber) {
-            auto* rankVec = new omniruntime::vec::Vector<int64_t>(static_cast<int>(outputRanks.size()));
-            for (size_t i = 0; i < outputRanks.size(); ++i) {
-                rankVec->SetValue(static_cast<int>(i), outputRanks[i]);
-            }
-            outputBatch->Append(rankVec);
-        }
+        outputBatch->Append(rankVec);
     }
     this->collectOutputBatch(out, outputBatch);
 }
