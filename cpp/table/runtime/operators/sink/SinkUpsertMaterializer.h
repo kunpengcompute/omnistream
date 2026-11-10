@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -23,6 +24,7 @@
 #include "table/data/RowData.h"
 #include "core/api/common/state/ValueState.h"
 #include "core/api/common/state/ValueStateDescriptor.h"
+#include "runtime/state/rocksdb/RocksdbValueState.h"
 #include "streaming/api/functions/KeyedProcessFunction.h"
 #include "streaming/api/operators/StreamingRuntimeContext.h"
 #include "streaming/api/operators/TimestampedCollector.h"
@@ -51,15 +53,22 @@
  *   behavior for state cleared by TTL);
  * - output rows keep the input schema, only the RowKind changes.
  *
- * Row ownership (HashMapStateBackend): rows appended into the state list are
- * owned by the state; rows replaced/removed from the list are deleted at batch
- * end; the retract input row is deleted once compared (and after the output
- * batch is assembled when it is emitted as -D). The (possibly empty) list stays
- * in state after a removal-to-empty, which is observably equivalent to Flink's
- * state.clear() (the next accumulate of the same key emits +I again).
+ * Both HashMapStateBackend and RocksDB (EmbeddedRocksDBStateBackend) are
+ * supported. Rows of one batch are processed against a per-key working set:
+ * the first touch of a key loads its list from the state, later rows of the same
+ * key reuse the working list (duplicate key objects are released), and all
+ * modifications are written back at the END of the batch. HEAP relies on
+ * in-place visibility and only hands freshly created lists to the state;
+ * RocksDB serializes every changed list back into the store (batch-end
+ * write-back). On RocksDB without the falcon value-state cache the loaded
+ * copies (list and rows) are released after the write-back; with the cache
+ * enabled the cached objects stay owned by the cache. Replaced/removed rows
+ * and retract input rows are freed after the output batch is assembled. The
+ * (possibly empty) list stays in state after a removal-to-empty, which is
+ * observably equivalent to Flink's state.clear() (the next accumulate of the
+ * same key emits +I again).
  *
- * State backend: HashMapStateBackend only (fail-fast otherwise). TTL is not
- * implemented; savepoints are marked unsupported by the factory.
+ * TTL is not implemented; savepoints are marked unsupported by the factory.
  */
 template <typename K>
 class SinkUpsertMaterializer : public KeyedProcessFunction<K, RowData*, omnistream::VectorBatch*> {
@@ -96,6 +105,21 @@ private:
     static bool isAccumulateMsg(RowKind kind)
     {
         return kind == RowKind::INSERT || kind == RowKind::UPDATE_AFTER;
+    }
+
+    // Per-key working set of the current batch. HEAP: list is the state's live
+    // vector (in-place mutations are visible); RocksDB: list is a deserialized
+    // copy we own (without falcon cache) that must be written back and freed.
+    // list == nullptr until the key's first accumulate needs a list.
+    struct WorkItem {
+        std::vector<RowData*>* list = nullptr;
+        bool fresh = false;   // list created in this batch, not yet handed to the state
+        bool changed = false; // list modified in this batch (RocksDB write-back condition)
+    };
+
+    bool rocksBackend() const
+    {
+        return stateType_ == omnistream::StateType::ROCKSDB;
     }
 
     // Flink equalsIgnoreRowKind: compare the given columns (upsert-key projection
@@ -165,13 +189,13 @@ private:
 
     // Flink addRow: appends (or replaces the row with the same upsert key); the
     // row itself is emitted with the kind decided by the pre-add list state.
-    void processAccumulate(RowData* row, int64_t timestamp)
+    void processAccumulate(WorkItem& item, RowData* row, int64_t timestamp)
     {
-        auto* values = state_->value();
-        bool existed = values != nullptr;
-        if (!existed) {
-            values = new std::vector<RowData*>();
+        if (item.list == nullptr) {
+            item.list = new std::vector<RowData*>();
+            item.fresh = true;
         }
+        auto* values = item.list;
         RowKind outKind = values->empty() ? RowKind::INSERT : RowKind::UPDATE_AFTER;
         if (hasUpsertKey_) {
             int index = findEqualRow(*values, row);
@@ -184,25 +208,21 @@ private:
         } else {
             values->push_back(row);
         }
-        if (!existed) {
-            // Fresh key: hand the new vector over to the state. For an existing key
-            // the in-place mutation of the stored vector is already visible (HEAP).
-            state_->update(values);
-        }
+        item.changed = true;
         emit(row, outKind, timestamp);
     }
 
     // Flink retractRow: removes the first equal row; emits the retract input row
     // as -D when the list becomes empty, re-emits the new latest row as +U when
     // the latest row was removed and rows remain.
-    void processRetract(RowData* row, int64_t timestamp)
+    void processRetract(WorkItem& item, RowData* row, int64_t timestamp)
     {
-        auto* values = state_->value();
-        if (values == nullptr || values->empty()) {
+        if (item.list == nullptr || item.list->empty()) {
             WARN_RELEASE("SinkUpsertMaterializer: retract matches no stored row (state cleared?); swallowed");
             deleteAfterOutput_.push_back(row);
             return;
         }
+        auto* values = item.list;
         int index = findEqualRow(*values, row);
         if (index < 0) {
             WARN_RELEASE("SinkUpsertMaterializer: retract matches no stored row (state cleared?); swallowed");
@@ -213,6 +233,7 @@ private:
         RowData* removed = (*values)[index];
         values->erase(values->begin() + index);
         deleteAfterOutput_.push_back(removed);
+        item.changed = true;
         if (values->empty()) {
             emit(row, RowKind::DELETE, timestamp);
         } else if (index == lastIndexBeforeRemove) {
@@ -223,6 +244,32 @@ private:
             // Removing a middle row emits nothing. The (possibly empty) list stays in
             // state so the next accumulate of the same key emits +I again.
             deleteAfterOutput_.push_back(row);
+        }
+    }
+
+    // Batch-end write-back. HEAP: only freshly created lists are handed to the
+    // state (in-place mutations of existing lists are already visible). RocksDB:
+    // every changed list is serialized back; without the falcon cache the loaded
+    // copies (list and rows) are freed afterwards - their bytes now live in the
+    // store. Retained key objects are freed by the caller after this loop.
+    void flushWorkItems(
+        typename KeyedProcessFunction<K, RowData*, omnistream::VectorBatch*>::Context& ctx)
+    {
+        for (RowData* key : retainedKeys_) {
+            WorkItem& item = workItems_[key];
+            if (item.list == nullptr) {
+                continue;
+            }
+            if (item.fresh || (rocksBackend() && item.changed)) {
+                ctx.setCurrentKey(key);
+                state_->update(item.list);
+            }
+            if (rocksBackend() && !rocksdbCacheEnabled_) {
+                for (RowData* storedRow : *item.list) {
+                    delete storedRow;
+                }
+                delete item.list;
+            }
         }
     }
 
@@ -330,6 +377,13 @@ private:
         collectedRowKinds_.clear();
         collectedTimestamps_.clear();
         deleteAfterOutput_.clear();
+        // Retained key objects are owned by this operator (KeySelector hands out
+        // fresh objects); freed here after the flush used them.
+        for (RowData* key : retainedKeys_) {
+            delete key;
+        }
+        retainedKeys_.clear();
+        workItems_.clear();
     }
 
     std::vector<std::string> inputTypes_;
@@ -342,7 +396,10 @@ private:
 
     ValueState<std::vector<RowData*>*>* state_ = nullptr;
     omnistream::StateType stateType_ = omnistream::StateType::HEAP;
+    bool rocksdbCacheEnabled_ = false;
 
+    std::unordered_map<RowData*, WorkItem> workItems_{};
+    std::vector<RowData*> retainedKeys_{};
     std::vector<RowData*> collectedRows_{};
     std::vector<RowKind> collectedRowKinds_{};
     std::vector<int64_t> collectedTimestamps_{};
@@ -406,10 +463,8 @@ void SinkUpsertMaterializer<K>::open(const Configuration& context)
 {
     auto* runtimeContext = static_cast<StreamingRuntimeContext<K>*>(this->getRuntimeContext());
     stateType_ = runtimeContext->getStateType();
-    if (stateType_ != omnistream::StateType::HEAP) {
-        // RocksDB support needs the batched updateByBatch write pattern of
-        // AppendOnlyTopNFunction plus ownership verification; tracked as follow-up.
-        THROW_LOGIC_EXCEPTION("SinkUpsertMaterializer currently only supports HashMapStateBackend");
+    if (stateType_ != omnistream::StateType::HEAP && stateType_ != omnistream::StateType::ROCKSDB) {
+        THROW_LOGIC_EXCEPTION("SinkUpsertMaterializer only supports heap and RocksDB state backends");
     }
     // Flink: ValueStateDescriptor<List<RowData>>("values", new ListSerializer<>(serializer))
     // - rows are stored directly in the state list (no comboId / side tables).
@@ -418,6 +473,17 @@ void SinkUpsertMaterializer<K>::open(const Configuration& context)
     auto* rowListSerializer = new BinaryRowDataListSerializer(inputArity, new RowDataSerializer(inputType));
     auto* stateDescriptor = new ValueStateDescriptor<std::vector<RowData*>*>("values", rowListSerializer);
     state_ = runtimeContext->template getState<std::vector<RowData*>*>(stateDescriptor);
+    if (rocksBackend()) {
+        // With the falcon value-state cache the loaded lists stay owned by the
+        // cache (value() hands out cached objects); without it they are plain
+        // deserialized copies we must free after the batch-end write-back.
+        auto* rocksdbState =
+            dynamic_cast<RocksdbValueState<K, VoidNamespace, std::vector<RowData*>*>*>(state_);
+        if (rocksdbState == nullptr) {
+            THROW_LOGIC_EXCEPTION("SinkUpsertMaterializer failed to resolve RocksDB ValueState");
+        }
+        rocksdbCacheEnabled_ = rocksdbState->stateCache->getSizeLimit() != 0;
+    }
 }
 
 template <typename K>
@@ -430,27 +496,42 @@ void SinkUpsertMaterializer<K>::processBatch(
     int rowCnt = inputBatchGuard->GetRowCount();
     cleanup();
 
-    // Row-by-row materialization: each input row is extracted into an independent
-    // BinaryRowData (we take ownership); accumulate stores it into the state list,
-    // retract uses it for the equality match. Emissions keep the input schema and
-    // only rewrite the RowKind.
+    // Row-by-row materialization against a per-key working set: the first touch
+    // of a key switches the key context and loads the key's list from the state,
+    // later rows of the same key reuse the working list (duplicate key objects
+    // handed out by the KeySelector are released). Each input row is extracted
+    // into an independent BinaryRowData (we take ownership); accumulate stores it
+    // into the working list, retract uses it for the equality match. Emissions
+    // keep the input schema and only rewrite the RowKind.
     for (int i = 0; i < rowCnt; i++) {
-        auto key = keySelector_->getKey(inputBatchGuard.get(), i);
-        ctx.setCurrentKey(key);
+        RowData* rawKey = keySelector_->getKey(inputBatchGuard.get(), i);
+        auto it = workItems_.find(rawKey);
+        if (it == workItems_.end()) {
+            ctx.setCurrentKey(rawKey);
+            auto* list = state_->value();
+            auto [inserted, ok] = workItems_.emplace(rawKey, WorkItem{list, false, false});
+            retainedKeys_.push_back(rawKey);
+            it = inserted;
+        } else {
+            delete rawKey;
+        }
+        WorkItem& item = it->second;
         RowData* row = inputBatchGuard->extractRowData(i);
         int64_t timestamp = inputBatchGuard->getTimestamp(i);
         if (isAccumulateMsg(row->getRowKind())) {
-            processAccumulate(row, timestamp);
+            processAccumulate(item, row, timestamp);
         } else {
-            processRetract(row, timestamp);
+            processRetract(item, row, timestamp);
         }
     }
 
     auto* outputVB = buildOutput();
     out.collect(outputVB);
 
-    // Rows replaced or removed from the state and retract input rows that were
-    // only used for the comparison are freed after the output batch is assembled.
+    // Batch-end write-back (and release of RocksDB copies), then free the rows
+    // replaced or removed from the state and the retract input rows that were
+    // only used for the comparison - after the output batch is assembled.
+    flushWorkItems(ctx);
     for (RowData* row : deleteAfterOutput_) {
         delete row;
     }

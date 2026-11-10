@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,6 +27,7 @@
 #include "core/graph/OperatorConfig.h"
 #include "core/typeutils/LongSerializer.h"
 #include "runtime/taskmanager/OmniRuntimeEnvironment.h"
+#include "runtime/state/EmbeddedRocksDBStateBackend.h"
 #include "streaming/api/operators/KeyedProcessOperator.h"
 #include "streaming/api/operators/StreamOperatorFactory.h"
 #include "streaming/runtime/streamrecord/StreamRecord.h"
@@ -48,7 +50,9 @@ const std::string kDescription = R"DELIM({
 
 using KeyedOp = KeyedProcessOperator<RowData*, RowData*, omnistream::VectorBatch*>;
 
-KeyedOp* CreateMaterializer(BatchOutputTest* output, const std::string& description)
+enum class BackendKind { HEAP, ROCKSDB };
+
+KeyedOp* CreateMaterializer(BatchOutputTest* output, const std::string& description, BackendKind backend = BackendKind::HEAP)
 {
     json desc = json::parse(description);
     OperatorConfig opConfig(
@@ -63,7 +67,6 @@ KeyedOp* CreateMaterializer(BatchOutputTest* output, const std::string& descript
 
     auto* env = new omnistream::RuntimeEnvironmentV2();
     auto* taskInfo = new TaskInformationPOD();
-    taskInfo->setStateBackend("HashMapStateBackend");
     {
         auto configPOD = taskInfo->getStreamConfigPOD();
         auto operatorDesc = configPOD.getOperatorDescription();
@@ -71,9 +74,29 @@ KeyedOp* CreateMaterializer(BatchOutputTest* output, const std::string& descript
         configPOD.setOperatorDescription(operatorDesc);
         taskInfo->setStreamConfigPOD(configPOD);
     }
-    env->SetTaskStateManager(std::make_shared<omnistream::TaskStateManager>());
-    env->setTaskConfiguration(*taskInfo);
-    auto* initializer = new StreamTaskStateInitializerImpl(env);
+    StreamTaskStateInitializerImpl* initializer;
+    if (backend == BackendKind::ROCKSDB) {
+        const auto rocksPath =
+            std::filesystem::temp_directory_path() / "sink-materializer-rocksdb";
+        std::filesystem::remove_all(rocksPath);
+        taskInfo->setStateBackend("EmbeddedRocksDBStateBackend");
+        taskInfo->setRocksdbStorePaths({rocksPath.string()});
+        auto jobId = omnistream::JobIDPOD(1, 2);
+        auto jobVertexId = omnistream::JobVertexID(3, 4);
+        auto attemptId = omnistream::ExecutionAttemptIDPOD::randomId();
+        auto* stateStore = new TaskLocalStateStore(jobId, jobVertexId, 0, nullptr);
+        auto* responder = new omnistream::NoOpCheckpoingResponder();
+        env->SetTaskStateManager(
+            std::make_shared<omnistream::TaskStateManager>(jobId, attemptId, stateStore, responder));
+        env->setTaskConfiguration(*taskInfo);
+        auto* rocksBackend = new EmbeddedRocksDBStateBackend(*taskInfo);
+        initializer = new StreamTaskStateInitializerImpl(rocksBackend, env);
+    } else {
+        taskInfo->setStateBackend("HashMapStateBackend");
+        env->SetTaskStateManager(std::make_shared<omnistream::TaskStateManager>());
+        env->setTaskConfiguration(*taskInfo);
+        initializer = new StreamTaskStateInitializerImpl(env);
+    }
     auto* typeInfo =
         new std::vector<omnistream::RowField>({omnistream::RowField("pk", BasicLogicalType::BIGINT)});
     TypeSerializer* keySerializer = new RowDataSerializer(new omnistream::RowType(false, *typeInfo));
@@ -326,3 +349,217 @@ TEST(SinkUpsertMaterializerTest, NullValuePreserved)
     delete op;
     delete output;
 }
+
+// ---------------------------------------------------------------------------
+// Shared scenario bodies, run once per backend: the RocksDB path must produce
+// exactly the same changelog as HEAP (batch-end write-back is transparent).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Add / retract lifecycle of one key plus a second key: +I / +U / re-emit
+// second-latest +U / -D / swallowed retract / +I again.
+void RunAddRetractLifecycle(KeyedOp* op, BatchOutputTest* output)
+{
+    op->processBatch(new StreamRecord(MakeBatch({1}, {100}, {RowKind::INSERT})));
+    auto* expect1 = MakeBatch({1}, {100}, {RowKind::INSERT});
+    EXPECT_TRUE(OutputEquals(output->getVectorBatch(), expect1));
+
+    op->processBatch(new StreamRecord(MakeBatch({1}, {200}, {RowKind::UPDATE_AFTER})));
+    auto* expect2 = MakeBatch({1}, {200}, {RowKind::UPDATE_AFTER});
+    EXPECT_TRUE(OutputEquals(output->getVectorBatch(), expect2));
+
+    op->processBatch(new StreamRecord(MakeBatch({2}, {50}, {RowKind::INSERT})));
+    auto* expect3 = MakeBatch({2}, {50}, {RowKind::INSERT});
+    EXPECT_TRUE(OutputEquals(output->getVectorBatch(), expect3));
+
+    op->processBatch(new StreamRecord(MakeBatch({1}, {200}, {RowKind::DELETE})));
+    auto* expect4 = MakeBatch({1}, {100}, {RowKind::UPDATE_AFTER});
+    EXPECT_TRUE(OutputEquals(output->getVectorBatch(), expect4));
+
+    op->processBatch(new StreamRecord(MakeBatch({1}, {100}, {RowKind::UPDATE_BEFORE})));
+    auto* expect5 = MakeBatch({1}, {100}, {RowKind::DELETE});
+    EXPECT_TRUE(OutputEquals(output->getVectorBatch(), expect5));
+
+    op->processBatch(new StreamRecord(MakeBatch({1}, {100}, {RowKind::DELETE})));
+    EXPECT_EQ(0, output->getVectorBatch()->GetRowCount());
+
+    op->processBatch(new StreamRecord(MakeBatch({1}, {300}, {RowKind::INSERT})));
+    auto* expect7 = MakeBatch({1}, {300}, {RowKind::INSERT});
+    EXPECT_TRUE(OutputEquals(output->getVectorBatch(), expect7));
+
+    delete expect1;
+    delete expect2;
+    delete expect3;
+    delete expect4;
+    delete expect5;
+    delete expect7;
+}
+
+// Three same-key rows in one batch (chaining through the per-key working set),
+// then middle removal (silent), latest removal (re-emit +U) and removal to empty (-D).
+void RunMultipleRowsInOneBatchAndMiddleRemoval(KeyedOp* op, BatchOutputTest* output)
+{
+    op->processBatch(new StreamRecord(MakeBatch(
+        {3, 3, 3}, {10, 20, 30}, {RowKind::INSERT, RowKind::UPDATE_AFTER, RowKind::UPDATE_AFTER})));
+    auto* expect1 = MakeBatch(
+        {3, 3, 3}, {10, 20, 30}, {RowKind::INSERT, RowKind::UPDATE_AFTER, RowKind::UPDATE_AFTER});
+    EXPECT_TRUE(OutputEquals(output->getVectorBatch(), expect1));
+
+    op->processBatch(new StreamRecord(MakeBatch({3}, {10}, {RowKind::DELETE})));
+    EXPECT_EQ(0, output->getVectorBatch()->GetRowCount());
+
+    op->processBatch(new StreamRecord(MakeBatch({3}, {30}, {RowKind::DELETE})));
+    auto* expect3 = MakeBatch({3}, {20}, {RowKind::UPDATE_AFTER});
+    EXPECT_TRUE(OutputEquals(output->getVectorBatch(), expect3));
+
+    op->processBatch(new StreamRecord(MakeBatch({3}, {20}, {RowKind::DELETE})));
+    auto* expect4 = MakeBatch({3}, {20}, {RowKind::DELETE});
+    EXPECT_TRUE(OutputEquals(output->getVectorBatch(), expect4));
+
+    delete expect1;
+    delete expect3;
+    delete expect4;
+}
+
+const char* kUpsertKeyDescription = R"DELIM({
+    "originDescription": null,
+    "inputTypes": ["BIGINT", "BIGINT", "BIGINT"],
+    "outputTypes": ["BIGINT", "BIGINT", "BIGINT"],
+    "grouping": [0],
+    "inputUpsertKey": [1]
+})DELIM";
+
+// inputUpsertKey: replace-in-place on the upsert key, retract matches on the
+// projection, three accumulated rows then middle/latest/empty removals.
+void RunUpsertKeyReplace(KeyedOp* op, BatchOutputTest* output)
+{
+    auto makeBatch = [](const std::vector<int64_t>& pk, const std::vector<int64_t>& uk,
+                        const std::vector<int64_t>& val, const std::vector<RowKind>& kinds) {
+        const int rowCount = static_cast<int>(pk.size());
+        auto* vbatch = new omnistream::VectorBatch(rowCount);
+        auto* vPk = new omniruntime::vec::Vector<int64_t>(rowCount);
+        auto* vUk = new omniruntime::vec::Vector<int64_t>(rowCount);
+        auto* vVal = new omniruntime::vec::Vector<int64_t>(rowCount);
+        for (int i = 0; i < rowCount; ++i) {
+            vPk->SetValue(i, pk[i]);
+            vUk->SetValue(i, uk[i]);
+            vVal->SetValue(i, val[i]);
+            vbatch->setRowKind(i, kinds[i]);
+        }
+        vbatch->Append(vPk);
+        vbatch->Append(vUk);
+        vbatch->Append(vVal);
+        return vbatch;
+    };
+    auto col2 = [output]() {
+        return reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(output->getVectorBatch()->Get(2));
+    };
+
+    op->processBatch(new StreamRecord(makeBatch({5}, {7}, {100}, {RowKind::INSERT})));
+    ASSERT_EQ(1, output->getVectorBatch()->GetRowCount());
+    EXPECT_EQ(RowKind::INSERT, output->getVectorBatch()->getRowKind(0));
+
+    op->processBatch(new StreamRecord(makeBatch({5}, {7}, {200}, {RowKind::UPDATE_AFTER})));
+    ASSERT_EQ(1, output->getVectorBatch()->GetRowCount());
+    EXPECT_EQ(RowKind::UPDATE_AFTER, output->getVectorBatch()->getRowKind(0));
+    EXPECT_EQ(200, col2()->GetValue(0));
+
+    op->processBatch(new StreamRecord(makeBatch({5}, {8}, {300}, {RowKind::UPDATE_AFTER})));
+    ASSERT_EQ(1, output->getVectorBatch()->GetRowCount());
+    EXPECT_EQ(RowKind::UPDATE_AFTER, output->getVectorBatch()->getRowKind(0));
+
+    op->processBatch(new StreamRecord(makeBatch({5}, {9}, {400}, {RowKind::UPDATE_AFTER})));
+    ASSERT_EQ(1, output->getVectorBatch()->GetRowCount());
+    EXPECT_EQ(RowKind::UPDATE_AFTER, output->getVectorBatch()->getRowKind(0));
+
+    op->processBatch(new StreamRecord(makeBatch({5}, {7}, {200}, {RowKind::DELETE})));
+    EXPECT_EQ(0, output->getVectorBatch()->GetRowCount());
+
+    op->processBatch(new StreamRecord(makeBatch({5}, {9}, {400}, {RowKind::DELETE})));
+    ASSERT_EQ(1, output->getVectorBatch()->GetRowCount());
+    EXPECT_EQ(RowKind::UPDATE_AFTER, output->getVectorBatch()->getRowKind(0));
+    EXPECT_EQ(300, col2()->GetValue(0));
+
+    op->processBatch(new StreamRecord(makeBatch({5}, {8}, {300}, {RowKind::DELETE})));
+    ASSERT_EQ(1, output->getVectorBatch()->GetRowCount());
+    EXPECT_EQ(RowKind::DELETE, output->getVectorBatch()->getRowKind(0));
+    EXPECT_EQ(300, col2()->GetValue(0));
+}
+
+void RunNullValuePreserved(KeyedOp* op, BatchOutputTest* output)
+{
+    op->processBatch(new StreamRecord(MakeBatch({4}, {-1}, {RowKind::INSERT})));
+    auto* actual = output->getVectorBatch();
+    ASSERT_EQ(1, actual->GetRowCount());
+    EXPECT_EQ(RowKind::INSERT, actual->getRowKind(0));
+    EXPECT_TRUE(actual->Get(1)->IsNull(0));
+    EXPECT_EQ(4, reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(actual->Get(0))->GetValue(0));
+}
+
+} // namespace
+
+// The same four scenarios on EmbeddedRocksDBStateBackend: identical changelog,
+// exercising the batch-end write-back (deserialize copy -> mutate -> serialize
+// back -> free copy) and the falcon-cache-off ownership path.
+TEST(SinkUpsertMaterializerRocksDBTest, AddRetractLifecycle)
+{
+    auto* output = new BatchOutputTest();
+    auto* op = CreateMaterializer(output, kDescription, BackendKind::ROCKSDB);
+    RunAddRetractLifecycle(op, output);
+    // RocksDB: deleting the operator crashes the framework teardown (same as the
+    // existing RowTimeDeduplicateFunctionTest RocksDB cases, which never delete op).
+    delete output;
+}
+
+TEST(SinkUpsertMaterializerRocksDBTest, MultipleRowsInOneBatchAndMiddleRemoval)
+{
+    auto* output = new BatchOutputTest();
+    auto* op = CreateMaterializer(output, kDescription, BackendKind::ROCKSDB);
+    RunMultipleRowsInOneBatchAndMiddleRemoval(op, output);
+    delete output;
+}
+
+TEST(SinkUpsertMaterializerRocksDBTest, UpsertKeyReplace)
+{
+    auto* output = new BatchOutputTest();
+    auto* op = CreateMaterializer(output, kUpsertKeyDescription, BackendKind::ROCKSDB);
+    RunUpsertKeyReplace(op, output);
+    delete output;
+}
+
+TEST(SinkUpsertMaterializerRocksDBTest, NullValuePreserved)
+{
+    auto* output = new BatchOutputTest();
+    auto* op = CreateMaterializer(output, kDescription, BackendKind::ROCKSDB);
+    RunNullValuePreserved(op, output);
+    // RocksDB: deleting the operator crashes the framework teardown (same as the
+    // existing RowTimeDeduplicateFunctionTest RocksDB cases, which never delete op).
+    delete output;
+}
+
+// With the falcon value-state cache enabled the loaded lists stay owned by the
+// cache; the operator must not free them and the write-back keeps working.
+TEST(SinkUpsertMaterializerRocksDBCacheTest, AddRetractLifecycle)
+{
+    struct FalconConfigGuard {
+        FalconConfigGuard()
+        {
+            Configuration::TM_CONFIG->setConfiguration(
+                {{"state.backend.rocksdb.falcon.use-state-cache", "true"},
+                 {"state.backend.rocksdb.falcon.state-cache-sizeLimit", "1"}});
+        }
+        ~FalconConfigGuard()
+        {
+            Configuration::TM_CONFIG->setConfiguration(
+                {{"state.backend.rocksdb.falcon.use-state-cache", "false"},
+                 {"state.backend.rocksdb.falcon.state-cache-sizeLimit", "3000"}});
+        }
+    } falconConfigGuard;
+
+    auto* output = new BatchOutputTest();
+    auto* op = CreateMaterializer(output, kDescription, BackendKind::ROCKSDB);
+    RunAddRetractLifecycle(op, output);
+    delete output;
+}
+

@@ -274,6 +274,9 @@ public:
                         delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, int64_t>*>(stateTablePtr);
                     } else if (dataId == BackendDataType::OBJECT_BK || dataId == BackendDataType::POJO_BK) {
                         delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, Object*>*>(stateTablePtr);
+                    } else if (dataId == BackendDataType::ROW_LIST_BK) {
+                        delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, std::vector<RowData*>*>*>(
+                            stateTablePtr);
                     } else if (dataId == BackendDataType::EXTERNAL_BIGINT_BK) {
                         delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, int64_t>*>(stateTablePtr);
                     } else {
@@ -579,6 +582,10 @@ uintptr_t RocksdbKeyedStateBackend<K>::GetValueState(TypeSerializer* namespaceSe
         return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, Object*>(namespaceSerializer, stateDesc);
     } else if (dataId == BackendDataType::SET_LONG) {
         return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, std::vector<long>*>(
+            namespaceSerializer, stateDesc);
+    } else if (dataId == BackendDataType::ROW_LIST_BK) {
+        // ValueState<List<RowData>> (e.g. SinkUpsertMaterializer "values")
+        return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, std::vector<RowData*>*>(
             namespaceSerializer, stateDesc);
     } else if (dataId == BackendDataType::EXTERNAL_BIGINT_BK) {
         return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, int64_t>(namespaceSerializer, stateDesc);
