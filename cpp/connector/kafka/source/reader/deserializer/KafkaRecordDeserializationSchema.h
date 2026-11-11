@@ -18,7 +18,6 @@
 #include <stdexcept>
 #include <iostream>
 #include "connector/kafka/source/reader/RdKafkaConsumer.h"
-#include "DynamicKafkaDeserializationSchema.h"
 #include "core/api/common/serialization/DeserializationSchema.h"
 
 class KafkaRecordDeserializationSchema {

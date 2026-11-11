@@ -14,6 +14,7 @@
 
 #include <vector>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <cstdint>
 #include <nlohmann/json.hpp>
@@ -32,6 +33,14 @@ public:
     DynamicKafkaRecordSerializationSchema() {};
 
     DynamicKafkaRecordSerializationSchema(std::vector<std::string>& inputFields, std::vector<std::string>& inputTypes);
+    explicit DynamicKafkaRecordSerializationSchema(const nlohmann::json& description);
+
+    struct UpsertRecord {
+        std::string key;
+        std::optional<std::string> value;
+    };
+
+    UpsertRecord serializeUpsert(omnistream::VectorBatch* input, int rowIndex);
     void RowToJson(RowData* row);
     void RowToJson(omnistream::VectorBatch* input, int rowIndex);
     KeyValueByteContainer Serialize(RowData* consumedRow);
@@ -48,6 +57,16 @@ private:
     std::vector<std::string> inputFields_;
     std::vector<std::string> inputTypes_;
     std::vector<std::pair<int32_t, int32_t>> decimalInfo;
+    std::vector<omniruntime::type::DataTypeId> physicalTypes;
+    std::vector<int> keyProjection;
+    std::vector<int> valueProjection;
+    std::vector<std::string> keyFieldNames;
+    std::vector<std::string> valueFieldNames;
+    std::string serializeProjection(
+        omnistream::VectorBatch* input,
+        int rowIndex,
+        const std::vector<int>& projection,
+        const std::vector<std::string>& names);
     nlohmann::ordered_json j;
     std::ostringstream oss;
     char timeBuffer[80];
