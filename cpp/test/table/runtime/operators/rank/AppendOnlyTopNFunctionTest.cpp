@@ -13,6 +13,7 @@
 #include "api/common/TaskInfoImpl.h"
 #include "table/typeutils/BinaryRowDataSerializer.h"
 #include "table/data/RowKind.h"
+#include "table/data/writer/BinaryRowWriter.h"
 #include "OmniOperatorJIT/core/test/util/test_util.h"
 #include <nlohmann/json.hpp>
 
@@ -286,4 +287,186 @@ TEST(AppendOnlyTopNMetadataTest, InvalidConfigurationIsRejected)
     auto ascending = omnistream::makeRankConfig(true, true, 3);
     ascending["sortAscendingOrders"] = {true};
     EXPECT_THROW(AppendOnlyTopNFunction<RowData*> function(ascending), std::exception);
+}
+
+namespace {
+class HeapReleaseTrackedRow : public BinaryRowData {
+public:
+    explicit HeapReleaseTrackedRow(int* destroyed) : BinaryRowData(1), destroyed_(destroyed)
+    {
+    }
+    ~HeapReleaseTrackedRow() override
+    {
+        ++*destroyed_;
+    }
+
+private:
+    int* destroyed_;
+};
+} // namespace
+
+TEST(AppendOnlyTopNHeapReleaseTest, StateMapOwnsRemainingListsAndRows)
+{
+    using InnerMap = emhash7::HashMap<RowData*, std::vector<RowData*>*>;
+    int destroyed = 0;
+    {
+        omnistream::CopyOnWriteStateMap<int64_t, int64_t, InnerMap*> map(LongSerializer::INSTANCE, 2);
+        auto* values = new InnerMap;
+        (*values)[new HeapReleaseTrackedRow(&destroyed)] =
+            new std::vector<RowData*>{new HeapReleaseTrackedRow(&destroyed), new HeapReleaseTrackedRow(&destroyed)};
+        map.put(1, 0, values);
+        EXPECT_EQ(destroyed, 0);
+    }
+    EXPECT_EQ(destroyed, 3); // sort key plus two rows
+}
+
+TEST(AppendOnlyTopNHeapReleaseTest, RemoveThenDestructorReleaseOnce)
+{
+    using InnerMap = emhash7::HashMap<RowData*, std::vector<RowData*>*>;
+    int destroyed = 0;
+    {
+        omnistream::CopyOnWriteStateMap<int64_t, int64_t, InnerMap*> map(LongSerializer::INSTANCE, 2);
+        auto add = [&](int64_t partition) {
+            auto* values = new InnerMap;
+            (*values)[new HeapReleaseTrackedRow(&destroyed)] =
+                new std::vector<RowData*>{new HeapReleaseTrackedRow(&destroyed)};
+            map.put(partition, 0, values);
+        };
+        add(1);
+        add(2);
+        map.remove(1, 0);
+        EXPECT_EQ(destroyed, 2);
+        map.remove(1, 0); // removing an absent partition must not release again
+        EXPECT_EQ(destroyed, 2);
+        // The second partition remains owned until map destruction.
+    }
+    EXPECT_EQ(destroyed, 4);
+}
+
+TEST(AppendOnlyTopNHeapReleaseTest, ReservedRowMatchesOrdinaryRowAndOwnsStrings)
+{
+    std::unique_ptr<RowData> reserved;
+    std::unique_ptr<RowData> ordinary;
+    {
+        auto batch = std::unique_ptr<omnistream::VectorBatch>(omnistream::VectorBatch::CreateVectorBatch(
+            1, {OMNI_LONG, OMNI_VARCHAR, OMNI_VARCHAR, OMNI_VARCHAR, OMNI_VARCHAR}));
+        reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(0))->SetValue(0, 42);
+        const std::vector<std::string> strings{"short", "a longer string crossing the inline boundary", "123456789"};
+        for (int i = 0; i < 3; ++i) {
+            std::string_view value = strings[i];
+            reinterpret_cast<omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(
+                batch->Get(i + 1))
+                ->SetValue(0, value);
+        }
+        batch->Get(4)->SetNull(0);
+        batch->setRowKind(0, RowKind::UPDATE_AFTER);
+        reserved.reset(batch->extractRowData(0, true));
+        ordinary.reset(batch->extractRowData(0));
+    }
+    EXPECT_EQ(*reserved->getLong(0), 42);
+    EXPECT_EQ(reserved->getStringView(1), "short");
+    EXPECT_EQ(reserved->getStringView(2), "a longer string crossing the inline boundary");
+    EXPECT_EQ(reserved->getStringView(3), "123456789");
+    EXPECT_TRUE(reserved->isNullAt(4));
+    EXPECT_EQ(reserved->getRowKind(), RowKind::UPDATE_AFTER);
+    auto* left = static_cast<BinaryRowData*>(reserved.get());
+    auto* right = static_cast<BinaryRowData*>(ordinary.get());
+    ASSERT_EQ(left->getSizeInBytes(), right->getSizeInBytes());
+    EXPECT_EQ(memcmp(left->getSegment(), right->getSegment(), left->getSizeInBytes()), 0);
+    EXPECT_EQ(left->getBufferCapacity(), left->getSizeInBytes());
+}
+
+TEST(AppendOnlyTopNHeapReleaseTest, RawCacheIsCreatedOnFirstRead)
+{
+    BinaryRowData row(2);
+    BinaryRowWriter writer(&row);
+    const std::vector<uint8_t> payload{0, 1, 2, 0, 255, 4, 5, 6, 7};
+    writer.writeRawValue(0, payload.data(), payload.size());
+    writer.setNullAt(1);
+    writer.complete();
+    EXPECT_EQ(static_cast<BinaryRawValueData*>(row.getRawValue(0))->toBytes(), payload);
+    EXPECT_EQ(row.getRawValue(1), nullptr);
+    EXPECT_EQ(static_cast<BinaryRawValueData*>(row.getRawValue(0))->toBytes(), payload);
+}
+
+TEST(AppendOnlyTopNHeapReleaseTest, StringStateChangelogMatchesReference)
+{
+    class StringOutput : public BatchOutputTest {
+    public:
+        std::vector<std::tuple<int64_t, int64_t, bool, std::string, int64_t, int, int64_t>> rows;
+        void collect(void* record) override
+        {
+            std::unique_ptr<StreamRecord> stream(static_cast<StreamRecord*>(record));
+            std::unique_ptr<omnistream::VectorBatch> batch(static_cast<omnistream::VectorBatch*>(stream->getValue()));
+            for (int i = 0; i < batch->GetRowCount(); ++i) {
+                auto* key = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(0));
+                auto* sort = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(1));
+                auto* text = reinterpret_cast<
+                    omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(batch->Get(2));
+                auto* rank = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(3));
+                rows.emplace_back(
+                    key->GetValue(i),
+                    sort->GetValue(i),
+                    text->IsNull(i),
+                    text->IsNull(i) ? std::string{} : std::string(text->GetValue(i)),
+                    rank->GetValue(i),
+                    static_cast<int>(batch->getRowKind(i)),
+                    batch->getTimestamp(i));
+            }
+        }
+    };
+    for (const std::string backend : {"HashMapStateBackend", "EmbeddedRocksDBStateBackend"}) {
+        auto config = omnistream::makeRankConfig(true, true, 3);
+        config["inputTypes"][2] = "VARCHAR";
+        config["outputTypes"][2] = "VARCHAR";
+        StringOutput enabled, reference;
+        auto* optimized = omnistream::openAppendOnlyTopN(config, &enabled, true, backend, true);
+        auto* original = omnistream::openAppendOnlyTopN(config, &reference, false, backend);
+        for (int b = 0; b < 24; ++b) {
+            auto makeBatch = [&]() {
+                auto* batch = omnistream::VectorBatch::CreateVectorBatch(8, {OMNI_LONG, OMNI_LONG, OMNI_VARCHAR});
+                for (int i = 0; i < 8; ++i) {
+                    reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(0))->SetValue(i, i % 2);
+                    reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(1))->SetValue(i, (b * 3 + i) % 17);
+                    if ((b + i) % 5 == 0) {
+                        batch->Get(2)->SetNull(i);
+                    } else {
+                        std::string value((b + i) % 2 ? 81 : 5, 'a' + i);
+                        std::string_view view = value;
+                        reinterpret_cast<
+                            omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(
+                            batch->Get(2))
+                            ->SetValue(i, view);
+                    }
+                    batch->setTimestamp(i, b * 100 + i);
+                }
+                return batch;
+            };
+            enabled.rows.clear();
+            reference.rows.clear();
+            optimized->processBatch(new StreamRecord(makeBatch()));
+            original->processBatch(new StreamRecord(makeBatch()));
+            auto byKey = [](const auto& a, const auto& c) { return std::get<0>(a) < std::get<0>(c); };
+            std::stable_sort(enabled.rows.begin(), enabled.rows.end(), byKey);
+            std::stable_sort(reference.rows.begin(), reference.rows.end(), byKey);
+            EXPECT_EQ(enabled.rows, reference.rows) << backend << " batch=" << b;
+        }
+        optimized->close();
+        original->close();
+        delete optimized;
+        delete original;
+    }
+}
+
+TEST(AppendOnlyTopNHeapReleaseTest, StringGrowthDetachesBorrowedStorage)
+{
+    const int fixed = BinaryRowData::calculateFixPartSizeInBytes(2);
+    std::vector<uint8_t> backing(fixed, 0);
+    BinaryRowData row(2);
+    row.pointTo(backing.data(), 0, fixed, fixed);
+    row.setStringView(0, "first long string");
+    row.setStringView(1, "second long string");
+    EXPECT_NE(row.getSegment(), backing.data());
+    EXPECT_EQ(row.getStringView(0), "first long string");
+    EXPECT_EQ(row.getStringView(1), "second long string");
 }
