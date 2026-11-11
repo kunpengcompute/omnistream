@@ -53,8 +53,8 @@ SqlBatchRecord CopySqlBatchRows(StreamRecord* source, int firstRow, int rowCount
     std::vector<int32_t> rowIds(rowCount);
     std::iota(rowIds.begin(), rowIds.end(), firstRow);
     std::unique_ptr<VectorBatch> copy(VectorBatchUtil::buildNewVectorBatchByRowIds(batch, rowIds));
-    SqlBatchRecord record(source->hasTimestamp() ? new StreamRecord(copy.get(), source->getTimestamp())
-                                                 : new StreamRecord(copy.get()));
+    SqlBatchRecord record(
+        source->hasTimestamp() ? new StreamRecord(copy.get(), source->getTimestamp()) : new StreamRecord(copy.get()));
     copy.release();
     return record;
 }

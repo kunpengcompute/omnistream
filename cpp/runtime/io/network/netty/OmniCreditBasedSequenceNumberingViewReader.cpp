@@ -427,8 +427,7 @@ void OmniCreditBasedSequenceNumberingViewReader::SerializeVectorBatchBufferToRow
         networkBuffer->IncreaseUsedBytes(output.length());
         networkBuffer->IncreaseRefCount();
         networkBuffer->EnableEligibleRecycling();
-        auto info = std::make_shared<SerializedBatchInfo>(SerializedBatchInfo{
-            address, address, output.length()});
+        auto info = std::make_shared<SerializedBatchInfo>(SerializedBatchInfo{address, address, output.length()});
         std::lock_guard<std::recursive_mutex> lock(queueMutex);
         serializedBatchQueue.push(info);
     };

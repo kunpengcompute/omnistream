@@ -167,8 +167,7 @@ std::shared_ptr<CheckpointedInputGate> OmniOneInputStreamTask::CreateCheckpointe
 {
     auto checkpointableInputs = env_->GetAllInputGates();
     taskConfiguration_ = env_->taskConfiguration();
-    const bool useUnionInputGate =
-        ShouldUseUnionInputGate(taskType, checkpointableInputs.size(), HasUnionAllInput());
+    const bool useUnionInputGate = ShouldUseUnionInputGate(taskType, checkpointableInputs.size(), HasUnionAllInput());
     if (taskType == SQL_TASK_TYPE && checkpointableInputs.size() != 1 && !useUnionInputGate) {
         throw std::invalid_argument("SQL one-input task requires exactly one physical input gate");
     }
