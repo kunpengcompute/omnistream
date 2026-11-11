@@ -115,6 +115,12 @@ struct IsEmhashMapPtrType : std::false_type {};
 template <typename UK, typename UV>
 struct IsEmhashMapPtrType<emhash7::HashMap<UK, UV>*> : std::true_type {};
 
+// Rank owns each row-list value and every row remaining in that list.
+template <typename T>
+struct IsRowListMapPtrType : std::false_type {};
+template <>
+struct IsRowListMapPtrType<emhash7::HashMap<RowData*, std::vector<RowData*>*>*> : std::true_type {};
+
 // Helper to check if a type is emhash7::HashMap<Object*, ...>*
 template <typename T>
 struct HasObjectKeyInMap : std::false_type {};
@@ -136,7 +142,18 @@ inline void cleanupInnerMapAndDelete(V mapPtr)
 {
     if (mapPtr == nullptr) return;
     if constexpr (IsEmhashMapPtrType<V>::value) {
-        if constexpr (HasObjectKeyInMap<V>::value || HasObjectValueInMap<V>::value) {
+        if constexpr (IsRowListMapPtrType<V>::value) {
+            for (auto& entry : *mapPtr) {
+                if (entry.second != nullptr) {
+                    for (RowData* row : *entry.second) {
+                        delete row;
+                    }
+                    delete entry.second;
+                }
+            }
+            // The emhash destructor owns the RowData* keys. Do not clear the
+            // map here: that would prevent its destructor from deleting them.
+        } else if constexpr (HasObjectKeyInMap<V>::value || HasObjectValueInMap<V>::value) {
             for (auto& entry : *mapPtr) {
                 if constexpr (HasObjectKeyInMap<V>::value) {
                     Object* key = static_cast<Object*>(entry.first);
@@ -1109,6 +1126,8 @@ private:
             if (savedValue != nullptr) {
                 static_cast<Object*>(savedValue)->putRefCount();
             }
+        } else if constexpr (cowstatemap_detail::IsRowListMapPtrType<ValueT>::value) {
+            cowstatemap_detail::cleanupInnerMapAndDelete(savedValue);
         } else if constexpr (std::is_pointer_v<ValueT>) {
             delete savedValue;
         }

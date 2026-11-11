@@ -11,6 +11,7 @@
 
 #include "VectorBatch.h"
 #include <fstream>
+#include <limits>
 
 #include "OmniOperatorJIT/core/src/codegen/time_util.h"
 #include "data/binary/BinaryRowData.h"
@@ -122,14 +123,54 @@ void VectorBatch::RearrangeColumns(std::vector<int32_t>& inputIndices)
 // The caller takes ownership of the returned pointer
 RowData* VectorBatch::extractRowData(int rowIndex)
 {
-    if (rowIndex >= this->GetRowCount()) {
+    return extractRowData(rowIndex, false);
+}
+
+RowData* VectorBatch::extractRowData(int rowIndex, bool reserveVariableWidth)
+{
+    if (rowIndex < 0 || rowIndex >= this->GetRowCount()) {
         return nullptr;
     }
     // Get the number of columns in the batch.
     int numColumns = this->GetVectorCount();
     // Create a new BinaryRowData with numColumns fields.
     // BinaryRowData is assumed to implement the RowData interface.
-    BinaryRowData* outRow = BinaryRowData::createBinaryRowDataWithMem(numColumns);
+    std::unique_ptr<BinaryRowData> ownedRow;
+    if (reserveVariableWidth) {
+        const int fixedSize = BinaryRowData::calculateFixPartSizeInBytes(numColumns);
+        size_t capacity = fixedSize;
+        for (int i = 0; i < numColumns; ++i) {
+            auto* col = Get(i);
+            if (!col->IsNull(rowIndex) && (col->GetTypeId() == OMNI_VARCHAR || col->GetTypeId() == OMNI_CHAR)) {
+                std::string_view value;
+                if (col->GetEncoding() == omniruntime::vec::OMNI_FLAT) {
+                    value =
+                        reinterpret_cast<
+                            omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(col)
+                            ->GetValue(rowIndex);
+                } else if (col->GetEncoding() == omniruntime::vec::OMNI_DICTIONARY) {
+                    value = reinterpret_cast<omniruntime::vec::Vector<omniruntime::vec::DictionaryContainer<
+                        std::string_view,
+                        omniruntime::vec::LargeStringContainer>>*>(col)
+                                ->GetValue(rowIndex);
+                } else {
+                    throw std::runtime_error("encoding not supported");
+                }
+                if (value.size() > 7) {
+                    capacity += (value.size() + 7) & ~size_t(7);
+                }
+            }
+        }
+        if (capacity > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            throw std::length_error("RowData exceeds supported size");
+        }
+        ownedRow = std::make_unique<BinaryRowData>(numColumns, static_cast<int>(capacity));
+        ownedRow->changeOwner(1);
+        ownedRow->setSizeInBytes(fixedSize);
+    } else {
+        ownedRow.reset(BinaryRowData::createBinaryRowDataWithMem(numColumns));
+    }
+    auto* outRow = ownedRow.get();
 
     for (int colIndex = 0; colIndex < numColumns; ++colIndex) {
         auto col = this->Get(colIndex);
@@ -151,7 +192,7 @@ RowData* VectorBatch::extractRowData(int rowIndex)
     }
     // Set the row kind using the row kinds stored in the batch.
     outRow->setRowKind(this->getRowKind(rowIndex));
-    return outRow;
+    return ownedRow.release();
 }
 
 std::string VectorBatch::TransformTimeWithTimeZone(

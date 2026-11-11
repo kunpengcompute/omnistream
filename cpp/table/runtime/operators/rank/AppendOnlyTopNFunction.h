@@ -324,7 +324,7 @@ private:
             for (size_t i = first; i < end; ++i) {
                 auto& item = active.rows[i];
                 if (item.fromBatch) {
-                    extracted.emplace_back(batch->extractRowData(item.batchRow));
+                    extracted.emplace_back(batch->extractRowData(item.batchRow, !rocksBackend()));
                     list->push_back(extracted.back().get());
                 } else {
                     list->push_back(previous->rows->at(item.indexInGroup));

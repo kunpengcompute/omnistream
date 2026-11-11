@@ -19,7 +19,6 @@ BinaryRowData::BinaryRowData(int arity) : RowData(RowData::BinaryRowDataID), Bin
 {
     nullBitsSizeInBytes_ = calculateBitSetWidthInBytes(arity);
     types.resize(arity);
-    rawValues_.resize(arity);
 }
 
 BinaryRowData::BinaryRowData(int arity, int length) : RowData(RowData::BinaryRowDataID), BinarySection(), arity_(arity)
@@ -28,7 +27,6 @@ BinaryRowData::BinaryRowData(int arity, int length) : RowData(RowData::BinaryRow
     memoryBuffer = new uint8_t[length]();
     nullBitsSizeInBytes_ = calculateBitSetWidthInBytes(arity);
     types.resize(arity);
-    rawValues_.resize(arity);
     bufferCapacity = length;
     sizeInBytes_ = length;
 }
@@ -304,24 +302,21 @@ void BinaryRowData::writeVarLenVarchar(int fieldOffset, const uint8_t* bytes, in
     // Write header
     setOffsetAndSize(fieldOffset, segmentSize, len);
 
-    // Calculate the new buffer size
-    int newBufferCapacity = bufferCapacity + roundedSize;
-
-    // Allocate a new buffer with the increased size
-    auto* newBuffer = new uint8_t[newBufferCapacity]();
-
-    // Copy existing data to the new buffer
-    auto ret = memcpy_s(newBuffer, newBufferCapacity, memoryBuffer, bufferCapacity);
-    if (ret != EOK) {
-        throw std::runtime_error("memcpy_s failed");
+    const int required = segmentSize + roundedSize;
+    // 预留空间足够时直接追加，避免每个长字符串都重新分配。
+    if (required > bufferCapacity) {
+        auto newBuffer = std::make_unique<uint8_t[]>(required);
+        if (memcpy_s(newBuffer.get(), required, memoryBuffer, segmentSize) != EOK) {
+            throw std::runtime_error("memcpy_s failed");
+        }
+        if (owner_ == 1) {
+            delete[] memoryBuffer;
+        }
+        memoryBuffer = newBuffer.release();
+        bufferCapacity = required;
+        owner_ = 1;
     }
-
-    // Update the memoryBuffer pointer and bufferCapacity
-    delete[] memoryBuffer; // Free the old buffer
-
-    memoryBuffer = newBuffer;
-    bufferCapacity = newBufferCapacity;
-    sizeInBytes_ = newBufferCapacity; // what is the difference between sizeInBytes_ and bufferCapacity?
+    sizeInBytes_ = required;
 
     // Write the variable length portion
     MemorySegmentUtils::put(memoryBuffer, bufferCapacity, segmentSize, bytes, 0, len);
@@ -487,6 +482,10 @@ void* BinaryRowData::getRawValue(int pos)
     if (payloadStart > static_cast<uint64_t>(bufferCapacity) ||
         rawSize > static_cast<uint64_t>(bufferCapacity) - payloadStart || payloadStart + rawSize > sectionEnd) {
         throw std::runtime_error("BinaryRowData RAW value has invalid offset/size");
+    }
+    // 普通字段行不分配 RAW 缓存。
+    if (rawValues_.empty()) {
+        rawValues_.resize(arity_);
     }
     rawValues_[pos] = std::make_shared<BinaryRawValueData>(memoryBuffer + payloadStart, static_cast<size_t>(rawSize));
     return rawValues_[pos].get();
