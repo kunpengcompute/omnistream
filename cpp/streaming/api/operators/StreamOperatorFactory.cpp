@@ -425,7 +425,7 @@ StreamOperator* StreamOperatorFactory::CreateKeyedProcessOp(
         opDescriptionJSON.contains("processFunction") &&
         opDescriptionJSON["processFunction"] == "AppendOnlyTopNFunction") {
         LOG("AppendOnlyTopNFunction description: " << opConfig.getDescription());
-        AbstractTopNFunction<RowData*>* func = new AppendOnlyTopNFunction<RowData*>(opDescriptionJSON);
+        AbstractTopNFunction<RowData*>* func = new AppendOnlyTopNFunction<RowData*>(opDescriptionJSON, true, true);
         auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
         op->setup(std::move(task));
         op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);

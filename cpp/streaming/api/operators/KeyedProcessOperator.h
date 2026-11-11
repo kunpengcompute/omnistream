@@ -65,6 +65,11 @@ public:
 
     void close() override
     {
+        // AbstractUdfStreamOperator currently does not close its function.
+        // Release TopN's derived cross-batch metadata before backend teardown.
+        if (auto* topN = dynamic_cast<AbstractTopNFunction<K>*>(this->userFunction)) {
+            topN->close();
+        }
         AbstractUdfStreamOperator<F, K>::close();
     }
 
