@@ -21,6 +21,8 @@
 #include <string>
 #include <tuple>
 #include "core/api/common/serialization/DeserializationSchema.h"
+#include "table/types/logical/LogicTypeUtils.h"
+#include "table/types/logical/LogicalType.h"
 #include "OmniOperatorJIT/core/src/type/TimestampConversion.h"
 
 class JsonRowDataDeserializationSchema : public DeserializationSchema {
@@ -37,14 +39,18 @@ public:
         const nlohmann::json& opDescriptionJSON, bool enableFlinkCompatibleConversions = false)
         : fieldNames(opDescriptionJSON.at("outputNames").get<std::vector<std::string>>()),
           flinkCompatibleConversions(enableFlinkCompatibleConversions),
-          ignoreParseErrors(opDescriptionJSON.value("ignoreParseErrors", false)),
-          failOnMissingField(opDescriptionJSON.value("failOnMissingField", false))
+          ignoreParseErrors(opDescriptionJSON.value<bool>("ignoreParseErrors", false)),
+          failOnMissingField(opDescriptionJSON.value<bool>("failOnMissingField", false))
     {
         auto outputTypes = opDescriptionJSON.at("outputTypes").get<std::vector<std::string>>();
         std::regex pattern(R"(DECIMAL\d*\((\d+),\s*(\d+)\))");
         std::smatch match;
-        for (std::string type : outputTypes) {
-            fieldTypes.push_back(LogicalType::flinkTypeToOmniTypeId(type));
+        for (const auto& type : outputTypes) {
+            if (LogicTypeUtils::startsWith(type, "TIMESTAMP_WITH_LOCAL_TIME_ZONE(")) {
+                fieldTypes.push_back(DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE);
+            } else {
+                fieldTypes.push_back(LogicalType::flinkTypeToOmniTypeId(type));
+            }
             if (std::regex_search(type, match, pattern)) {
                 decimalScales.push_back(std::stoi(match[2].str()));
             } else {

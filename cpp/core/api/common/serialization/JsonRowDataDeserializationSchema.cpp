@@ -153,6 +153,8 @@ std::unique_ptr<omnistream::VectorBatch> JsonRowDataDeserializationSchema::deser
                 setColValue(static_cast<int>(row), static_cast<int>(column), *batch, *field);
             } catch (const nlohmann::json::exception& error) {
                 handleFieldError(row, column, *batch, error);
+            } catch (const std::invalid_argument& error) {
+                handleFieldError(row, column, *batch, error);
             } catch (const std::runtime_error& error) {
                 handleFieldError(row, column, *batch, error);
             }
