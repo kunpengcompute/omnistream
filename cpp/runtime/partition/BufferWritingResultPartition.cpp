@@ -12,7 +12,10 @@
 #include "BufferWritingResultPartition.h"
 
 #include <limits>
+#include <memory>
+#include <numeric>
 #include <stdexcept>
+#include <vector>
 #include <core/utils/ByteBuffer.h>
 #include <streaming/runtime/streamrecord/StreamRecord.h>
 #include <streaming/api/watermark/Watermark.h>
@@ -25,8 +28,38 @@
 // broadcast ability miss
 #include "runtime/metrics/groups/VectorBatchBufferPoolMetricGroup.h"
 #include "table/data/vectorbatch/VectorBatch.h"
+#include "table/data/util/VectorBatchUtil.h"
 
 namespace omnistream {
+namespace {
+constexpr int32_t MAX_SQL_BATCH_BYTES = 2 * 1024 * 1024;
+constexpr int32_t MAX_SQL_SINGLE_ROW_BYTES = 8 * 1024 * 1024;
+
+struct SqlBatchRecordDeleter {
+    void operator()(StreamRecord* record) const
+    {
+        if (record != nullptr) {
+            delete static_cast<VectorBatch*>(record->getValue());
+            delete record;
+        }
+    }
+};
+
+using SqlBatchRecord = std::unique_ptr<StreamRecord, SqlBatchRecordDeleter>;
+
+SqlBatchRecord CopySqlBatchRows(StreamRecord* source, int firstRow, int rowCount)
+{
+    auto* batch = static_cast<VectorBatch*>(source->getValue());
+    std::vector<int32_t> rowIds(rowCount);
+    std::iota(rowIds.begin(), rowIds.end(), firstRow);
+    std::unique_ptr<VectorBatch> copy(VectorBatchUtil::buildNewVectorBatchByRowIds(batch, rowIds));
+    SqlBatchRecord record(
+        source->hasTimestamp() ? new StreamRecord(copy.get(), source->getTimestamp()) : new StreamRecord(copy.get()));
+    copy.release();
+    return record;
+}
+} // namespace
+
 // origin realization
 BufferWritingResultPartition::BufferWritingResultPartition(
     const std::string& owningTaskName,
@@ -155,6 +188,36 @@ void BufferWritingResultPartition::flushAllSubpartitions(bool finishProducers)
 
 void BufferWritingResultPartition::emitRecord(void* record, int targetSubpartition)
 {
+    bool oversizedSqlRow = false;
+    if (taskType == 1) {
+        auto* element = static_cast<StreamElement*>(record);
+        if (element->getTag() == StreamElementTag::TAG_REC_WITH_TIMESTAMP ||
+            element->getTag() == StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP) {
+            auto* sqlRecord = static_cast<StreamRecord*>(element);
+            auto* batch = static_cast<VectorBatch*>(sqlRecord->getValue());
+            if (batch != nullptr && batch->getSizeInBytes() > MAX_SQL_BATCH_BYTES) {
+                const int rowCount = batch->GetRowCount();
+                if (rowCount <= 1) {
+                    const int32_t rowBytes = batch->getSizeInBytes();
+                    if (rowBytes > MAX_SQL_SINGLE_ROW_BYTES) {
+                        SqlBatchRecord original(sqlRecord);
+                        throw std::runtime_error(
+                            "SQL row size " + std::to_string(rowBytes) + " exceeds native network single-row limit " +
+                            std::to_string(MAX_SQL_SINGLE_ROW_BYTES));
+                    }
+                    oversizedSqlRow = true;
+                } else {
+                    SqlBatchRecord original(sqlRecord);
+                    const int leftRows = rowCount / 2;
+                    auto left = CopySqlBatchRows(sqlRecord, 0, leftRows);
+                    emitRecord(left.release(), targetSubpartition);
+                    auto right = CopySqlBatchRows(sqlRecord, leftRows, rowCount - leftRows);
+                    emitRecord(right.release(), targetSubpartition);
+                    return;
+                }
+            }
+        }
+    }
     auto buffer = appendUnicastDataForNewRecord(record, targetSubpartition);
     if (taskType == 2) {
         // todo：这里可能有问题，如果是水印的话，record应该对应的是StreamElement
@@ -168,8 +231,11 @@ void BufferWritingResultPartition::emitRecord(void* record, int targetSubpartiti
     }
 
     /* possible need this notification */
-    if (buffer->isFull()) {
+    if (buffer->isFull() || oversizedSqlRow) {
         finishUnicastBufferBuilder(targetSubpartition);
+    }
+    if (oversizedSqlRow) {
+        flushSubpartition(targetSubpartition, false);
     }
 }
 
@@ -301,6 +367,8 @@ BufferBuilder* BufferWritingResultPartition::appendUnicastDataForNewRecord(void*
             }
         }
         requestMemoryForVectorBatch(targetSubpartition, bytes);
+        // requestMemoryForVectorBatch may finish the previous builder to release its memory.
+        buffer = unicastBufferBuilders[targetSubpartition];
         if (buffer == nullptr) {
             buffer = requestNewUnicastBufferBuilder(targetSubpartition, bytes);
             LOG_PART("Add bufferbuilder: " << buffer.get() << " to subparition" << targetSubpartition);
@@ -606,8 +674,19 @@ void BufferWritingResultPartition::requestMemoryForVectorBatch(int targetSubpart
 {
     auto localObjectBufferPool = static_cast<LocalObjectBufferPool*>(bufferPool.get());
     if (!localObjectBufferPool->chargeMemory(targetSubpartition, bytes)) {
+        // A pending builder can hold the memory needed by this batch. Publish it before
+        // blocking so the consumer can recycle the previous batch.
+        if (unicastBufferBuilders[targetSubpartition] != nullptr) {
+            finishUnicastBufferBuilder(targetSubpartition);
+            flushSubpartition(targetSubpartition, false);
+        }
         hardBackPressuredTimeMsPerSecond->MarkStart();
-        localObjectBufferPool->chargeMemoryBlocking(targetSubpartition, bytes);
+        try {
+            localObjectBufferPool->chargeMemoryBlocking(targetSubpartition, bytes);
+        } catch (...) {
+            hardBackPressuredTimeMsPerSecond->MarkEnd();
+            throw;
+        }
         hardBackPressuredTimeMsPerSecond->MarkEnd();
     }
 }

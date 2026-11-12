@@ -79,7 +79,13 @@ private:
     std::condition_variable_any dataAvailableCondition;
     std::recursive_mutex dataAvailableMutex;
     std::atomic<bool> dataAvailable = false;
+    struct PendingSqlBuffer {
+        Buffer* buffer;
+        uint8_t* container;
+        size_t remainingRows;
+    };
     std::unordered_map<uint64_t, Buffer*> pendingRecyclingBufferMap;
+    std::unordered_map<uint64_t, std::shared_ptr<PendingSqlBuffer>> pendingSqlRows;
     std::recursive_mutex recycleBufferMutex;
     std::atomic<bool> isStopped = false;
     std::string taskNameWithSubtask_;

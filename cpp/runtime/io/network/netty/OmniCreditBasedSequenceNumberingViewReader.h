@@ -47,6 +47,7 @@ public:
         ResultPartitionIDPOD partitionId,
         int subPartitionIndex,
         long outputBufferStatus,
+        bool downStreamIsNative,
         std::shared_ptr<LocalNettyBufferPool> localNettyBufferPool = nullptr);
     ~OmniCreditBasedSequenceNumberingViewReader() override;
     void notifyDataAvailable() override;
@@ -72,8 +73,10 @@ public:
     std::shared_ptr<NettyBufferInfo> CreateNettyBufferInfo();
     void DestroyNettyBufferPool();
     void releaseAllResources();
+    void SerializeVectorBatchBufferToRowData(VectorBatchBuffer* vectorBatchBuffer);
 
 private:
+    bool downStreamIsNative = true;
     std::atomic<bool> stopped_{false};
     std::shared_ptr<ResultSubpartitionView> subpartitionView;
     std::queue<std::shared_ptr<SerializedBatchInfo>> serializedBatchQueue;

@@ -48,6 +48,8 @@ TEST(InputProcessorUtilTest, CreatesCheckpointedMultipleInputGates)
     // Create two input gate groups with one MockInputGate each
     auto gate1 = std::make_shared<MockInputGate>(0);
     auto gate2 = std::make_shared<MockInputGate>(1);
+    gate1->initializeInputFormat(InputFormat::OMNI_BATCH);
+    gate2->initializeInputFormat(InputFormat::FLINK_ROW);
     std::vector<std::vector<std::shared_ptr<IndexedInputGate>>> inputGateGroups = {{gate1}, {gate2}};
 
     std::vector<std::shared_ptr<OmniStreamTaskSourceInput>> sourceInputs; // No source inputs
@@ -70,6 +72,8 @@ TEST(InputProcessorUtilTest, CreatesCheckpointedMultipleInputGates)
     auto result = InputProcessorUtil::CreateCheckpointedMultipleInputGate(mailboxExecutor, inputGateGroups, handler);
 
     ASSERT_EQ(result.size(), 2);
+    EXPECT_EQ(result[0]->getInputFormat(), InputFormat::OMNI_BATCH);
+    EXPECT_EQ(result[1]->getInputFormat(), InputFormat::FLINK_ROW);
     for (const auto& gate : result) {
         ASSERT_NE(gate, nullptr);
     }
