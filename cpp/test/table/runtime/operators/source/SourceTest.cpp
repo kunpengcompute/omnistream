@@ -60,6 +60,70 @@ TEST(SourceTestTest, JsonRowDataDeserializationSchemaHandlesNullStringField)
     delete batch;
 }
 
+TEST(SourceTestTest, JsonRowDataDeserializationSchemaKeepsTimestampsWhenSkippingBadMessages)
+{
+    nlohmann::json description = {{"outputNames", {"i", "id", "ts", "text"}},
+        {"outputTypes", {"INTEGER", "BIGINT", "TIMESTAMP_WITHOUT_TIME_ZONE(3)", "VARCHAR(2147483647)"}},
+        {"ignoreParseErrors", true}};
+    JsonRowDataDeserializationSchema schema(description);
+    const std::vector<std::string> records = {
+        R"({"i":" +2147483647 ","id":"-9223372036854775808","ts":"2026-11-03 10:59:32.628","text":"NULL"})",
+        "{",
+        R"({"i":"2147483648","id":"123x","ts":"39:41.7","text":"''"})",
+        R"({"i":123.75,"id":9223372036854775808,"ts":null,"text":null})",
+        "null",
+    };
+    std::vector<const uint8_t*> messages;
+    std::vector<size_t> lengths;
+    for (const auto& record : records) {
+        messages.push_back(reinterpret_cast<const uint8_t*>(record.data()));
+        lengths.push_back(record.size());
+    }
+    std::vector<int64_t> timestamps{10, 20, 30, 40, 50};
+    class BatchCollector final : public Collector {
+    public:
+        void collect(void* record) override
+        {
+            batch.reset(static_cast<omnistream::VectorBatch*>(record));
+        }
+        void close() override {}
+        std::unique_ptr<omnistream::VectorBatch> batch;
+    } collector;
+
+    schema.deserialize(messages, lengths, timestamps, &collector);
+    ASSERT_NE(collector.batch, nullptr);
+    auto& batch = *collector.batch;
+    ASSERT_EQ(batch.GetRowCount(), 3);
+    EXPECT_EQ(batch.getTimestamp(0), 10);
+    EXPECT_EQ(batch.getTimestamp(1), 30);
+    EXPECT_EQ(batch.getTimestamp(2), 40);
+    auto* integers = static_cast<omniruntime::vec::Vector<int32_t>*>(batch.Get(0));
+    auto* longs = static_cast<omniruntime::vec::Vector<int64_t>*>(batch.Get(1));
+    auto* text = static_cast<omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(
+        batch.Get(3));
+    EXPECT_EQ(integers->GetValue(0), INT32_MAX);
+    EXPECT_EQ(longs->GetValue(0), INT64_MIN);
+    EXPECT_FALSE(batch.Get(2)->IsNull(0));
+    EXPECT_EQ(text->GetValue(0), "NULL");
+    EXPECT_TRUE(integers->IsNull(1));
+    EXPECT_TRUE(longs->IsNull(1));
+    EXPECT_TRUE(batch.Get(2)->IsNull(1));
+    EXPECT_EQ(text->GetValue(1), "''");
+    EXPECT_EQ(integers->GetValue(2), 123);
+    EXPECT_TRUE(longs->IsNull(2));
+    EXPECT_TRUE(text->IsNull(2));
+}
+
+TEST(SourceTestTest, JsonRowDataDeserializationSchemaRejectsInvalidFieldByDefault)
+{
+    nlohmann::json description = {{"outputNames", {"id"}}, {"outputTypes", {"BIGINT"}}};
+    JsonRowDataDeserializationSchema schema(description);
+    const std::string record = R"({"id":"NULL"})";
+    std::vector<const uint8_t*> messages{reinterpret_cast<const uint8_t*>(record.data())};
+    std::vector<size_t> lengths{record.size()};
+    EXPECT_THROW(schema.deserialize(messages, lengths), std::runtime_error);
+}
+
 TEST(SourceTestTest, DISABLED_initoper)
 {
     std::string description = R"DELIM({ "format" : "csv",
