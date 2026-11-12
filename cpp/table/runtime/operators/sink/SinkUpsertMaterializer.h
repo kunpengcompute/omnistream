@@ -20,16 +20,16 @@
 
 #include <nlohmann/json.hpp>
 
-// ValueState.h uses RowData / Object: include RowData.h before ValueState.h
 #include "table/data/RowData.h"
 #include "core/api/common/state/ValueState.h"
 #include "core/api/common/state/ValueStateDescriptor.h"
 #include "runtime/state/rocksdb/RocksdbValueState.h"
-#include "streaming/api/functions/KeyedProcessFunction.h"
+#include "streaming/api/operators/OneInputStreamOperator.h"
 #include "streaming/api/operators/StreamingRuntimeContext.h"
-#include "streaming/api/operators/TimestampedCollector.h"
+#include "streaming/runtime/streamrecord/StreamRecord.h"
 #include "table/data/RowKind.h"
 #include "table/runtime/keyselector/KeySelector.h"
+#include "table/runtime/operators/TableStreamOperator.h"
 #include "table/typeutils/BinaryRowDataListSerializer.h"
 #include "table/typeutils/RowDataSerializer.h"
 #include "table/types/logical/LogicalType.h"
@@ -40,7 +40,10 @@
  * Materializes a retract changelog into an upsert changelog before the sink.
  *
  * Flink: org.apache.flink.table.runtime.operators.sink.SinkUpsertMaterializer
- * - keyed by the sink primary key (description JSON "grouping");
+ * (extends TableStreamOperator<RowData> implements OneInputStreamOperator) -
+ * this native port keeps the same operator shape: a standalone operator keyed
+ * by the sink primary key (description JSON "grouping"; the key context and the
+ * keyed state backend are wired by AbstractStreamOperator::initializeState).
  * - state: ValueState<List<RowData>> (state name "values"; the row objects are
  *   stored directly in the state list, like Flink's ListSerializer(RowDataSerializer));
  * - +I/+U appends the row (or replaces the stored row with the same upsert key when
@@ -71,34 +74,46 @@
  * TTL is not implemented; savepoints are marked unsupported by the factory.
  */
 template <typename K>
-class SinkUpsertMaterializer : public KeyedProcessFunction<K, RowData*, omnistream::VectorBatch*> {
+class SinkUpsertMaterializer : public TableStreamOperator<K>, public OneInputStreamOperator {
 public:
-    explicit SinkUpsertMaterializer(const nlohmann::json& config);
+    SinkUpsertMaterializer(const nlohmann::json& config, Output* output);
     ~SinkUpsertMaterializer() override = default;
 
-    void open(const Configuration& context) override;
+    void open() override;
 
-    void processBatch(
-        omnistream::VectorBatch* inputBatch,
-        typename KeyedProcessFunction<K, RowData*, omnistream::VectorBatch*>::Context& ctx,
-        TimestampedCollector& out) override;
-
-    void processElement(
-        RowData* input,
-        typename KeyedProcessFunction<K, RowData*, omnistream::VectorBatch*>::Context* ctx,
-        TimestampedCollector* out) override
+    void initializeState(StreamTaskStateInitializerImpl* initializer, TypeSerializer* keySerializer) override
     {
-        NOT_IMPL_EXCEPTION;
+        // Wires the keyed state backend exactly like the KeyedProcessOperator
+        // path did: the key serializer comes from the operator chain descriptor
+        // (sink primary key), the state store is injected into the runtime context.
+        AbstractStreamOperator<K>::initializeState(initializer, keySerializer);
     }
 
-    JoinedRowData* getResultRow() override
+    void processBatch(StreamRecord* record) override;
+
+    void processElement(StreamRecord* record) override
     {
-        return nullptr;
+        processBatch(record);
     }
 
-    ValueState<K>* getValueState() override
+    void ProcessWatermark(Watermark* mark) override
     {
-        return nullptr;
+        TableStreamOperator<K>::ProcessWatermark(mark);
+    }
+
+    void processWatermarkStatus(WatermarkStatus* watermarkStatus) override
+    {
+        this->output->emitWatermarkStatus(watermarkStatus);
+    }
+
+    const char* getName() override
+    {
+        return "SinkUpsertMaterializer";
+    }
+
+    std::string getTypeName() override
+    {
+        return "SinkUpsertMaterializer";
     }
 
 private:
@@ -247,32 +262,6 @@ private:
         }
     }
 
-    // Batch-end write-back. HEAP: only freshly created lists are handed to the
-    // state (in-place mutations of existing lists are already visible). RocksDB:
-    // every changed list is serialized back; without the falcon cache the loaded
-    // copies (list and rows) are freed afterwards - their bytes now live in the
-    // store. Retained key objects are freed by the caller after this loop.
-    void flushWorkItems(
-        typename KeyedProcessFunction<K, RowData*, omnistream::VectorBatch*>::Context& ctx)
-    {
-        for (RowData* key : retainedKeys_) {
-            WorkItem& item = workItems_[key];
-            if (item.list == nullptr) {
-                continue;
-            }
-            if (item.fresh || (rocksBackend() && item.changed)) {
-                ctx.setCurrentKey(key);
-                state_->update(item.list);
-            }
-            if (rocksBackend() && !rocksdbCacheEnabled_) {
-                for (RowData* storedRow : *item.list) {
-                    delete storedRow;
-                }
-                delete item.list;
-            }
-        }
-    }
-
     void emit(RowData* row, RowKind kind, int64_t timestamp)
     {
         row->setRowKind(kind);
@@ -371,6 +360,31 @@ private:
         return outputVB;
     }
 
+    // Batch-end write-back. HEAP: only freshly created lists are handed to the
+    // state (in-place mutations of existing lists are already visible). RocksDB:
+    // every changed list is serialized back; without the falcon cache the loaded
+    // copies (list and rows) are freed afterwards - their bytes now live in the
+    // store. Retained key objects are freed by the caller after this loop.
+    void flushWorkItems()
+    {
+        for (RowData* key : retainedKeys_) {
+            WorkItem& item = workItems_[key];
+            if (item.list == nullptr) {
+                continue;
+            }
+            if (item.fresh || (rocksBackend() && item.changed)) {
+                this->setCurrentKey(key);
+                state_->update(item.list);
+            }
+            if (rocksBackend() && !rocksdbCacheEnabled_) {
+                for (RowData* storedRow : *item.list) {
+                    delete storedRow;
+                }
+                delete item.list;
+            }
+        }
+    }
+
     void cleanup()
     {
         collectedRows_.clear();
@@ -393,6 +407,7 @@ private:
     bool hasUpsertKey_ = false;
     std::vector<int32_t> compareIndices_;
     std::unique_ptr<KeySelector<K>> keySelector_ = nullptr;
+    nlohmann::json description_;
 
     ValueState<std::vector<RowData*>*>* state_ = nullptr;
     omnistream::StateType stateType_ = omnistream::StateType::HEAP;
@@ -407,7 +422,9 @@ private:
 };
 
 template <typename K>
-SinkUpsertMaterializer<K>::SinkUpsertMaterializer(const nlohmann::json& config)
+SinkUpsertMaterializer<K>::SinkUpsertMaterializer(const nlohmann::json& config, Output* output)
+    : TableStreamOperator<K>(output),
+      description_(config)
 {
     inputTypes_ = config["inputTypes"].get<std::vector<std::string>>();
     if (config.contains("grouping") && !config["grouping"].is_null()) {
@@ -459,9 +476,10 @@ SinkUpsertMaterializer<K>::SinkUpsertMaterializer(const nlohmann::json& config)
 }
 
 template <typename K>
-void SinkUpsertMaterializer<K>::open(const Configuration& context)
+void SinkUpsertMaterializer<K>::open()
 {
-    auto* runtimeContext = static_cast<StreamingRuntimeContext<K>*>(this->getRuntimeContext());
+    TableStreamOperator<K>::open();
+    auto* runtimeContext = AbstractStreamOperator<K>::getRuntimeContext();
     stateType_ = runtimeContext->getStateType();
     if (stateType_ != omnistream::StateType::HEAP && stateType_ != omnistream::StateType::ROCKSDB) {
         THROW_LOGIC_EXCEPTION("SinkUpsertMaterializer only supports heap and RocksDB state backends");
@@ -487,13 +505,11 @@ void SinkUpsertMaterializer<K>::open(const Configuration& context)
 }
 
 template <typename K>
-void SinkUpsertMaterializer<K>::processBatch(
-    omnistream::VectorBatch* inputBatch,
-    typename KeyedProcessFunction<K, RowData*, omnistream::VectorBatch*>::Context& ctx,
-    TimestampedCollector& out)
+void SinkUpsertMaterializer<K>::processBatch(StreamRecord* record)
 {
-    auto inputBatchGuard = std::unique_ptr<omnistream::VectorBatch>(inputBatch);
-    int rowCnt = inputBatchGuard->GetRowCount();
+    auto recordGuard = std::unique_ptr<StreamRecord>(record);
+    auto* inputBatch = reinterpret_cast<omnistream::VectorBatch*>(recordGuard->getValue());
+    int rowCnt = inputBatch->GetRowCount();
     cleanup();
 
     // Row-by-row materialization against a per-key working set: the first touch
@@ -504,10 +520,10 @@ void SinkUpsertMaterializer<K>::processBatch(
     // into the working list, retract uses it for the equality match. Emissions
     // keep the input schema and only rewrite the RowKind.
     for (int i = 0; i < rowCnt; i++) {
-        RowData* rawKey = keySelector_->getKey(inputBatchGuard.get(), i);
+        RowData* rawKey = keySelector_->getKey(inputBatch, i);
         auto it = workItems_.find(rawKey);
         if (it == workItems_.end()) {
-            ctx.setCurrentKey(rawKey);
+            this->setCurrentKey(rawKey);
             auto* list = state_->value();
             auto [inserted, ok] = workItems_.emplace(rawKey, WorkItem{list, false, false});
             retainedKeys_.push_back(rawKey);
@@ -516,8 +532,8 @@ void SinkUpsertMaterializer<K>::processBatch(
             delete rawKey;
         }
         WorkItem& item = it->second;
-        RowData* row = inputBatchGuard->extractRowData(i);
-        int64_t timestamp = inputBatchGuard->getTimestamp(i);
+        RowData* row = inputBatch->extractRowData(i);
+        int64_t timestamp = inputBatch->getTimestamp(i);
         if (isAccumulateMsg(row->getRowKind())) {
             processAccumulate(item, row, timestamp);
         } else {
@@ -526,12 +542,12 @@ void SinkUpsertMaterializer<K>::processBatch(
     }
 
     auto* outputVB = buildOutput();
-    out.collect(outputVB);
+    this->output->collect(new StreamRecord(outputVB));
 
     // Batch-end write-back (and release of RocksDB copies), then free the rows
     // replaced or removed from the state and the retract input rows that were
     // only used for the comparison - after the output batch is assembled.
-    flushWorkItems(ctx);
+    flushWorkItems();
     for (RowData* row : deleteAfterOutput_) {
         delete row;
     }

@@ -242,12 +242,11 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         return static_cast<TwoInputStreamOperator*>(op);
     } else if (uniqueName == OPERATOR_NAME_SINK_UPSERT_MATERIALIZER) {
         const auto description = opConfig.getDescription();
-        auto* func = new SinkUpsertMaterializer<RowData*>(description);
-        auto* op = new KeyedProcessOperator(func, chainOutput, description);
+        auto* op = new SinkUpsertMaterializer<RowData*>(description, chainOutput);
         op->setup();
         op->setDescription(description);
         op->setFlinkSavepointUnsupported(
-            "SinkUpsertMaterializer native state (comboId list + VectorBatch side tables) is not compatible with "
+            "SinkUpsertMaterializer native state serialization is not byte-compatible with "
             "Flink 'values' List<RowData> state");
         LOG("Operator SinkUpsertMaterializer address " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);
@@ -764,13 +763,16 @@ StreamOperator* StreamOperatorFactory::CreateSinkMaterializerOp(
 {
     auto description = opConfig.getDescription();
     nlohmann::json opDescriptionJSON = nlohmann::json::parse(description);
-    auto* func = new SinkUpsertMaterializer<RowData*>(opDescriptionJSON);
-    auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
+    // Standalone TableStreamOperator like Flink's SinkUpsertMaterializer (extends
+    // TableStreamOperator<RowData> implements OneInputStreamOperator); the keyed
+    // state backend is wired by AbstractStreamOperator::initializeState with the
+    // key serializer from the operator chain descriptor (sink primary key).
+    auto* op = new SinkUpsertMaterializer<RowData*>(opDescriptionJSON, chainOutput);
     op->setup(std::move(task));
     op->setDescription(opDescriptionJSON);
-    // SP-INTEROP: native 状态为 comboId 列表 + VectorBatch 侧表，与 Flink "values" List<RowData> 布局不兼容。
+    // SP-INTEROP: native 状态序列化与 Flink "values" List<RowData> 的字节级兼容性未验证。
     op->setFlinkSavepointUnsupported(
-        "SinkUpsertMaterializer native state (comboId list + VectorBatch side tables) is not compatible with "
+        "SinkUpsertMaterializer native state serialization is not byte-compatible with "
         "Flink 'values' List<RowData> state");
     LOG("Operator SinkUpsertMaterializer address " + std::to_string(reinterpret_cast<long>(op)));
     return static_cast<OneInputStreamOperator*>(op);

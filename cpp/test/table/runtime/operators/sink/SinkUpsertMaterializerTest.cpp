@@ -29,6 +29,7 @@
 #include "runtime/taskmanager/OmniRuntimeEnvironment.h"
 #include "runtime/state/EmbeddedRocksDBStateBackend.h"
 #include "streaming/api/operators/KeyedProcessOperator.h"
+#include "table/runtime/operators/TableStreamOperator.h"
 #include "streaming/api/operators/StreamOperatorFactory.h"
 #include "streaming/runtime/streamrecord/StreamRecord.h"
 #include "table/data/RowKind.h"
@@ -48,11 +49,11 @@ const std::string kDescription = R"DELIM({
     "inputUpsertKey": null
 })DELIM";
 
-using KeyedOp = KeyedProcessOperator<RowData*, RowData*, omnistream::VectorBatch*>;
+using MatOp = SinkUpsertMaterializer<RowData*>;
 
 enum class BackendKind { HEAP, ROCKSDB };
 
-KeyedOp* CreateMaterializer(BatchOutputTest* output, const std::string& description, BackendKind backend = BackendKind::HEAP)
+MatOp* CreateMaterializer(BatchOutputTest* output, const std::string& description, BackendKind backend = BackendKind::HEAP)
 {
     json desc = json::parse(description);
     OperatorConfig opConfig(
@@ -62,7 +63,7 @@ KeyedOp* CreateMaterializer(BatchOutputTest* output, const std::string& descript
         desc["outputTypes"],
         desc);
     omnistream::StreamOperatorFactory factory;
-    auto* keyedOp = dynamic_cast<KeyedOp*>(factory.createOperatorAndCollector(opConfig, output));
+    auto* keyedOp = dynamic_cast<MatOp*>(factory.createOperatorAndCollector(opConfig, output));
     EXPECT_NE(keyedOp, nullptr);
 
     auto* env = new omnistream::RuntimeEnvironmentV2();
@@ -359,7 +360,7 @@ namespace {
 
 // Add / retract lifecycle of one key plus a second key: +I / +U / re-emit
 // second-latest +U / -D / swallowed retract / +I again.
-void RunAddRetractLifecycle(KeyedOp* op, BatchOutputTest* output)
+void RunAddRetractLifecycle(MatOp* op, BatchOutputTest* output)
 {
     op->processBatch(new StreamRecord(MakeBatch({1}, {100}, {RowKind::INSERT})));
     auto* expect1 = MakeBatch({1}, {100}, {RowKind::INSERT});
@@ -398,7 +399,7 @@ void RunAddRetractLifecycle(KeyedOp* op, BatchOutputTest* output)
 
 // Three same-key rows in one batch (chaining through the per-key working set),
 // then middle removal (silent), latest removal (re-emit +U) and removal to empty (-D).
-void RunMultipleRowsInOneBatchAndMiddleRemoval(KeyedOp* op, BatchOutputTest* output)
+void RunMultipleRowsInOneBatchAndMiddleRemoval(MatOp* op, BatchOutputTest* output)
 {
     op->processBatch(new StreamRecord(MakeBatch(
         {3, 3, 3}, {10, 20, 30}, {RowKind::INSERT, RowKind::UPDATE_AFTER, RowKind::UPDATE_AFTER})));
@@ -432,7 +433,7 @@ const char* kUpsertKeyDescription = R"DELIM({
 
 // inputUpsertKey: replace-in-place on the upsert key, retract matches on the
 // projection, three accumulated rows then middle/latest/empty removals.
-void RunUpsertKeyReplace(KeyedOp* op, BatchOutputTest* output)
+void RunUpsertKeyReplace(MatOp* op, BatchOutputTest* output)
 {
     auto makeBatch = [](const std::vector<int64_t>& pk, const std::vector<int64_t>& uk,
                         const std::vector<int64_t>& val, const std::vector<RowKind>& kinds) {
@@ -487,7 +488,7 @@ void RunUpsertKeyReplace(KeyedOp* op, BatchOutputTest* output)
     EXPECT_EQ(300, col2()->GetValue(0));
 }
 
-void RunNullValuePreserved(KeyedOp* op, BatchOutputTest* output)
+void RunNullValuePreserved(MatOp* op, BatchOutputTest* output)
 {
     op->processBatch(new StreamRecord(MakeBatch({4}, {-1}, {RowKind::INSERT})));
     auto* actual = output->getVectorBatch();
