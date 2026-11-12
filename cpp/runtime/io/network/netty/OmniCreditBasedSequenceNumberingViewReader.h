@@ -10,6 +10,7 @@
  */
 #pragma once
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -51,11 +52,15 @@ public:
         std::shared_ptr<LocalNettyBufferPool> localNettyBufferPool = nullptr);
     ~OmniCreditBasedSequenceNumberingViewReader() override;
     void notifyDataAvailable() override;
+    // Called when serialized output becomes available, not when input merely arrives.
+    void SetDataAvailableCallback(std::function<void()> callback);
+    void Stop();
     void requestSubpartitionView(
         std::shared_ptr<ResultPartitionManager> resultPartitionManager,
         ResultPartitionIDPOD partitionId,
         int subPartitionId);
     int getAvailabilityAndBacklog();
+    int GetNextBufferType();
     void getNextBufferInternal();
     int getNextBuffer();
     void RecycleNettyBuffer(long address);
@@ -76,6 +81,9 @@ public:
     void SerializeVectorBatchBufferToRowData(VectorBatchBuffer* vectorBatchBuffer);
 
 private:
+    void DrainInputBuffers();
+    void EnqueueSerializedBatch(std::shared_ptr<SerializedBatchInfo> batch);
+    std::function<void()> dataAvailableCallback_;
     bool downStreamIsNative = true;
     std::atomic<bool> stopped_{false};
     std::shared_ptr<ResultSubpartitionView> subpartitionView;

@@ -71,6 +71,18 @@ JNIEXPORT void JNICALL
 Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader_resumeConsumption(
     JNIEnv* jniEnv, jobject, jlong);
 
+JNIEXPORT void JNICALL
+Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader_registerDataAvailableListener(
+    JNIEnv*, jobject, jlong);
+
+JNIEXPORT jint JNICALL
+Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader_getNextBufferType(
+    JNIEnv*, jobject, jlong);
+
+JNIEXPORT void JNICALL
+Java_org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader_stopNativeReader(
+    JNIEnv*, jobject, jlong);
+
 #ifdef __cplusplus
 }
 #endif
