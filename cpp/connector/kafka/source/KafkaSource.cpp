@@ -11,6 +11,7 @@
 
 #include "KafkaSource.h"
 #include "core/api/common/serialization/DeserializationFactory.h"
+#include "reader/deserializer/DynamicKafkaDeserializationSchema.h"
 
 KafkaSource::KafkaSource(nlohmann::json& opDescriptionJSON, bool isBatch) : isBatch(isBatch)
 {
@@ -28,8 +29,15 @@ KafkaSource::KafkaSource(nlohmann::json& opDescriptionJSON, bool isBatch) : isBa
         props.emplace(pair.first, pair.second);
     }
 
-    auto innerDeserializationSchema = DeserializationFactory::getDeserializationSchema(opDescriptionJSON);
-    deserializationSchema = KafkaRecordDeserializationSchema::valueOnly(innerDeserializationSchema);
+    if (opDescriptionJSON.value("upsertMode", false)) {
+        this->isBatch = true;
+        props["enable.auto.commit"] = "false";
+        props["commit.offsets.on.checkpoint"] = "false";
+        deserializationSchema = new DynamicKafkaDeserializationSchema(opDescriptionJSON);
+    } else {
+        auto innerDeserializationSchema = DeserializationFactory::getDeserializationSchema(opDescriptionJSON);
+        deserializationSchema = KafkaRecordDeserializationSchema::valueOnly(innerDeserializationSchema);
+    }
 
     if (props.find("group.id") == props.end()) {
         INFO_RELEASE("Offset commit on checkpoint is disabled because group.id is not specified");

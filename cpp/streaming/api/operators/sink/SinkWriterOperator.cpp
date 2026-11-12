@@ -116,13 +116,10 @@ void SinkWriterOperator::processBatch(StreamRecord* record)
         sinkWriter->write(row_input);
         delete row_input;
     } else {
-        // vectorbatch convert to rowdata
-        omnistream::VectorBatch* input = reinterpret_cast<omnistream::VectorBatch*>(record->getValue());
-        int rowCount = input->GetRowCount();
-        for (int row = 0; row < rowCount; ++row) {
-            sinkWriter->write(input, row);
+        std::unique_ptr<omnistream::VectorBatch> input(static_cast<omnistream::VectorBatch*>(record->getValue()));
+        for (int row = 0; row < input->GetRowCount(); ++row) {
+            sinkWriter->write(input.get(), row);
         }
-        delete input;
     }
 }
 

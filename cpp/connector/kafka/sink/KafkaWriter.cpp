@@ -29,6 +29,7 @@ KafkaWriter::KafkaWriter(
       deliveryGuarantee(deliveryGuarantee),
       transactionalIdPrefix(transactionalIdPrefix),
       description(description),
+      upsertMode(description.value("upsertMode", false)),
       limit(maxPushRecords)
 {
     Init();
@@ -38,10 +39,14 @@ KafkaWriter::KafkaWriter(
         INFO_RELEASE(errorMessage);
         throw std::invalid_argument("Kafka sink EXACTLY_ONCE delivery guarantee is not supported");
     }
-    if (description["batch"]) {
-        inputFields = description["inputFields"].get<std::vector<std::basic_string<char>>>();
-        inputTypes = description["inputTypes"].get<std::vector<std::basic_string<char>>>();
-        recordSerializer = new DynamicKafkaRecordSerializationSchema(inputFields, inputTypes);
+    if (description.value("batch", false)) {
+        if (upsertMode) {
+            recordSerializer = new DynamicKafkaRecordSerializationSchema(description);
+        } else {
+            inputFields = description["inputFields"].get<std::vector<std::string>>();
+            inputTypes = description["inputTypes"].get<std::vector<std::string>>();
+            recordSerializer = new DynamicKafkaRecordSerializationSchema(inputFields, inputTypes);
+        }
     }
 
     if (initContext != nullptr && initContext->getRestoredCheckpointId().has_value()) {
@@ -53,8 +58,23 @@ KafkaWriter::KafkaWriter(
         abortLingeringTransactions(states, lastCheckpointId);
     }
 
+    if (upsertMode) {
+        std::string error;
+        if (kafkaProducerConfig->set("partitioner", "murmur2_random", error) != RdKafka::Conf::CONF_OK ||
+            kafkaProducerConfig->set("max.in.flight.requests.per.connection", "1", error) != RdKafka::Conf::CONF_OK) {
+            throw std::runtime_error("Cannot configure upsert-kafka producer: " + error);
+        }
+    }
     currentProducer1 =
         std::make_shared<FlinkKafkaInternalProducer>(kafkaProducerConfig, std::to_string(producerIndexOne));
+    if (upsertMode) {
+        std::string error;
+        rd_topic1 = RdKafka::Topic::create(currentProducer1->getKafkaProducer(), topic, nullptr, error);
+        if (rd_topic1 == nullptr) {
+            throw std::runtime_error("Cannot open upsert-kafka topic: " + error);
+        }
+        return;
+    }
     currentProducer2 =
         std::make_shared<FlinkKafkaInternalProducer>(kafkaProducerConfig, std::to_string(producerIndexTwo));
     RdKafka::Conf* tconf = RdKafka::Conf::create(RdKafka::Conf::CONF_TOPIC);
@@ -69,19 +89,20 @@ KafkaWriter::KafkaWriter(
 
 KafkaWriter::~KafkaWriter()
 {
-    timer_worker_thread_flag.store(false);
+    if (!upsertMode) {
+        timer_worker_thread_flag.store(false);
+        omnistream::TimerThreadPool::GetTimerThreadPoolInstance()->cancel(taskId);
 
-    omnistream::TimerThreadPool::GetTimerThreadPoolInstance()->cancel(taskId);
+        {
+            std::lock_guard<std::mutex> lock(gMtx);
+        }
 
-    {
-        std::lock_guard<std::mutex> lock(gMtx);
-    }
+        stop_flag.store(true);
+        cv.notify_all();
 
-    stop_flag.store(true);
-    cv.notify_all();
-
-    if (worker_thread.joinable()) {
-        worker_thread.join();
+        if (worker_thread.joinable()) {
+            worker_thread.join();
+        }
     }
 
     delete kafkaWriterState;
@@ -125,6 +146,25 @@ void KafkaWriter::write(RowData* element)
 void KafkaWriter::write(omnistream::VectorBatch* input, int rowIndex)
 {
     checkAsyncProducerException();
+    if (upsertMode) {
+        // A single producer preserves the order of updates to the same Kafka key.
+        auto record = recordSerializer->serializeUpsert(input, rowIndex);
+        auto* producer = currentProducer1->getKafkaProducer();
+        auto status = producer->produce(
+            rd_topic1,
+            RdKafka::Topic::PARTITION_UA,
+            RdKafka::Producer::RK_MSG_COPY | RdKafka::Producer::RK_MSG_BLOCK,
+            record.value ? record.value->data() : nullptr,
+            record.value ? record.value->size() : 0,
+            record.key.data(),
+            record.key.size(),
+            nullptr);
+        if (status != RdKafka::ERR_NO_ERROR) {
+            throw std::runtime_error("Upsert Kafka producer failed: " + RdKafka::err2str(status));
+        }
+        producer->poll(0);
+        return;
+    }
     auto record = recordSerializer->Serialize(input, rowIndex);
     ProduceRecord(record);
 }
@@ -132,6 +172,10 @@ void KafkaWriter::write(omnistream::VectorBatch* input, int rowIndex)
 void KafkaWriter::Flush(bool endOfInput)
 {
     if (deliveryGuarantee != DeliveryGuarantee::NONE || endOfInput) {
+        if (upsertMode) {
+            currentProducer1->Flush();
+            return;
+        }
         checkAsyncProducerException();
         {
             std::unique_lock<std::mutex> gLock(gMtx);
@@ -280,6 +324,9 @@ void KafkaWriter::checkAsyncProducerException()
 void KafkaWriter::SetSubTaskIdx(int32_t subtaskIdx)
 {
     this->instanceId = subtaskIdx;
+    if (upsertMode) {
+        return;
+    }
     if (omnistream::BindCoreManager::GetInstance()->NeedBindSink()) {
         bindCore = omnistream::BindCoreManager::GetInstance()->GetSinkCore(subtaskIdx);
     }
@@ -316,6 +363,9 @@ void KafkaWriter::produce(
 
 std::vector<KafkaWriterState> KafkaWriter::snapshotState(long checkpointId)
 {
+    if (upsertMode) {
+        NOT_IMPL_EXCEPTION;
+    }
     Flush(true);
     if (deliveryGuarantee == DeliveryGuarantee::EXACTLY_ONCE) {
         auto currentProducer = getTransactionalProducer(checkpointId + 1);

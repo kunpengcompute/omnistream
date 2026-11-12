@@ -25,6 +25,7 @@
 #include "StreamGroupedReduceOperator.h"
 #include "table/runtime/operators/aggregate/GroupAggFunction.h"
 #include "table/runtime/operators/deduplicate/RowTimeDeduplicateFunction.h"
+#include "table/runtime/operators/deduplicate/ProcTimeDeduplicateKeepLastRowFunction.h"
 #include "streaming/api/operators/KeyedProcessOperator.h"
 #include "table/runtime/operators/join/stream/StreamingJoinOperator.h"
 #include "table/runtime/operators/join/stream/StreamingSemiAntiJoinOperator.h"
@@ -224,10 +225,9 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
         LOG("Operator WindowTableFunctionOperator address " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);
-    } else if (uniqueName == OPERATOR_NAME_WINDOW_INNER_JOIN ||
-               uniqueName == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
-               uniqueName == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN ||
-               uniqueName == OPERATOR_NAME_WINDOW_FULL_OUTER_JOIN) {
+    } else if (
+        uniqueName == OPERATOR_NAME_WINDOW_INNER_JOIN || uniqueName == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
+        uniqueName == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN || uniqueName == OPERATOR_NAME_WINDOW_FULL_OUTER_JOIN) {
         auto opDescriptionJSON = opConfig.getDescription();
         std::string joinType =
             opDescriptionJSON.contains("joinType") ? opDescriptionJSON["joinType"].get<std::string>() : "InnerJoin";
@@ -300,10 +300,9 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         return CreateProcessOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_CONSTRAINTENFORCER) {
         return CreateConstraintEnforcerOp(opDesc, chainOutput, task);
-    } else if (operatorID == OPERATOR_NAME_WINDOW_INNER_JOIN ||
-               operatorID == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
-               operatorID == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN ||
-               operatorID == OPERATOR_NAME_WINDOW_FULL_OUTER_JOIN) {
+    } else if (
+        operatorID == OPERATOR_NAME_WINDOW_INNER_JOIN || operatorID == OPERATOR_NAME_WINDOW_LEFT_OUTER_JOIN ||
+        operatorID == OPERATOR_NAME_WINDOW_RIGHT_OUTER_JOIN || operatorID == OPERATOR_NAME_WINDOW_FULL_OUTER_JOIN) {
         return CreateWindowJoinOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_WINDOW_TABLE_FUNCTION) {
         return CreateWindowTableFunctionOp(opDesc, chainOutput, task);
@@ -446,6 +445,14 @@ StreamOperator* StreamOperatorFactory::CreateKeyedProcessOp(
     auto description = opConfig.getDescription();
     nlohmann::json opDescriptionJSON = nlohmann::json::parse(description);
 
+    if (opDescriptionJSON.value("processFunction", "") == "ProcTimeDeduplicateKeepLastRowFunction") {
+        auto* function = new ProcTimeDeduplicateKeepLastRowFunction(opDescriptionJSON);
+        auto* op = new KeyedProcessOperator(function, chainOutput, opDescriptionJSON);
+        op->setup(std::move(task));
+        op->setDescription(opDescriptionJSON);
+        op->setFlinkSavepointUnsupported("ChangelogNormalize savepoints are unsupported");
+        return static_cast<OneInputStreamOperator*>(op);
+    }
     if (opConfig.getName()[0] == 'D') {
         LOG("Deduplicate description: " << opConfig.getDescription());
         RowTimeDeduplicateFunction* func = new RowTimeDeduplicateFunction(opDescriptionJSON);
@@ -657,6 +664,10 @@ StreamOperator* StreamOperatorFactory::CreateSourceOp(
             ProcessingTimeService* timeService = task->createProcessingTimeService();
             auto* op = new SourceOperator(chainOutput, opDescriptionJSON, source, timeService);
             op->setup(std::move(task));
+            if (opDescriptionJSON.value("upsertMode", false)) {
+                op->setFlinkSavepointUnsupported("Upsert Kafka source savepoints are unsupported");
+                return op;
+            }
             // SP-INTEROP: SourceOperator 无 managed keyed state，Omni 原生格式即为 Flink 兼容。
             op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
             LOG("Operator SourceOperator address " + std::to_string(reinterpret_cast<long>(op)));
@@ -987,7 +998,9 @@ StreamOperator* StreamOperatorFactory::CreateSinkWriterOp(
 
         LOG("kafkaProducerConfig set key:" << key << " value:" << value);
     }
-    std::string transactionalIdPrefix = opDescriptionJSON["transactionalIdPrefix"];
+    std::string transactionalIdPrefix = opDescriptionJSON.value("upsertMode", false)
+                                            ? std::string{}
+                                            : opDescriptionJSON["transactionalIdPrefix"].get<std::string>();
     LOG("transactionalIdPrefix:" + transactionalIdPrefix);
     std::string topic = opDescriptionJSON["topic"];
     LOG("topic:" + topic);
@@ -996,6 +1009,10 @@ StreamOperator* StreamOperatorFactory::CreateSinkWriterOp(
 
     auto* op = new SinkWriterOperator(kafkaSink, opDescriptionJSON);
     op->setProcessingTimeService(processingTimeService);
+    if (opDescriptionJSON.value("upsertMode", false)) {
+        op->setFlinkSavepointUnsupported("Upsert Kafka sink savepoints are unsupported");
+        return static_cast<OneInputStreamOperator*>(op);
+    }
     // SP-INTEROP: SinkWriter 使用 operator state（transactional IDs），无需 keyed state 格式转换，Omni 原生格式即为
     // Flink 兼容。
     op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);

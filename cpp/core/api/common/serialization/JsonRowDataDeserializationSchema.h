@@ -17,10 +17,10 @@
 
 class JsonRowDataDeserializationSchema : public DeserializationSchema {
 public:
-    explicit JsonRowDataDeserializationSchema(nlohmann::json& opDescriptionJSON)
-        : fieldNames(opDescriptionJSON["outputNames"].get<std::vector<std::string>>())
+    explicit JsonRowDataDeserializationSchema(const nlohmann::json& opDescriptionJSON)
+        : fieldNames(opDescriptionJSON.at("outputNames").get<std::vector<std::string>>())
     {
-        auto outputTypes = opDescriptionJSON["outputTypes"].get<std::vector<std::string>>();
+        auto outputTypes = opDescriptionJSON.at("outputTypes").get<std::vector<std::string>>();
         std::regex pattern(R"(DECIMAL\d*\((\d+),\s*(\d+)\))");
         std::smatch match;
         for (std::string type : outputTypes) {
@@ -63,10 +63,14 @@ public:
 
     void setColValue(int rowIndex, int colIndex, omnistream::VectorBatch* vectorBatch, nlohmann::json& node)
     {
-        auto& type = fieldTypes[colIndex];
-        auto& name = fieldNames[colIndex];
-        auto fieldIt = node.find(name);
-        if (fieldIt == node.end() || fieldIt->is_null()) {
+        auto field = node.find(fieldNames[colIndex]);
+        setColValue(rowIndex, colIndex, vectorBatch, field == node.end() ? nullptr : &*field);
+    }
+
+    void setColValue(int rowIndex, int colIndex, omnistream::VectorBatch* vectorBatch, const nlohmann::json* fieldIt)
+    {
+        auto type = fieldTypes[colIndex];
+        if (fieldIt == nullptr || fieldIt->is_null()) {
             vectorBatch->Get(colIndex)->SetNull(rowIndex);
             return;
         }
@@ -85,13 +89,13 @@ public:
                 vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<int64_t>());
                 break;
             }
-            case omniruntime::type::DataTypeId::OMNI_DOUBLE:{
+            case omniruntime::type::DataTypeId::OMNI_DOUBLE: {
                 vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<double>());
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE: {
-                vectorBatch->SetValueAt(colIndex, rowIndex,
-                                        TimestampData::stringToMillisOfDay(fieldIt->get<std::string>()));
+                vectorBatch->SetValueAt(
+                    colIndex, rowIndex, TimestampData::stringToMillisOfDay(fieldIt->get<std::string>()));
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:

@@ -9,29 +9,28 @@
  * See the Mulan PSL v2 for more details.
  */
 
-#ifndef OMNISTREAM_DYNAMICKAFKADESERIALIZATIONSCHEMA_H
-#define OMNISTREAM_DYNAMICKAFKADESERIALIZATIONSCHEMA_H
+#pragma once
 
-#include "core/api/common/serialization/DeserializationSchema.h"
+#include <nlohmann/json.hpp>
+#include "KafkaRecordDeserializationSchema.h"
+#include "core/api/common/serialization/JsonRowDataDeserializationSchema.h"
+#include "table/data/vectorbatch/VectorBatch.h"
 
-class DynamicKafkaDeserializationSchema : public DeserializationSchema {
+class DynamicKafkaDeserializationSchema : public KafkaRecordDeserializationSchema {
 public:
-    explicit DynamicKafkaDeserializationSchema(DeserializationSchema* valueDeserialization)
-        : valueDeserialization(valueDeserialization)
-    {
-    }
+    explicit DynamicKafkaDeserializationSchema(const nlohmann::json& description);
 
-    void Open() override
+    void open() override
     {
     }
-
-    bool isEndOfStream(const void* nextElement) override
-    {
-        return false;
-    }
+    void deserialize(RdKafka::Message* record, Collector* out) override;
+    void deserialize(std::vector<RdKafka::Message*> records, Collector* out) override;
 
 private:
-    DeserializationSchema* valueDeserialization;
+    std::vector<omniruntime::type::DataTypeId> types;
+    JsonRowDataDeserializationSchema rowDeserializer;
+    std::vector<int> keyProjection;
+    std::vector<int> valueProjection;
+    std::vector<std::string> keyNames;
+    std::vector<std::string> valueNames;
 };
-
-#endif // OMNISTREAM_DYNAMICKAFKADESERIALIZATIONSCHEMA_H
