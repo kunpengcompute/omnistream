@@ -62,14 +62,22 @@ TEST(SourceTestTest, JsonRowDataDeserializationSchemaHandlesNullStringField)
 
 TEST(SourceTestTest, JsonRowDataDeserializationSchemaKeepsTimestampsWhenSkippingBadMessages)
 {
-    nlohmann::json description = {{"outputNames", {"i", "id", "ts", "text"}},
-        {"outputTypes", {"INTEGER", "BIGINT", "TIMESTAMP_WITHOUT_TIME_ZONE(3)", "VARCHAR(2147483647)"}},
-        {"ignoreParseErrors", true}};
+    // Legacy headers can define true as 1, so explicitly construct a JSON boolean.
+    nlohmann::json description = {
+        {"outputNames", {"i", "id", "ts", "text", "ltz"}},
+        {"outputTypes",
+         {"INTEGER",
+          "BIGINT",
+          "TIMESTAMP_WITHOUT_TIME_ZONE(3)",
+          "VARCHAR(2147483647)",
+          "TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)"}},
+        {"ignoreParseErrors", static_cast<bool>(true)}};
     JsonRowDataDeserializationSchema schema(description);
     const std::vector<std::string> records = {
-        R"({"i":" +2147483647 ","id":"-9223372036854775808","ts":"2026-11-03 10:59:32.628","text":"NULL"})",
+        R"({"i":" +2147483647 ","id":"-9223372036854775808","ts":"2026-11-03 10:59:32.628","text":"NULL",)"
+        R"("ltz":"2026-11-03 10:59:32.628Z"})",
         "{",
-        R"({"i":"2147483648","id":"123x","ts":"39:41.7","text":"''"})",
+        R"({"i":"2147483648","id":"123x","ts":"39:41.7","text":"''","ltz":"2026-11-03 10:59:32.628"})",
         R"({"i":123.75,"id":9223372036854775808,"ts":null,"text":null})",
         "null",
     };
@@ -86,7 +94,9 @@ TEST(SourceTestTest, JsonRowDataDeserializationSchemaKeepsTimestampsWhenSkipping
         {
             batch.reset(static_cast<omnistream::VectorBatch*>(record));
         }
-        void close() override {}
+        void close() override
+        {
+        }
         std::unique_ptr<omnistream::VectorBatch> batch;
     } collector;
 
@@ -99,15 +109,17 @@ TEST(SourceTestTest, JsonRowDataDeserializationSchemaKeepsTimestampsWhenSkipping
     EXPECT_EQ(batch.getTimestamp(2), 40);
     auto* integers = static_cast<omniruntime::vec::Vector<int32_t>*>(batch.Get(0));
     auto* longs = static_cast<omniruntime::vec::Vector<int64_t>*>(batch.Get(1));
-    auto* text = static_cast<omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(
-        batch.Get(3));
+    auto* text =
+        static_cast<omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(batch.Get(3));
     EXPECT_EQ(integers->GetValue(0), INT32_MAX);
     EXPECT_EQ(longs->GetValue(0), INT64_MIN);
     EXPECT_FALSE(batch.Get(2)->IsNull(0));
+    EXPECT_FALSE(batch.Get(4)->IsNull(0));
     EXPECT_EQ(text->GetValue(0), "NULL");
     EXPECT_TRUE(integers->IsNull(1));
     EXPECT_TRUE(longs->IsNull(1));
     EXPECT_TRUE(batch.Get(2)->IsNull(1));
+    EXPECT_TRUE(batch.Get(4)->IsNull(1));
     EXPECT_EQ(text->GetValue(1), "''");
     EXPECT_EQ(integers->GetValue(2), 123);
     EXPECT_TRUE(longs->IsNull(2));

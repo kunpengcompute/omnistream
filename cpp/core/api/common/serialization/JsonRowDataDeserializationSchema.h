@@ -11,19 +11,24 @@
 
 #pragma once
 
-#include "table/types/logical/LogicalType.h"
 #include "core/api/common/serialization/DeserializationSchema.h"
+#include "table/types/logical/LogicTypeUtils.h"
+#include "table/types/logical/LogicalType.h"
 
 class JsonRowDataDeserializationSchema : public DeserializationSchema {
 public:
     explicit JsonRowDataDeserializationSchema(nlohmann::json& opDescriptionJSON)
         : fieldNames(opDescriptionJSON["outputNames"].get<std::vector<std::string>>()),
-          ignoreParseErrors(opDescriptionJSON.value("ignoreParseErrors", false)),
-          failOnMissingField(opDescriptionJSON.value("failOnMissingField", false))
+          ignoreParseErrors(opDescriptionJSON.value<bool>("ignoreParseErrors", false)),
+          failOnMissingField(opDescriptionJSON.value<bool>("failOnMissingField", false))
     {
         auto outputTypes = opDescriptionJSON["outputTypes"].get<std::vector<std::string>>();
-        for (std::string type : outputTypes) {
-            fieldTypes.push_back(LogicalType::flinkTypeToOmniTypeId(type));
+        for (const auto& type : outputTypes) {
+            if (LogicTypeUtils::startsWith(type, "TIMESTAMP_WITH_LOCAL_TIME_ZONE(")) {
+                fieldTypes.push_back(DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE);
+            } else {
+                fieldTypes.push_back(LogicalType::flinkTypeToOmniTypeId(type));
+            }
         }
     }
 
@@ -35,8 +40,11 @@ public:
 
     void* deserialize(std::vector<const uint8_t*>& messageVec, std::vector<size_t>& lengthVec) override;
 
-    void deserialize(std::vector<const uint8_t*>& messageVec, std::vector<size_t>& lengthVec,
-        std::vector<int64_t>& timeVec, Collector* out) override;
+    void deserialize(
+        std::vector<const uint8_t*>& messageVec,
+        std::vector<size_t>& lengthVec,
+        std::vector<int64_t>& timeVec,
+        Collector* out) override;
 
     bool isEndOfStream(const void* nextElement) override
     {
@@ -44,8 +52,10 @@ public:
     }
 
 private:
-    std::unique_ptr<omnistream::VectorBatch> deserializeBatch(const std::vector<const uint8_t*>& messages,
-        const std::vector<size_t>& lengths, const std::vector<int64_t>& timestamps = {});
+    std::unique_ptr<omnistream::VectorBatch> deserializeBatch(
+        const std::vector<const uint8_t*>& messages,
+        const std::vector<size_t>& lengths,
+        const std::vector<int64_t>& timestamps = {});
     void setColValue(int row, int column, omnistream::VectorBatch& batch, const nlohmann::json& value);
     void handleFieldError(int row, int column, omnistream::VectorBatch& batch, const std::exception& error);
 

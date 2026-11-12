@@ -90,8 +90,11 @@ void* JsonRowDataDeserializationSchema::deserialize(
     return deserializeBatch(messageVec, lengthVec).release();
 }
 
-void JsonRowDataDeserializationSchema::deserialize(std::vector<const uint8_t*>& messageVec,
-    std::vector<size_t>& lengthVec, std::vector<int64_t>& timeVec, Collector* out)
+void JsonRowDataDeserializationSchema::deserialize(
+    std::vector<const uint8_t*>& messageVec,
+    std::vector<size_t>& lengthVec,
+    std::vector<int64_t>& timeVec,
+    Collector* out)
 {
     auto batch = deserializeBatch(messageVec, lengthVec, timeVec);
     if (batch) {
@@ -100,7 +103,8 @@ void JsonRowDataDeserializationSchema::deserialize(std::vector<const uint8_t*>& 
 }
 
 std::unique_ptr<omnistream::VectorBatch> JsonRowDataDeserializationSchema::deserializeBatch(
-    const std::vector<const uint8_t*>& messages, const std::vector<size_t>& lengths,
+    const std::vector<const uint8_t*>& messages,
+    const std::vector<size_t>& lengths,
     const std::vector<int64_t>& timestamps)
 {
     // Keep the original message index so skipped payloads do not shift Kafka timestamps.
@@ -112,7 +116,8 @@ std::unique_ptr<omnistream::VectorBatch> JsonRowDataDeserializationSchema::deser
         }
         auto record = nlohmann::json::parse(
             std::string_view(reinterpret_cast<const char*>(messages[index]), lengths[index]),
-            nullptr, !ignoreParseErrors);
+            nullptr,
+            !ignoreParseErrors);
         if (record.is_null()) {
             continue;
         }
@@ -148,6 +153,8 @@ std::unique_ptr<omnistream::VectorBatch> JsonRowDataDeserializationSchema::deser
                 setColValue(static_cast<int>(row), static_cast<int>(column), *batch, *field);
             } catch (const nlohmann::json::exception& error) {
                 handleFieldError(row, column, *batch, error);
+            } catch (const std::invalid_argument& error) {
+                handleFieldError(row, column, *batch, error);
             } catch (const std::runtime_error& error) {
                 handleFieldError(row, column, *batch, error);
             }
@@ -170,15 +177,9 @@ void JsonRowDataDeserializationSchema::setColValue(
 {
     using omniruntime::type::DataTypeId;
     switch (fieldTypes[column]) {
-        case DataTypeId::OMNI_BOOLEAN:
-            batch.SetValueAt(column, row, value.get<bool>());
-            break;
-        case DataTypeId::OMNI_INT:
-            batch.SetValueAt(column, row, readInteger<int32_t>(value));
-            break;
-        case DataTypeId::OMNI_LONG:
-            batch.SetValueAt(column, row, readInteger<int64_t>(value));
-            break;
+        case DataTypeId::OMNI_BOOLEAN: batch.SetValueAt(column, row, value.get<bool>()); break;
+        case DataTypeId::OMNI_INT: batch.SetValueAt(column, row, readInteger<int32_t>(value)); break;
+        case DataTypeId::OMNI_LONG: batch.SetValueAt(column, row, readInteger<int64_t>(value)); break;
         case DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
             batch.SetValueAt(column, row, TimestampData::stringToMillisOfDay(value.get<std::string>()));
             break;
@@ -187,18 +188,19 @@ void JsonRowDataDeserializationSchema::setColValue(
             batch.SetValueAt(column, row, TimestampData::stringToEpochMillis(value.get<std::string>()));
             break;
         case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
-            batch.SetValueAt(column, row, TimestampData::fromLocalTimeString(value.get<std::string>()).getMillisecond());
+            batch.SetValueAt(
+                column, row, TimestampData::fromLocalTimeString(value.get<std::string>()).getMillisecond());
             break;
         case DataTypeId::OMNI_CHAR:
         case DataTypeId::OMNI_VARCHAR: {
-            auto* vector = reinterpret_cast<
-                omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(batch.Get(column));
+            auto* vector =
+                reinterpret_cast<omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(
+                    batch.Get(column));
             const std::string text = value.is_string() ? value.get<std::string>() : value.dump();
             std::string_view view(text);
             vector->SetValue(row, view);
             break;
         }
-        default:
-            throw std::logic_error("Unsupported JSON field type");
+        default: throw std::logic_error("Unsupported JSON field type");
     }
 }
