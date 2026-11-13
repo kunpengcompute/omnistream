@@ -34,6 +34,7 @@ inline const char* flinkSavepointAdaptorTypeName(FlinkSavepointAdaptorType type)
         case FlinkSavepointAdaptorType::StreamingJoinNoUniqueKeyAdaptor: return "StreamingJoinNoUniqueKeyAdaptor";
         case FlinkSavepointAdaptorType::StreamingLeftOuterJoinNoUniqueKeyAdaptor:
             return "StreamingLeftOuterJoinNoUniqueKeyAdaptor";
+        case FlinkSavepointAdaptorType::GroupAggAdaptor: return "GroupAggAdaptor";
         default: return "Unknown";
     }
 }
