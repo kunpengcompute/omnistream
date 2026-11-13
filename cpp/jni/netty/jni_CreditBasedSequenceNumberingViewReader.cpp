@@ -13,12 +13,78 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <memory>
+#include "common/global.h"
 #include "common.h"
 #include "org_apache_flink_runtime_io_network_netty_OmniCreditBasedSequenceNumberingViewReader.h"
 #include "runtime/io/network/netty/OmniCreditBasedSequenceNumberingViewReader.h"
 #include "runtime/executiongraph/descriptor/ResultPartitionIDPOD.h"
 
 namespace {
+class ReaderNotificationThreadAttachment {
+public:
+    ~ReaderNotificationThreadAttachment()
+    {
+        // JNI_OnUnload clears g_OmniStreamJVM before the VM becomes unavailable. Do not use the
+        // cached JavaVM pointer after that point: native notification threads can outlive a reader
+        // and may be torn down late during TaskManager shutdown.
+        if (attachedByThisThread_ && jvm_ && jvm_ == g_OmniStreamJVM) {
+            if (jvm_->DetachCurrentThread() != JNI_OK) {
+                ERROR_RELEASE("Failed to detach native reader notification thread from JVM");
+            }
+        }
+    }
+
+    JNIEnv* GetEnv(JavaVM* jvm)
+    {
+        if (!jvm || jvm != g_OmniStreamJVM) {
+            ReportFailureOnce("Native reader notification JVM is no longer available");
+            return nullptr;
+        }
+        if (jvm_ && jvm_ != jvm) {
+            ReportFailureOnce("Native reader notification thread is associated with another JVM");
+            return nullptr;
+        }
+
+        JNIEnv* env = nullptr;
+        const jint status = jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_8);
+        if (status == JNI_OK) {
+            failureReported_ = false;
+            return env;
+        }
+        if (status != JNI_EDETACHED) {
+            ReportFailureOnce("Failed to get JNI environment for native reader notification thread");
+            return nullptr;
+        }
+
+        // This attachment is intentionally reused for the lifetime of the native notification
+        // thread. A daemon attachment must not keep the JVM alive during shutdown.
+        if (jvm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) {
+            ReportFailureOnce("Failed to attach native reader notification thread to JVM");
+            return nullptr;
+        }
+
+        jvm_ = jvm;
+        attachedByThisThread_ = true;
+        failureReported_ = false;
+        return env;
+    }
+
+private:
+    void ReportFailureOnce(const char* message)
+    {
+        if (!failureReported_) {
+            ERROR_RELEASE(message);
+            failureReported_ = true;
+        }
+    }
+
+    JavaVM* jvm_ = nullptr;
+    bool attachedByThisThread_ = false;
+    bool failureReported_ = false;
+};
+
+thread_local ReaderNotificationThreadAttachment readerNotificationThreadAttachment;
+
 // A copied callback keeps the Java reference alive until an in-flight notification returns.
 class JavaReaderNotification {
 public:
@@ -40,7 +106,7 @@ public:
         if (env && reader_) {
             env->DeleteGlobalRef(reader_);
         }
-        if (attached) {
+        if (attached && jvm_ == g_OmniStreamJVM) {
             jvm_->DetachCurrentThread();
         }
     }
@@ -52,8 +118,7 @@ public:
 
     void Notify()
     {
-        bool attached = false;
-        JNIEnv* env = GetEnv(attached);
+        JNIEnv* env = readerNotificationThreadAttachment.GetEnv(jvm_);
         if (env) {
             env->CallVoidMethod(reader_, method_);
             if (env->ExceptionCheck()) {
@@ -62,18 +127,19 @@ public:
                 ERROR_RELEASE("Failed to notify Java network reader");
             }
         }
-        if (attached) {
-            jvm_->DetachCurrentThread();
-        }
     }
 
 private:
     JNIEnv* GetEnv(bool& attached)
     {
+        if (!jvm_ || jvm_ != g_OmniStreamJVM) {
+            return nullptr;
+        }
+
         JNIEnv* env = nullptr;
         const jint status = jvm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_8);
         if (status == JNI_EDETACHED) {
-            if (jvm_->AttachCurrentThread(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) {
+            if (jvm_->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) {
                 return nullptr;
             }
             attached = true;
