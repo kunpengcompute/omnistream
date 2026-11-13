@@ -13,6 +13,9 @@
 
 #include "State.h"
 
+class RowData;
+class Object;
+
 /**
  * T: such as Object*
  * */

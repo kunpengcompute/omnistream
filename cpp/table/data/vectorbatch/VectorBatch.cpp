@@ -187,15 +187,19 @@ RowData* VectorBatch::extractRowData(int rowIndex)
             continue;
         }
         auto typeId = col->GetTypeId();
-        // It is a omniruntime type
-        if (typeId < OMNI_INVALID && rowSerializerCenter[typeId] != nullptr) {
-            rowSerializerCenter[typeId](col, rowIndex, outRow, colIndex);
-        } else if (
+        const int typeIdInt = static_cast<int>(typeId);
+        // TIME/TIMESTAMP variants are stored as int64 millis and share the long serializer.
+        if (typeId == DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE ||
             typeId == DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE ||
-            typeId == omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE) {
+            typeId == DataTypeId::OMNI_TIMESTAMP_WITH_TIME_ZONE ||
+            typeId == DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE) {
             rowSerializerCenter[OMNI_LONG](col, rowIndex, outRow, colIndex);
+        } else if (
+            typeIdInt >= 0 && typeIdInt < static_cast<int>(rowSerializerCenter.size()) &&
+            rowSerializerCenter[typeIdInt] != nullptr) {
+            rowSerializerCenter[typeIdInt](col, rowIndex, outRow, colIndex);
         } else {
-            THROW_RUNTIME_ERROR("extractRowData Data type not supported: " << typeId);
+            THROW_RUNTIME_ERROR("extractRowData Data type not supported: " << typeIdInt);
         }
     }
     // Set the row kind using the row kinds stored in the batch.

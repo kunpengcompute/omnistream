@@ -231,8 +231,11 @@ KeySelector<K>::KeySelector(const std::vector<int32_t>& keyColTypeIds, const std
                 serializers.push_back(this->VarcharSerializer);
                 deserializers.push_back(omniruntime::op::vectorDeSerializerCenter[typeId]);
             } else if (
+                typeId == omniruntime::type::OMNI_TIME_WITHOUT_TIME_ZONE ||
                 typeId == omniruntime::type::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE ||
+                typeId == omniruntime::type::OMNI_TIMESTAMP_WITH_TIME_ZONE ||
                 typeId == omniruntime::type::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE) {
+                // TIME/TIMESTAMP variants are stored as int64 millis and share the long serializer.
                 serializers.push_back(omniruntime::op::vectorSerializerCenter[omniruntime::type::OMNI_LONG]);
                 deserializers.push_back(omniruntime::op::vectorDeSerializerCenter[omniruntime::type::OMNI_LONG]);
             } else if (typeId < omniruntime::type::OMNI_INVALID) {
@@ -253,17 +256,21 @@ KeySelector<K>::KeySelector(const std::vector<int32_t>& keyColTypeIds, const std
             if (typeId == omniruntime::type::OMNI_VARCHAR || typeId == omniruntime::type::OMNI_CHAR) {
                 m_canReuseKey = false;
             }
-            if (typeId < omniruntime::type::OMNI_INVALID) {
-                // If it is one of the old omniruntime types
-                rowSerializers.push_back(rowSerializerCenter[typeId]);
-                rowDeserializers.push_back(rowDeserializerCenter[typeId]);
-            } else if (
+            const int typeIdInt = static_cast<int>(typeId);
+            if (typeId == omniruntime::type::OMNI_TIME_WITHOUT_TIME_ZONE ||
                 typeId == omniruntime::type::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE ||
+                typeId == omniruntime::type::OMNI_TIMESTAMP_WITH_TIME_ZONE ||
                 typeId == omniruntime::type::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE) {
+                // TIME/TIMESTAMP variants are stored as int64 millis and share the long serializer.
                 rowSerializers.push_back(rowSerializerCenter[omniruntime::type::OMNI_LONG]);
                 rowDeserializers.push_back(rowDeserializerCenter[omniruntime::type::OMNI_LONG]);
+            } else if (
+                typeIdInt >= 0 && typeIdInt < static_cast<int>(rowSerializerCenter.size()) &&
+                rowSerializerCenter[typeIdInt] != nullptr) {
+                rowSerializers.push_back(rowSerializerCenter[typeIdInt]);
+                rowDeserializers.push_back(rowDeserializerCenter[typeIdInt]);
             } else {
-                THROW_LOGIC_EXCEPTION("Key type not supported, typeId: " << typeId);
+                THROW_LOGIC_EXCEPTION("Key type not supported, typeId: " << typeIdInt);
             }
         }
 

@@ -14,6 +14,7 @@
 #include <tuple>
 #include <regex>
 #include "core/api/common/serialization/DeserializationSchema.h"
+#include "OmniOperatorJIT/core/src/type/TimestampConversion.h"
 
 class JsonRowDataDeserializationSchema : public DeserializationSchema {
 public:
@@ -80,9 +81,26 @@ public:
                 vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<bool>());
                 break;
             }
-            case omniruntime::type::DataTypeId::OMNI_INT:
-            case omniruntime::type::DataTypeId::OMNI_DATE32: {
+            case omniruntime::type::DataTypeId::OMNI_INT: {
                 vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<int32_t>());
+                break;
+            }
+            case omniruntime::type::DataTypeId::OMNI_DATE32: {
+                // Flink JSON format serializes DATE as an ISO-8601 string (e.g. "2024-01-01"),
+                // so parse the string form; keep numeric epoch-days support for compatibility.
+                int32_t epochDays;
+                if (fieldIt->is_number()) {
+                    epochDays = fieldIt->get<int32_t>();
+                } else if (fieldIt->is_string()) {
+                    auto result = omniruntime::type::util::fromDateString(fieldIt->get<std::string>());
+                    if (result.hasError()) {
+                        throw std::runtime_error("invalid date value: " + fieldIt->dump());
+                    }
+                    epochDays = result.value();
+                } else {
+                    throw std::runtime_error("invalid date value: " + fieldIt->dump());
+                }
+                vectorBatch->SetValueAt(colIndex, rowIndex, epochDays);
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_LONG: {

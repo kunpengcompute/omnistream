@@ -42,7 +42,15 @@ private:
     std::vector<omniruntime::type::DataTypeId> types;
     KeySelector<RowData*> keySelector;
     bool generateUpdateBefore;
+    // Flink ProcTimeDeduplicateKeepLastRowFunction 的构造标志：inputInsertOnly 区分
+    // ChangelogNormalize（false，走 processLastRowOnChangelog）与 append-only proc-time
+    // Deduplicate（true，走 processLastRowOnProcTime）；generateInsert 仅 proc-time 分支使用。
+    bool inputInsertOnly = false;
+    bool generateInsert = true;
     ValueState<RowData*>* state = nullptr;
     bool heapState = false;
     RocksdbValueState<RowData*, VoidNamespace, RowData*>* rocksdbState = nullptr;
+
+    void processBatchChangelog(omnistream::VectorBatch* input, Context& ctx, TimestampedCollector& out);
+    void processBatchInsertOnly(omnistream::VectorBatch* input, Context& ctx, TimestampedCollector& out);
 };
