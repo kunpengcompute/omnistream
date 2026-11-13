@@ -567,16 +567,29 @@ KeySelector<K>* OmniStreamTask::buildKeySelector(std::vector<KeyFieldInfoPOD>& k
     std::vector<int> keyTypes;
     for (auto& keyField : keyFields) {
         keyCols.emplace_back(keyField.getFieldIndex());
-        if (keyField.getFieldTypeName() == "BIGINT") {
+        const auto& fieldTypeName = keyField.getFieldTypeName();
+        if (fieldTypeName == "BIGINT") {
             keyTypes.emplace_back(omniruntime::type::OMNI_LONG);
-        } else if (keyField.getFieldTypeName() == "VARCHAR") {
+        } else if (fieldTypeName == "VARCHAR") {
             keyTypes.emplace_back(omniruntime::type::OMNI_VARCHAR);
-        } else if (keyField.getFieldTypeName() == "INTEGER") {
+        } else if (fieldTypeName == "INTEGER") {
             keyTypes.emplace_back(omniruntime::type::OMNI_INT);
-        } else if (keyField.getFieldTypeName() == "OMNI_TIME_WITHOUT_TIME_ZONE") {
+        } else if (fieldTypeName == "BOOLEAN") {
+            keyTypes.emplace_back(omniruntime::type::OMNI_BOOLEAN);
+        } else if (fieldTypeName == "CHAR") {
+            keyTypes.emplace_back(omniruntime::type::OMNI_CHAR);
+        } else if (fieldTypeName == "DATE") {
+            keyTypes.emplace_back(omniruntime::type::OMNI_DATE32);
+        } else if (fieldTypeName == "TIME_WITHOUT_TIME_ZONE") {
             keyTypes.emplace_back(omniruntime::type::OMNI_TIME_WITHOUT_TIME_ZONE);
+        } else if (fieldTypeName == "TIMESTAMP_WITHOUT_TIME_ZONE") {
+            keyTypes.emplace_back(omniruntime::type::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE);
+        } else if (fieldTypeName == "TIMESTAMP_WITH_TIME_ZONE") {
+            keyTypes.emplace_back(omniruntime::type::OMNI_TIMESTAMP_WITH_TIME_ZONE);
+        } else if (fieldTypeName == "TIMESTAMP_WITH_LOCAL_TIME_ZONE") {
+            keyTypes.emplace_back(omniruntime::type::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE);
         } else {
-            THROW_LOGIC_EXCEPTION("Not supported field type: " << keyField.getFieldTypeName());
+            THROW_LOGIC_EXCEPTION("Not supported field type: " << fieldTypeName);
         }
     }
     return new KeySelector<BinaryRowData*>(keyTypes, keyCols);
