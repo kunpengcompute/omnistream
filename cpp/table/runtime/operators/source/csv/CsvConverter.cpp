@@ -285,12 +285,31 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows)
     return convert(csvRows, oneMap);
 }
 
+namespace {
+// NOTE: Vector<T>::SetNull for string vectors must be called on the concrete type,
+// otherwise LargeStringContainer::SetNull() is skipped and offsets[index+1] stays
+// uninitialized. A trailing null row then yields a negative length downstream
+// (Calc reads endOffset - startOffset), which crashes in SetValue/memcpy_s.
+inline void SetNullAt(
+    omnistream::VectorBatch* vectorBatch, size_t colIndex, size_t rowIndex, omniruntime::type::DataTypeId type)
+{
+    auto* vec = vectorBatch->Get(colIndex);
+    if (type == omniruntime::type::DataTypeId::OMNI_VARCHAR || type == omniruntime::type::DataTypeId::OMNI_CHAR) {
+        reinterpret_cast<omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(vec)
+            ->SetNull(rowIndex);
+    } else {
+        vec->SetNull(rowIndex);
+    }
+}
+} // namespace
+
 /**
  * @brief Convert csv rows to vector batch using the given `oneMap`
  * @param csvRows
  * @param oneMap mapping from project field index to csv field index
  * @return VectorBatch
  */
+
 omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std::vector<int>& oneMap)
 {
     // create new vectorbatch
@@ -328,7 +347,7 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                 LOG("CsvConverter: Missing projected CSV field " << csvFieldIndex << " for column " << colIndex
                                                                  << " in row " << rowIndex
                                                                  << ", setting it as null in VectorBatch.");
-                vectorBatch->Get(colIndex)->SetNull(rowIndex);
+                SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                 continue;
             }
 
@@ -341,7 +360,7 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
             if (isCsvNullValue(nodeValue, schema)) {
                 LOG("CsvConverter: Detected null value for column " << colIndex << " in row " << rowIndex
                                                                     << ", setting it as null in VectorBatch.");
-                vectorBatch->Get(colIndex)->SetNull(rowIndex);
+                SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                 continue;
             }
 
@@ -355,11 +374,11 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                         LOG("CsvConverter: Invalid integer value '" << nodeValue << "' for column " << colIndex
                                                                     << " in row " << rowIndex
                                                                     << ", setting it as null.");
-                        vectorBatch->Get(colIndex)->SetNull(rowIndex);
+                        SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                     } catch (const std::out_of_range& e) {
                         LOG("CsvConverter: Integer value '" << nodeValue << "' out of range for column " << colIndex
                                                             << " in row " << rowIndex << ", setting it as null.");
-                        vectorBatch->Get(colIndex)->SetNull(rowIndex);
+                        SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                     }
                     break;
                 }
@@ -383,7 +402,7 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                         LOG("CsvConverter: Invalid boolean value '" << nodeValue << "' for column " << colIndex
                                                                     << " in row " << rowIndex
                                                                     << ", setting it as null.");
-                        vectorBatch->Get(colIndex)->SetNull(rowIndex);
+                        SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                     }
                     break;
                 }
@@ -392,10 +411,10 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                         vectorBatch->SetValueAt(colIndex, rowIndex, std::stol(nodeValue));
                     } catch (const std::invalid_argument& e) {
                         // Not a valid number
-                        vectorBatch->Get(colIndex)->SetNull(rowIndex);
+                        SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                     } catch (const std::out_of_range& e) {
                         // Number is out of range for long
-                        vectorBatch->Get(colIndex)->SetNull(rowIndex);
+                        SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                     }
                     break;
                 }
@@ -431,7 +450,7 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                         vectorBatch->SetValueAt(
                             colIndex, rowIndex, TimestampData::fromString(nodeValue).getMillisecond());
                     } catch (...) {
-                        vectorBatch->Get(colIndex)->SetNull(rowIndex);
+                        SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                     }
                     break;
                 }
@@ -440,7 +459,7 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                         vectorBatch->SetValueAt(
                             colIndex, rowIndex, TimestampData::fromLocalTimeString(nodeValue).getMillisecond());
                     } catch (...) {
-                        vectorBatch->Get(colIndex)->SetNull(rowIndex);
+                        SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                     }
                     break;
                 }
@@ -466,7 +485,7 @@ omnistream::VectorBatch* CsvConverter::convert(std::vector<CsvRow>& csvRows, std
                     try {
                         vectorBatch->SetValueAt(colIndex, rowIndex, TimestampData::fromTimeString(nodeValue).getMillisecond());
                     } catch (...) {
-                        vectorBatch->Get(colIndex)->SetNull(rowIndex);
+                        SetNullAt(vectorBatch, colIndex, rowIndex, newVecBatchTypes[colIndex]);
                     }
                     break;
                 }

@@ -109,9 +109,15 @@ public:
             case OMNI_LONG:
             case OMNI_DATE64:
             case OMNI_TIME64:
-            case OMNI_TIMESTAMP:
-            case OMNI_DECIMAL64: {
+            case OMNI_TIMESTAMP: {
                 Vector<int64_t>* vector64 = new Vector<int64_t>(vectorSize);
+                baseVector = vector64;
+                deserializeInt64(vector64, buffer);
+                break;
+            }
+            // DECIMAL64 物理上是 int64 向量，但必须保留类型 id，否则会退化成 OMNI_LONG(2)。
+            case OMNI_DECIMAL64: {
+                Vector<int64_t>* vector64 = new Vector<int64_t>(vectorSize, OMNI_DECIMAL64);
                 baseVector = vector64;
                 deserializeInt64(vector64, buffer);
                 break;

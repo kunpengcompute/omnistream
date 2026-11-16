@@ -115,6 +115,7 @@ TEST(StreamingFileWriterTest, ProcessElement)
         nonPartitionIndexes);
 
     auto writer = new StreamingFileWriter<omnistream::VectorBatch*>(1000, bucketsBuilder);
+    writer->setProcessingTimeService(new SystemProcessingTimeService());
 
     writer->setup();
     ASSERT_NO_THROW(writer->initializeState(initializer, ser));
@@ -196,6 +197,7 @@ TEST(StreamingFileWriterTest, RollingPolicyFileSize)
         nonPartitionIndexes);
 
     auto writer = new StreamingFileWriter<omnistream::VectorBatch*>(1000, bucketsBuilder);
+    writer->setProcessingTimeService(new SystemProcessingTimeService());
 
     writer->setup();
     ASSERT_NO_THROW(writer->initializeState(initializer, ser));
@@ -270,6 +272,7 @@ TEST(StreamingFileWriterTest, DISABLED_RollingPolicyTimeInterval)
         nonPartitionIndexes);
 
     auto writer = new StreamingFileWriter<omnistream::VectorBatch*>(bucketCheckInterval, bucketsBuilder);
+    writer->setProcessingTimeService(new SystemProcessingTimeService());
 
     writer->setup();
     ASSERT_NO_THROW(writer->initializeState(initializer, ser));
@@ -340,6 +343,7 @@ TEST(StreamingFileWriterTest, Q10)
     int bucketCheckInterval = 1000;
 
     auto writer = new StreamingFileWriter<omnistream::VectorBatch*>(bucketCheckInterval, bucketsBuilder);
+    writer->setProcessingTimeService(new SystemProcessingTimeService());
 
     writer->setup();
     ASSERT_NO_THROW(writer->initializeState(initializer, ser));

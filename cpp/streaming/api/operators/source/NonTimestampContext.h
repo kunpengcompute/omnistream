@@ -12,6 +12,8 @@
 #ifndef FLINK_TNEL_NONTIMESTAMPCONTEXT_H
 #define FLINK_TNEL_NONTIMESTAMPCONTEXT_H
 
+#include <mutex>
+
 #include "functions/SourceContext.h"
 
 class NonTimestampContext : public SourceContext {
@@ -31,13 +33,12 @@ public:
 
     void collect(void* element) override
     {
-        lock->mutex.lock();
+        std::lock_guard<std::recursive_mutex> guard(lock->mutex);
         if (isStream) {
             output->collect(reuse->replace(element));
         } else {
             output->collect(new StreamRecord(element));
         }
-        lock->mutex.unlock();
     }
 
     void collectWithTimestamp(void* element, int64_t timestamp) override

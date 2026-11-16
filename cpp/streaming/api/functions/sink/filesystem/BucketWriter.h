@@ -14,6 +14,7 @@
 
 #include <string>
 #include <filesystem>
+#include <memory>
 #include "FileWriter.h"
 
 namespace fs = std::filesystem;
@@ -21,6 +22,11 @@ namespace fs = std::filesystem;
 template <typename IN, typename BucketID>
 class BucketWriter {
 public:
+    BucketWriter() = default;
+    explicit BucketWriter(std::shared_ptr<omnistream::csv::CsvRowEncoder> encoder) : encoder_(std::move(encoder))
+    {
+    }
+
     FileWriter<IN, BucketID>* openNewInProgressFile(
         BucketID bucketId,
         const std::string& path,
@@ -39,8 +45,11 @@ public:
             }
         }
 
-        return new FileWriter<IN, BucketID>(path, currentTime, nonPartitionIndexes, inputTypes);
+        return new FileWriter<IN, BucketID>(path, currentTime, nonPartitionIndexes, inputTypes, encoder_);
     }
+
+private:
+    std::shared_ptr<omnistream::csv::CsvRowEncoder> encoder_;
 };
 
 #endif // OMNISTREAM_BUCKET_WRITER_H
