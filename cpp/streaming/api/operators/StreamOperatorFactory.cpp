@@ -44,6 +44,7 @@
 #include "streaming/runtime/tasks/ChainingOutput.h"
 #include "datagen/nexmark/NexmarkSourceFunction.h"
 #include "runtime/operators/sink/ConstraintEnforcer.h"
+#include "table/runtime/operators/rank/AppendOnlyFirstNFunction.h"
 #include "table/runtime/operators/rank/AppendOnlyTopNFunction.h"
 #include "table/runtime/operators/rank/RetractableTopNFunction.h"
 #include "table/runtime/operators/overaggregate/ProcTimeUnboundedPrecedingFunction.h"
@@ -75,6 +76,58 @@
 namespace omnistream {
 
 namespace {
+
+using RankProcessFunction = AbstractTopNFunction<RowData*>;
+
+RankProcessFunction* CreateRankFunction(const nlohmann::json& description)
+{
+    if (!description.contains("processFunction") || !description["processFunction"].is_string()) {
+        return nullptr;
+    }
+    const auto processFunction = description["processFunction"].get<std::string>();
+    if (processFunction == "AppendOnlyFirstNFunction") {
+        return new AppendOnlyFirstNFunction<RowData*>(description);
+    }
+    if (processFunction == "AppendOnlyTopNFunction") {
+        return new AppendOnlyTopNFunction<RowData*>(description);
+    }
+    if (processFunction == "RetractableTopNFunction") {
+        return new RetractableTopNFunction<RowData*>(description);
+    }
+    if (processFunction == "FastTop1Function") {
+        return new FastTop1Function<RowData*>(description);
+    }
+    return nullptr;
+}
+
+template <typename OperatorT>
+void ConfigureRankSavepoint(OperatorT* op, const nlohmann::json& description)
+{
+    op->setDescription(description);
+    const auto processFunction = description.value("processFunction", "");
+    if (processFunction == "AppendOnlyFirstNFunction") {
+        // Flink AppendOnlyFirstNFunction: ValueState<Integer> "counterState" + IntSerializer.
+        op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
+    } else if (processFunction == "AppendOnlyTopNFunction") {
+        if (description.contains("sortFieldIndices") && description["sortFieldIndices"].empty()) {
+            // SP-INTEROP: streaming Limit shape (empty sort key). The AppendOnlyTopN
+            // savepoint adaptor is not audited for the arity-0 sort key group, so mark
+            // unsupported instead.
+            op->setFlinkSavepointUnsupported(
+                "Streaming Limit (empty sort key) native state is not convertible by the "
+                "AppendOnlyTopN savepoint adaptor, which requires at least one sort column");
+        } else {
+            op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::AppendOnlyTopNAdaptor);
+        }
+    } else if (processFunction == "RetractableTopNFunction") {
+        // SP-INTEROP: no savepoint adaptor converts the retract state yet.
+        op->setFlinkSavepointUnsupported(
+            "Streaming Limit retract state is not convertible by any existing savepoint adaptor");
+    } else if (processFunction == "FastTop1Function") {
+        op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
+    }
+}
+
 
 template <typename OperatorT>
 void configureSavepoint(
@@ -172,7 +225,12 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
                 "existing savepoint adaptor");
             op->setDescription(opConfig.getDescription());
             LOG("Operator KeyedProcessOperator (over) address  " + std::to_string(reinterpret_cast<long>(op)));
-
+            return static_cast<OneInputStreamOperator*>(op);
+        } else if (RankProcessFunction* rankFunc = CreateRankFunction(opConfig.getDescription())) {
+            auto* op = new KeyedProcessOperator(rankFunc, chainOutput, opConfig.getDescription());
+            op->setup();
+            ConfigureRankSavepoint(op, opConfig.getDescription());
+            LOG("Operator Rank KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
             return static_cast<OneInputStreamOperator*>(op);
         } else {
             GroupAggFunction* func = new GroupAggFunction(0l, opConfig.getDescription());
@@ -508,48 +566,12 @@ StreamOperator* StreamOperatorFactory::CreateKeyedProcessOp(
         op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::DeduplicateAdaptor);
         LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);
-    } else if (
-        opDescriptionJSON.contains("processFunction") &&
-        opDescriptionJSON["processFunction"] == "AppendOnlyTopNFunction") {
-        LOG("AppendOnlyTopNFunction description: " << opConfig.getDescription());
-        AbstractTopNFunction<RowData*>* func = new AppendOnlyTopNFunction<RowData*>(opDescriptionJSON);
-        auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
+    } else if (RankProcessFunction* rankFunc = CreateRankFunction(opDescriptionJSON)) {
+        LOG("Rank processFunction description: " << opConfig.getDescription());
+        auto* op = new KeyedProcessOperator(rankFunc, chainOutput, opDescriptionJSON);
         op->setup(std::move(task));
-        if (opDescriptionJSON.contains("sortFieldIndices") && opDescriptionJSON["sortFieldIndices"].empty()) {
-            // SP-INTEROP: streaming Limit shape (empty sort key). The AppendOnlyTopN
-            // savepoint adaptor is not audited for the arity-0 sort key group, so mark
-            // unsupported instead.
-            op->setFlinkSavepointUnsupported(
-                "Streaming Limit (empty sort key) native state is not convertible by the "
-                "AppendOnlyTopN savepoint adaptor, which requires at least one sort column");
-        } else {
-            op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::AppendOnlyTopNAdaptor);
-        }
-        op->setDescription(opDescriptionJSON);
-        LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
-        return static_cast<OneInputStreamOperator*>(op);
-    } else if (
-        opDescriptionJSON.contains("processFunction") &&
-        opDescriptionJSON["processFunction"] == "RetractableTopNFunction") {
-        // Streaming Limit retract path (input contains updates/deletes).
-        LOG("RetractableTopNFunction description: " << opConfig.getDescription());
-        AbstractTopNFunction<RowData*>* func = new RetractableTopNFunction<RowData*>(opDescriptionJSON);
-        auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
-        op->setup(std::move(task));
-        // SP-INTEROP: no savepoint adaptor converts the retract state yet.
-        op->setFlinkSavepointUnsupported(
-            "Streaming Limit retract state is not convertible by any existing savepoint adaptor");
-        op->setDescription(opDescriptionJSON);
-        LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
-        return static_cast<OneInputStreamOperator*>(op);
-    } else if (
-        opDescriptionJSON.contains("processFunction") && opDescriptionJSON["processFunction"] == "FastTop1Function") {
-        AbstractTopNFunction<RowData*>* func = new FastTop1Function<RowData*>(opDescriptionJSON);
-        auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
-        op->setup(std::move(task));
-        op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
-        op->setDescription(opDescriptionJSON);
-        LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
+        ConfigureRankSavepoint(op, opDescriptionJSON);
+        LOG("Operator Rank KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);
     } else if (
         opDescriptionJSON.contains("processFunction") &&
