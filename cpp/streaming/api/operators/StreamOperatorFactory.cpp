@@ -55,6 +55,7 @@
 #include "table/runtime/operators/join/window/FullOuterJoinOperator.h"
 #include "runtime/operators/window/AggregateWindowOperator.h"
 #include "runtime/operators/window/tvf/WindowTableFunctionOperator.h"
+#include "table/runtime/operators/sink/SinkUpsertMaterializer.h"
 #include "datagen/meituan/JoinSource.h"
 #include "datagen/meituan/MTFilterFunc.h"
 #include "connector/kafka/source/KafkaSource.h"
@@ -275,6 +276,16 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
             op->setFlinkSavepointAdaptor(adaptorType);
         }
         return static_cast<TwoInputStreamOperator*>(op);
+    } else if (uniqueName == OPERATOR_NAME_SINK_UPSERT_MATERIALIZER) {
+        const auto description = opConfig.getDescription();
+        auto* op = new SinkUpsertMaterializer<RowData*>(description, chainOutput);
+        op->setup();
+        op->setDescription(description);
+        op->setFlinkSavepointUnsupported(
+            "SinkUpsertMaterializer native state serialization is not byte-compatible with "
+            "Flink 'values' List<RowData> state");
+        LOG("Operator SinkUpsertMaterializer address " + std::to_string(reinterpret_cast<long>(op)));
+        return static_cast<OneInputStreamOperator*>(op);
     } else {
         THROW_LOGIC_EXCEPTION("Unknown operator " + uniqueName);
     }
@@ -326,6 +337,8 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         return CreateWindowJoinOp(opDesc, chainOutput, task);
     } else if (operatorID == OPERATOR_NAME_WINDOW_TABLE_FUNCTION) {
         return CreateWindowTableFunctionOp(opDesc, chainOutput, task);
+    } else if (operatorID == OPERATOR_NAME_SINK_UPSERT_MATERIALIZER) {
+        return CreateSinkMaterializerOp(opDesc, chainOutput, task);
     } else if (operatorID == datastream::OPERATOR_NAME_FLATMAP) {
         return CreateFlatMapOp(opDesc, chainOutput);
     } else if (operatorID == datastream::OPERATOR_NAME_MAP) {
@@ -835,6 +848,26 @@ StreamOperator* StreamOperatorFactory::CreateWindowTableFunctionOp(
     op->setDescription(opDescriptionJSON);
     op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
     LOG("Operator WindowTableFunctionOperator address " + std::to_string(reinterpret_cast<long>(op)));
+    return static_cast<OneInputStreamOperator*>(op);
+}
+
+StreamOperator* StreamOperatorFactory::CreateSinkMaterializerOp(
+    OperatorPOD& opConfig, WatermarkGaugeExposingOutput* chainOutput, std::shared_ptr<omnistream::OmniStreamTask> task)
+{
+    auto description = opConfig.getDescription();
+    nlohmann::json opDescriptionJSON = nlohmann::json::parse(description);
+    // Standalone TableStreamOperator like Flink's SinkUpsertMaterializer (extends
+    // TableStreamOperator<RowData> implements OneInputStreamOperator); the keyed
+    // state backend is wired by AbstractStreamOperator::initializeState with the
+    // key serializer from the operator chain descriptor (sink primary key).
+    auto* op = new SinkUpsertMaterializer<RowData*>(opDescriptionJSON, chainOutput);
+    op->setup(std::move(task));
+    op->setDescription(opDescriptionJSON);
+    // SP-INTEROP: native 状态序列化与 Flink "values" List<RowData> 的字节级兼容性未验证。
+    op->setFlinkSavepointUnsupported(
+        "SinkUpsertMaterializer native state serialization is not byte-compatible with "
+        "Flink 'values' List<RowData> state");
+    LOG("Operator SinkUpsertMaterializer address " + std::to_string(reinterpret_cast<long>(op)));
     return static_cast<OneInputStreamOperator*>(op);
 }
 
