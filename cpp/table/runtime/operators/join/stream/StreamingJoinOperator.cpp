@@ -191,7 +191,9 @@ void StreamingJoinOperator<K>::open()
         leftRecordStateView_ = JoinRecordStateViews::create(this->getRuntimeContext(), stateName, leftRecordType);
     }
     if (rightIsOuter) {
-        NOT_IMPL_EXCEPTION;
+        std::string stateName = "right-records";
+        rightRecordStateView_ =
+            OuterJoinRecordStateViews::create<K>(this->getRuntimeContext(), stateName, rightRecordType);
     } else {
         std::string stateName = "right-records";
         rightRecordStateView_ = JoinRecordStateViews::create(this->getRuntimeContext(), stateName, rightRecordType);
