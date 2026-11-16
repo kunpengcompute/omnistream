@@ -212,6 +212,10 @@ public:
                     } else {
                         delete reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, RowData*>*>(stateTablePtr);
                     }
+                } else if (dataId == BackendDataType::ROW_LIST_BK) {
+                    auto stateTable =
+                        reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, std::vector<RowData*>*>*>(stateTablePtr);
+                    delete stateTable;
                 } else if (dataId == BackendDataType::SET_LONG) {
                     auto stateTable =
                         reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, std::vector<long>*>*>(stateTablePtr);
@@ -552,6 +556,10 @@ uintptr_t HeapKeyedStateBackend<K>::createOrUpdateInternalState(
             return (uintptr_t)createOrUpdateInternalValueState<TimeWindow, RowData*>(namespaceSerializer, stateDesc);
         } else if (dataId == BackendDataType::ROW_BK) {
             return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, RowData*>(namespaceSerializer, stateDesc);
+        } else if (dataId == BackendDataType::ROW_LIST_BK) {
+            // ValueState<List<RowData>> (e.g. SinkUpsertMaterializer "values")
+            return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, std::vector<RowData*>*>(
+                namespaceSerializer, stateDesc);
         } else if (dataId == BackendDataType::INT_BK) {
             return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, int32_t>(namespaceSerializer, stateDesc);
         } else if (dataId == BackendDataType::BIGINT_BK) {
