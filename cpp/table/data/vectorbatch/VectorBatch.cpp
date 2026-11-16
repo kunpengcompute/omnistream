@@ -426,7 +426,7 @@ void VectorBatch::WriteToFileInternal(
             LOG("vb writefile inputType is " << inputTypes[vectorID]);
             if (inputTypes[vectorID].substr(0, 30) == "TIMESTAMP_WITH_LOCAL_TIME_ZONE") {
                 auto result = TransformTimeWithTimeZone(vectorID, rowID, tzStr);
-                file << "\"" << result << "\"";
+                file << result;
             } else if (inputTypes[vectorID].substr(0, 9) == "TIMESTAMP") {
                 int precision = 3;
                 size_t parenPos = inputTypes[vectorID].find('(');
@@ -438,7 +438,7 @@ void VectorBatch::WriteToFileInternal(
                     }
                 }
                 auto result = TransformTime(vectorID, rowID, precision);
-                file << "\"" << result << "\"";
+                file << result;
             } else if (inputTypes[vectorID].substr(0, 22) == "TIME_WITHOUT_TIME_ZONE") {
                 int precision = 3;
                 size_t parenPos = inputTypes[vectorID].find('(');
