@@ -68,16 +68,6 @@ public:
     void transformKVData(
         const std::vector<int8_t>& key, const std::vector<int8_t>& value, int kvStateId, RestoreKVState* writer);
 
-    // KV_TRANSFORM 不使用 KV_WITH_VB，以下为编译占位
-    int batchSize(int) const
-    {
-        return 0;
-    }
-    std::vector<omniruntime::type::DataTypeId> columnTypes(int)
-    {
-        return {};
-    }
-
 private:
     static constexpr const char* ACC_STATE_NAME = "accState";
 

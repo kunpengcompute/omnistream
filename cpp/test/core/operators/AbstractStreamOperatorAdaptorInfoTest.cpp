@@ -29,10 +29,10 @@ TEST(AbstractStreamOperatorAdaptorInfoTest, DefaultAdaptorInfoIsNoneWithReason)
 TEST(AbstractStreamOperatorAdaptorInfoTest, SetAdaptorTypeStoresTypeAndClearsReason)
 {
     auto* op = new AbstractStreamOperator<int>();
-    op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::DeduplicateAdaptor);
+    op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::GroupAggAdaptor);
 
     auto info = op->getSavepointAdaptorInfo();
-    EXPECT_EQ(info.type, FlinkSavepointAdaptorType::DeduplicateAdaptor);
+    EXPECT_EQ(info.type, FlinkSavepointAdaptorType::GroupAggAdaptor);
     EXPECT_TRUE(info.reason.empty());
 }
 

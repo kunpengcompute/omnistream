@@ -21,9 +21,7 @@
 
 #include "core/memory/DataOutputSerializer.h"
 #include "core/typeutils/LongSerializer.h"
-#include "runtime/checkpoint/AppendOnlyTopNSavepointAdaptor.h"
 #include "runtime/checkpoint/CheckpointOptions.h"
-#include "runtime/checkpoint/DeduplicateSavepointAdaptor.h"
 #include "runtime/checkpoint/GroupAggSavepointAdaptor.h"
 #include "runtime/checkpoint/SavepointType.h"
 #include "runtime/checkpoint/StreamingJoinSavepointAdaptor.h"
@@ -35,9 +33,6 @@
 #include "runtime/state/VoidNamespaceSerializer.h"
 #include "runtime/state/metainfo/StateMetaInfoSnapshot.h"
 #include "table/data/binary/BinaryRowData.h"
-#include "table/data/util/ComboIdUtil.h"
-#include "table/data/util/VectorBatchUtil.h"
-#include "table/typeutils/SortedVectorLong.h"
 #include "table/typeutils/RowDataSerializer.h"
 #include "table/types/logical/RowType.h"
 #include "test/runtime/state/MockSavepointBridge.h"
@@ -47,9 +42,6 @@ using ::testing::NiceMock;
 using ::testing::Return;
 
 namespace {
-
-constexpr const char* TOPN_STATE_NAME = "data-state-with-append";
-constexpr const char* DEDUPLICATE_STATE_NAME = "deduplicate-state";
 
 std::vector<int8_t> copyOutput(DataOutputSerializer& output)
 {
@@ -74,30 +66,6 @@ std::shared_ptr<StateMetaInfoSnapshot> makeKeyValueMeta(
         options,
         std::unordered_map<std::string, std::shared_ptr<TypeSerializerSnapshot>>{},
         serializers);
-}
-
-std::vector<int8_t> serializeComboIds(const std::vector<omnistream::ComboId>& comboIds)
-{
-    DataOutputSerializer output;
-    OutputBufferStatus outputStatus{};
-    output.setBackendBuffer(&outputStatus);
-    for (size_t i = 0; i < comboIds.size(); ++i) {
-        if (i != 0) {
-            output.writeByte(',');
-        }
-        omnistream::ComboIdUtil::writeComboId(output, comboIds[i]);
-    }
-    return copyOutput(output);
-}
-
-std::vector<int8_t> serializeTopNComboIds(const std::vector<omnistream::ComboId>& comboIds)
-{
-    std::vector<long> values(comboIds.begin(), comboIds.end());
-    DataOutputSerializer output;
-    OutputBufferStatus outputStatus{};
-    output.setBackendBuffer(&outputStatus);
-    SortedVectorLong::INSTANCE->serialize(&values, output);
-    return copyOutput(output);
 }
 
 class SingleEntryIterator final : public KeyValueStateIterator {
@@ -272,52 +240,6 @@ protected:
     std::unique_ptr<SavepointType> savepointType_;
     std::unique_ptr<CheckpointOptions> checkpointOptions_;
 };
-
-TEST_F(SavepointAdaptorExecuteSaveTest, AppendOnlyTopNSaveExecutesConvertKVRowData)
-{
-    omnistream::AppendOnlyTopNSavepointAdaptor adaptor;
-    adaptor.prepareForSave({{"inputTypes", {"BIGINT"}}, {"sortFieldIndices", {0}}});
-    const auto comboId = omnistream::VectorBatchUtil::getComboId(0, 7, 3);
-    auto iterator =
-        std::make_shared<SingleEntryIterator>(std::vector<int8_t>{0x01}, serializeTopNComboIds({comboId}), 0);
-    auto accessor = std::make_shared<RecordingVectorBatchAccessor>();
-    TestSnapshotResources resources;
-    resources.metaInfos = {makeKeyValueMeta(TOPN_STATE_NAME, "VALUE", SortedVectorLong::INSTANCE)};
-    resources.iterator = iterator;
-    resources.accessor = accessor;
-
-    EXPECT_GT(saveAndGetPosition(adaptor, resources), 0U);
-    EXPECT_TRUE(iterator->closed);
-    ASSERT_EQ(accessor->requestedRows.size(), 1U);
-    EXPECT_EQ(
-        accessor->requestedRows[0],
-        std::make_pair(
-            omnistream::VectorBatchUtil::getVectorBatchId(comboId), omnistream::VectorBatchUtil::getRowId(comboId)));
-    EXPECT_EQ(accessor->closeCalls, 1);
-}
-
-TEST_F(SavepointAdaptorExecuteSaveTest, DeduplicateSaveExecutesConvertKVRowData)
-{
-    omnistream::DeduplicateSavepointAdaptor adaptor;
-    adaptor.prepareForSave({{"inputTypes", {"BIGINT"}}});
-    const auto comboId = omnistream::VectorBatchUtil::getComboId(0, 11, 5);
-    auto iterator = std::make_shared<SingleEntryIterator>(std::vector<int8_t>{0x01}, serializeComboIds({comboId}), 0);
-    auto accessor = std::make_shared<RecordingVectorBatchAccessor>();
-    TestSnapshotResources resources;
-    resources.metaInfos = {makeKeyValueMeta(DEDUPLICATE_STATE_NAME, "VALUE", LongSerializer::INSTANCE)};
-    resources.iterator = iterator;
-    resources.accessor = accessor;
-
-    EXPECT_GT(saveAndGetPosition(adaptor, resources), 0U);
-    EXPECT_TRUE(iterator->closed);
-    EXPECT_EQ(resources.requestedLogicalStateName, DEDUPLICATE_STATE_NAME);
-    ASSERT_EQ(accessor->requestedRows.size(), 1U);
-    EXPECT_EQ(
-        accessor->requestedRows[0],
-        std::make_pair(
-            omnistream::VectorBatchUtil::getVectorBatchId(comboId), omnistream::VectorBatchUtil::getRowId(comboId)));
-    EXPECT_EQ(accessor->closeCalls, 1);
-}
 
 TEST_F(SavepointAdaptorExecuteSaveTest, GroupAggSaveExecutesAccumulatorExpansion)
 {

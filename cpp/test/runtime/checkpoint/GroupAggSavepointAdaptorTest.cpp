@@ -795,10 +795,3 @@ TEST(GroupAggSavepointAdaptorTest, RestoreClearsSourceSerializersAndAcceptsEmpty
     EXPECT_NO_THROW(adaptor.restore(iterator, backend));
     EXPECT_TRUE(adaptor.sourceSerializers_.empty());
 }
-
-TEST(GroupAggSavepointAdaptorTest, NonVectorBatchRestoreHooksReturnEmptyDefaults)
-{
-    GroupAggSavepointAdaptor adaptor;
-    EXPECT_EQ(adaptor.batchSize(0), 0);
-    EXPECT_TRUE(adaptor.columnTypes(0).empty());
-}

@@ -60,19 +60,6 @@ TEST(OperatorSavepointAdaptorFactoryTest, ReturnsNullForOmniIsCompatible)
     EXPECT_EQ(OperatorSavepointAdaptorFactory::createAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible), nullptr);
 }
 
-// DeduplicateAdaptor：已实现的 Adaptor，工厂返回 DeduplicateSavepointAdaptor 实例。
-TEST(OperatorSavepointAdaptorFactoryTest, ReturnsDeduplicateAdaptor)
-{
-    auto adaptor = OperatorSavepointAdaptorFactory::createAdaptor(FlinkSavepointAdaptorType::DeduplicateAdaptor);
-    EXPECT_NE(adaptor, nullptr);
-}
-
-// AppendOnlyTopNAdaptor：已实现的 Adaptor，工厂返回 AppendOnlyTopNSavepointAdaptor 实例。
-TEST(OperatorSavepointAdaptorFactoryTest, ReturnsAppendOnlyTopNAdaptor)
-{
-    auto adaptor = OperatorSavepointAdaptorFactory::createAdaptor(FlinkSavepointAdaptorType::AppendOnlyTopNAdaptor);
-    EXPECT_NE(adaptor, nullptr);
-}
 // StreamingJoinAdaptor：已实现的 NoUniqueKey inner/left outer join 互通 Adaptor，
 TEST(OperatorSavepointAdaptorFactoryTest, ReturnsStreamingJoinAdaptors)
 {

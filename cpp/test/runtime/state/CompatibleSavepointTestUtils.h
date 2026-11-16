@@ -77,7 +77,7 @@ private:
 
 inline FlinkSavepointAdaptorInfo makeCompatibleTestAdaptorInfo()
 {
-    return {FlinkSavepointAdaptorType::DeduplicateAdaptor, "deduplicate compatible adaptor"};
+    return {FlinkSavepointAdaptorType::GroupAggAdaptor, "group agg compatible adaptor"};
 }
 
 } // namespace compatible_savepoint_test
