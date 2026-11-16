@@ -93,6 +93,7 @@ public:
     void close() override
     {
         if (timestampedCollector_ != nullptr) {
+            timestampedCollector_->close();
             delete timestampedCollector_;
             timestampedCollector_ = nullptr;
         }
