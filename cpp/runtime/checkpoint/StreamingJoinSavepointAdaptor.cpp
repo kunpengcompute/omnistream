@@ -114,8 +114,7 @@ void StreamingJoinSavepointAdaptor::validateForSave(
 {
     StateMetaInfoValidator validator{metaInfos};
     const std::set<BackendDataType> keyBackendTypes{BackendDataType::ROW_BK, BackendDataType::SHARED_ROW_BK};
-    // Heap/RocksDB 目前仍可能登记未使用的 stateName+"vb" 元数据；WithVB 在这里仅用于
-    // 显式消费该可选遗留表，当前 StreamingJoin 转换不会读取它。
+    // TODO: 状态后端停止注册 vb 侧表后，删除保存侧对可选侧表的接纳和过滤。
     validator.requireKeyedMapStateWithVB(
         StreamingJoinSavepointUtil::LEFT_STATE_NAME,
         BackendDataType::VOID_NAMESPACE_BK,
@@ -263,9 +262,9 @@ void StreamingJoinSavepointAdaptor::convertKVRowData(
     const VectorBatchSavePlan& /*plan*/,
     Emit&& output)
 {
-    if (context.stateType != VectorBatchStateType::KV_TRANSFORM || context.vbAccessor != nullptr) {
+    if (context.stateType != VectorBatchStateType::KV_TRANSFORM) {
         throw std::runtime_error(
-            "StreamingJoinSavepointAdaptor invalid non-VB conversion context for state=" + context.logicalStateName);
+            "StreamingJoinSavepointAdaptor invalid conversion context for state=" + context.logicalStateName);
     }
 
     const SidePlan& sidePlan = sidePlanForState(context.logicalStateName);
@@ -373,6 +372,7 @@ VectorBatchSavePlan StreamingJoinSavepointAdaptor::buildSavePlan(FullSnapshotRes
 
     for (size_t i = 0; i < metaInfos.size(); ++i) {
         const auto& meta = metaInfos[i];
+        // TODO: 状态后端停止注册 vb 侧表后，删除保存侧的侧表过滤。
         if (meta == nullptr || VectorBatchSaveTools::isVbStateName(meta->getName())) {
             continue;
         }

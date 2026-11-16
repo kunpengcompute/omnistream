@@ -27,7 +27,7 @@
 
 namespace omnistream {
 // state metadata 校验器 按 name 建立索引，提供 keyed state 类型及 serializer 校验和白名单收口。
-// 不读取 payload、不创建 VectorBatch accessor、不打开输出流、不写 construction backend。
+// 不读取 payload、不打开输出流、不写 construction backend。
 class StateMetaInfoValidator {
 public:
     explicit StateMetaInfoValidator(const std::vector<std::shared_ptr<StateMetaInfoSnapshot>>& metaInfos)
@@ -76,21 +76,18 @@ public:
         requireKeyedState(stateName, StateDescriptor::Type::LIST);
     }
 
-    // 要求指定 name 的 keyed value state 及其附属 VB side table（名称 = stateName + "vb"）同时存在。
+    // 要求指定 name 的 keyed value state 存在，并接纳可选的遗留 VB side table（名称 = stateName + "vb"）。
+    // TODO: 状态后端停止注册 vb 侧表、adaptor 保存侧移除相应处理后，删除此方法，
+    // 调用方改用 requireKeyedValueState。
     void requireKeyedValueStateWithVB(const std::string& stateName)
     {
         requireKeyedValueState(stateName);
         consumeVbSideTable(stateName);
     }
 
-    // 要求指定 name 的 keyed map state 及其附属 VB side table 同时存在。
-    void requireKeyedMapStateWithVB(const std::string& stateName)
-    {
-        requireKeyedMapState(stateName);
-        consumeVbSideTable(stateName);
-    }
-
     // 校验 keyed map state serializer backend type，并消费其可选 VB side table。
+    // TODO: 状态后端停止注册 vb 侧表、adaptor 保存侧移除相应处理后，删除此方法，
+    // 调用方改用带 serializer 校验的 requireKeyedMapState。
     void requireKeyedMapStateWithVB(
         const std::string& stateName,
         BackendDataType namespaceBackendType,
@@ -98,13 +95,6 @@ public:
         const std::set<BackendDataType>& valueBackendTypes)
     {
         requireKeyedMapState(stateName, namespaceBackendType, keyBackendTypes, valueBackendTypes);
-        consumeVbSideTable(stateName);
-    }
-
-    // 要求指定 name 的 keyed list state 及其附属 VB side table 同时存在。
-    void requireKeyedListStateWithVB(const std::string& stateName)
-    {
-        requireKeyedListState(stateName);
         consumeVbSideTable(stateName);
     }
 
@@ -129,30 +119,6 @@ public:
     {
         for (const auto& name : stateNames) {
             requireKeyedListState(name);
-        }
-    }
-
-    // 批量校验：要求 names 中所有 keyed value state 及其附属 VB side table 均存在。
-    void requireKeyedValueStatesWithVB(const std::vector<std::string>& stateNames)
-    {
-        for (const auto& name : stateNames) {
-            requireKeyedValueStateWithVB(name);
-        }
-    }
-
-    // 批量校验：要求 names 中所有 keyed map state 及其附属 VB side table 均存在。
-    void requireKeyedMapStatesWithVB(const std::vector<std::string>& stateNames)
-    {
-        for (const auto& name : stateNames) {
-            requireKeyedMapStateWithVB(name);
-        }
-    }
-
-    // 批量校验：要求 names 中所有 keyed list state 及其附属 VB side table 均存在。
-    void requireKeyedListStatesWithVB(const std::vector<std::string>& stateNames)
-    {
-        for (const auto& name : stateNames) {
-            requireKeyedListStateWithVB(name);
         }
     }
 
@@ -233,7 +199,8 @@ private:
     std::map<std::string, std::shared_ptr<StateMetaInfoSnapshot>> byName_;
     std::set<std::string> consumed_;
 
-    // 消费 VB side table（如果存在），由各 WithVB 方法复用。
+    // TODO: adaptor 保存侧移除 vb 侧表处理、删除 WithVB 接纳接口后，删除此方法。
+    // 消费可选的遗留侧表，使保存侧能够在构造目标 metadata 时将其过滤。
     void consumeVbSideTable(const std::string& stateName)
     {
         std::string vbName = stateName + "vb";

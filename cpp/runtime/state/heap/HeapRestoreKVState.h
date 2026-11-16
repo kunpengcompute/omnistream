@@ -62,7 +62,6 @@ public:
     }
 
 protected:
-    void writeLongEntry(const std::vector<int8_t>& keyBytes, int64_t value) override;
     void writeBytesEntry(const std::vector<int8_t>& keyBytes, ByteView value) override;
 
     void writeValueEntry(const std::vector<int8_t>& keyBytes, ByteView value);
@@ -158,14 +157,6 @@ protected:
 // ============================================================================
 // 实现
 // ============================================================================
-
-template <typename K>
-void HeapRestoreKVState<K>::writeLongEntry(const std::vector<int8_t>& /*keyBytes*/, int64_t /*value*/)
-{
-    INFO_RELEASE("HeapRestoreKVState: Error: writeLongEntry is not supported for '" << stateInfo_.stateName << "'");
-    throw std::runtime_error(
-        "HeapRestoreKVState: writeLongEntry should not be called; use writeBytesEntry for VALUE/MAP states");
-}
 
 template <typename K>
 void HeapRestoreKVState<K>::writeBytesEntry(const std::vector<int8_t>& keyBytes, ByteView value)

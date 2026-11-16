@@ -255,12 +255,6 @@ public:
         return std::make_shared<SavepointResources>(snapshotResources, SnapshotExecutionType::ASYNCHRONOUS);
     }
 
-    std::shared_ptr<SavepointResources> compatibleSavepoint() override
-    {
-        auto snapshotResources = snapshotResourceFactory_->createSnapshotResources(-1L, true);
-        return std::make_shared<SavepointResources>(snapshotResources, SnapshotExecutionType::ASYNCHRONOUS);
-    }
-
     void setOmniTaskBridge(const std::shared_ptr<omnistream::OmniTaskBridge>& bridge)
     {
         omniTaskBridge_ = bridge;

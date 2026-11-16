@@ -23,7 +23,6 @@
 #include "runtime/state/HeapKeyedStateBackend.h"
 #include "runtime/state/OperatorRuntimeStateSchemaProvider.h"
 #include "runtime/state/heap/HeapRestoreKVState.h"
-#include "runtime/state/heap/HeapRestoreKVStateVB.h"
 #include "runtime/state/heap/HeapRestorePQState.h"
 #include "runtime/state/metainfo/StateMetaInfoSnapshot.h"
 #include "runtime/state/restore/RestoreBackendDelegate.h"
@@ -43,7 +42,6 @@ public:
         std::string stateName;
         StateDescriptor::Type stateType = StateDescriptor::Type::VALUE;
         StateDescriptor* mainStateDesc = nullptr;
-        std::vector<omniruntime::type::DataTypeId> columnTypes;
         TypeSerializer* namespaceSerializer = nullptr;
         TypeSerializer* valueSerializer = nullptr;
         TypeSerializer* mapKeySerializer = nullptr;
@@ -61,12 +59,6 @@ public:
     // --- RestoreBackendDelegate 工厂接口 ---
 
     std::unique_ptr<RestoreKVState> createKVState(int kvStateId, const StateMetaInfoSnapshot& mainMetaInfo) override;
-
-    std::unique_ptr<RestoreKVStateVB> createKVStateVB(
-        int kvStateId,
-        const StateMetaInfoSnapshot& mainMetaInfo,
-        const std::vector<omniruntime::type::DataTypeId>& columnTypes,
-        int vectorBatchSize) override;
 
     std::unique_ptr<RestorePQState> createPQState(int kvStateId, const StateMetaInfoSnapshot& metaInfo) override;
 
@@ -96,10 +88,7 @@ public:
         const StateMetaInfoSnapshot& mainMetaInfo, const OperatorRuntimeStateSchemaProvider* runtimeSchemaProvider);
 
 private:
-    RestoreStateInfo& ensureStateRegistered(
-        int kvStateId,
-        const StateMetaInfoSnapshot& mainMetaInfo,
-        const std::vector<omniruntime::type::DataTypeId>& columnTypes);
+    RestoreStateInfo& ensureStateRegistered(int kvStateId, const StateMetaInfoSnapshot& mainMetaInfo);
 
     HeapKeyedStateBackend<K>* backend_;
     std::shared_ptr<TypeSerializer> keySerializer_;
@@ -127,9 +116,7 @@ HeapRestoreBackendDelegate<K>::HeapRestoreBackendDelegate(
 
 template <typename K>
 typename HeapRestoreBackendDelegate<K>::RestoreStateInfo& HeapRestoreBackendDelegate<K>::ensureStateRegistered(
-    int kvStateId,
-    const StateMetaInfoSnapshot& mainMetaInfo,
-    const std::vector<omniruntime::type::DataTypeId>& columnTypes)
+    int kvStateId, const StateMetaInfoSnapshot& mainMetaInfo)
 {
     while (static_cast<int>(stateInfos_.size()) <= kvStateId) {
         stateInfos_.emplace_back();
@@ -154,7 +141,6 @@ typename HeapRestoreBackendDelegate<K>::RestoreStateInfo& HeapRestoreBackendDele
     info.backendStateType = mainMetaInfo.getBackendStateType();
     info.stateName = mainMetaInfo.getName();
     info.stateType = stateType;
-    info.columnTypes = columnTypes;
     info.namespaceSerializer = nsSerializer;
     info.valueSerializer = mainMetaInfo.getValueSerializer();
 
@@ -177,19 +163,8 @@ template <typename K>
 std::unique_ptr<RestoreKVState> HeapRestoreBackendDelegate<K>::createKVState(
     int kvStateId, const StateMetaInfoSnapshot& mainMetaInfo)
 {
-    auto& info = ensureStateRegistered(kvStateId, mainMetaInfo, {});
+    auto& info = ensureStateRegistered(kvStateId, mainMetaInfo);
     return std::make_unique<HeapRestoreKVState<K>>(*this, info);
-}
-
-template <typename K>
-std::unique_ptr<RestoreKVStateVB> HeapRestoreBackendDelegate<K>::createKVStateVB(
-    int kvStateId,
-    const StateMetaInfoSnapshot& mainMetaInfo,
-    const std::vector<omniruntime::type::DataTypeId>& columnTypes,
-    int vectorBatchSize)
-{
-    auto& info = ensureStateRegistered(kvStateId, mainMetaInfo, columnTypes);
-    return std::make_unique<HeapRestoreKVStateVB<K>>(*this, info, columnTypes, vectorBatchSize);
 }
 
 // --- PQ State ---

@@ -18,10 +18,8 @@
 #include <vector>
 #include "runtime/state/rocksdb/iterator/SingleStateIterator.h"
 #include "runtime/state/CompositeKeySerializationUtils.h"
-#include "runtime/state/heap/HeapSnapshotStateData.h"
 #include "core/memory/DataOutputSerializer.h"
 #include "core/typeutils/TypeSerializer.h"
-#include "table/data/util/VectorBatchUtil.h"
 #include "core/typeutils/MapSerializer.h"
 #include "core/typeutils/ListSerializer.h"
 #include "core/typeutils/LongSerializer.h"
@@ -29,8 +27,6 @@
 #include "basictypes/Object.h"
 #include "StateTable.h"
 #include "CopyOnWriteStateMap.h"
-#include "table/utils/VectorBatchSerializationUtils.h"
-#include "table/data/vectorbatch/VectorBatch.h"
 #include "../../../core/include/common.h"
 
 // Type traits to detect emhash7::HashMap and std::vector pointer types
@@ -57,9 +53,10 @@ struct IsVectorPtr<std::vector<V>*> : std::true_type {};
 template <typename K, typename N, typename S>
 class HeapSingleStateIterator : public SingleStateIterator {
 public:
-    using SerializedEntry = HeapSnapshotStateData::SerializedEntry;
-
-    struct VbDataTag {};
+    struct SerializedEntry {
+        std::vector<int8_t> serializedKey;
+        std::vector<int8_t> serializedValue;
+    };
 
     HeapSingleStateIterator(StateTable<K, N, S>* stateTable, int kvStateId, int keyGroupPrefixBytes)
         : stateTable_(stateTable),
@@ -67,23 +64,6 @@ public:
           keyGroupPrefixBytes_(keyGroupPrefixBytes)
     {
         collectAndSerializeEntries();
-        currentIndex_ = 0;
-        valid_ = !entries().empty();
-        refreshKeyGroup();
-    }
-
-    HeapSingleStateIterator(
-        StateTable<uint32_t, VoidNamespace, omnistream::VectorBatch*>* vbTable,
-        int kvStateId,
-        int keyGroupPrefixBytes,
-        VbDataTag,
-        bool captureVectorBatchAccessorData = false)
-        : stateTable_(reinterpret_cast<StateTable<K, N, S>*>(vbTable)),
-          kvStateId_(kvStateId),
-          keyGroupPrefixBytes_(keyGroupPrefixBytes),
-          snapshotData_(captureVectorBatchAccessorData ? std::make_shared<HeapSnapshotStateData>() : nullptr)
-    {
-        collectVbEntries();
         currentIndex_ = 0;
         valid_ = !entries().empty();
         refreshKeyGroup();
@@ -132,21 +112,10 @@ public:
 
     void close() override
     {
-        // Iterator close 只标记迭代失效。若启用了 VB accessor capture，frozen bytes 由
-        // HeapSnapshotStateData 持有并可继续被资源层通过 shared_ptr 读取。
-        if (snapshotData_ == nullptr) {
-            entries_.clear();
-            currentIndex_ = 0;
-        } else {
-            currentIndex_ = snapshotData_->entries().size();
-        }
+        entries_.clear();
+        currentIndex_ = 0;
         currentKeyGroup_ = -1;
         valid_ = false;
-    }
-
-    std::shared_ptr<HeapSnapshotStateData> getSnapshotData() const
-    {
-        return snapshotData_;
     }
 
     /**
@@ -174,29 +143,23 @@ private:
     int kvStateId_;
     int keyGroupPrefixBytes_;
     std::vector<SerializedEntry> entries_;
-    std::shared_ptr<HeapSnapshotStateData> snapshotData_;
     size_t currentIndex_ = 0;
     int currentKeyGroup_ = -1;
     bool valid_ = false;
 
     const std::vector<SerializedEntry>& entries() const
     {
-        return snapshotData_ == nullptr ? entries_ : snapshotData_->entries();
+        return entries_;
     }
 
     std::vector<SerializedEntry>& entries()
     {
-        return snapshotData_ == nullptr ? entries_ : snapshotData_->entries();
+        return entries_;
     }
 
     void addSnapshotEntry(SerializedEntry entry)
     {
-        if (snapshotData_ == nullptr) {
-            entry.vectorBatchId = omnistream::INVALID_VECTOR_BATCH_ID;
-            entries_.push_back(std::move(entry));
-            return;
-        }
-        snapshotData_->addEntry(std::move(entry));
+        entries_.push_back(std::move(entry));
     }
 
     // See RocksSingleStateIterator::refreshKeyGroup() for rationale.
@@ -240,46 +203,6 @@ private:
         sortSnapshotEntries();
     }
 
-    void collectVbEntries()
-    {
-        auto* stateMaps = stateTable_->getState();
-        int keyGroupOffset = stateTable_->getKeyGroupOffset();
-
-        for (size_t i = 0; i < stateMaps->size(); i++) {
-            int keyGroup = keyGroupOffset + static_cast<int>(i);
-            auto* stateMap = (*stateMaps)[i];
-            if (stateMap == nullptr || stateMap->size() == 0) {
-                continue;
-            }
-
-            auto* cowMap = dynamic_cast<omnistream::CopyOnWriteStateMap<K, N, S>*>(stateMap);
-            if (cowMap == nullptr) {
-                continue;
-            }
-
-            for (auto it = cowMap->begin(); it != cowMap->end(); ++it) {
-                SerializedEntry entry;
-                try {
-                    entry.serializedKey = serializeVbKey(keyGroup, it->first, it->third);
-                    entry.serializedValue = serializeVbValue(it->second);
-                } catch (const std::exception& e) {
-                    INFO_RELEASE(
-                        "Error:HeapSingleStateIterator: collectVbEntries EXCEPTION at keyGroup="
-                        << keyGroup << ", error=" << e.what());
-                    throw;
-                }
-                if (snapshotData_ == nullptr) {
-                    addSnapshotEntry(std::move(entry));
-                } else {
-                    auto vectorBatchId = omnistream::VectorBatchUtil::getVectorBatchId(keyGroup, it->first);
-                    snapshotData_->addVectorBatchEntry(std::move(entry), vectorBatchId);
-                }
-            }
-        }
-
-        sortSnapshotEntries();
-    }
-
     void sortSnapshotEntries()
     {
         auto& entries = this->entries();
@@ -294,52 +217,6 @@ private:
                 }
                 return false;
             });
-        if (snapshotData_ != nullptr) {
-            snapshotData_->rebuildVectorBatchEntryIndices();
-        }
-    }
-
-    std::vector<int8_t> serializeVbKey(int keyGroup, uint32_t sequenceNumber, const VoidNamespace&)
-    {
-        OutputBufferStatus outputBufferStatus;
-        DataOutputSerializer outputSerializer;
-        outputSerializer.setBackendBuffer(&outputBufferStatus);
-
-        // VB side table key 与 RocksDB 运行时保持一致：keyGroup 使用固定前缀宽度编码，
-        // 后续再写入 LongSerializer(sequenceNumber)。
-        CompositeKeySerializationUtils::writeKeyGroup(keyGroup, keyGroupPrefixBytes_, outputSerializer);
-
-        LongSerializer longSerializer;
-        auto sequenceNumberI64 = static_cast<int64_t>(sequenceNumber);
-        longSerializer.serialize(&sequenceNumberI64, outputSerializer);
-
-        std::vector<int8_t> result(outputSerializer.getPosition());
-        memcpy(result.data(), outputSerializer.getData(), outputSerializer.getPosition());
-        return result;
-    }
-
-    static std::vector<int8_t> serializeVbValue(omnistream::VectorBatch* vectorBatch)
-    {
-        if (vectorBatch == nullptr) {
-            return {};
-        }
-
-        int32_t batchSize =
-            omnistream::VectorBatchSerializationUtils::calculateVectorBatchSerializableSize(vectorBatch);
-        if (batchSize <= 0) {
-            return {};
-        }
-
-        uint8_t* buffer = new uint8_t[batchSize];
-        uint8_t* cursor = buffer;
-        omnistream::VectorBatchSerializationUtils::serializeVectorBatch(vectorBatch, batchSize, cursor);
-
-        std::vector<int8_t> result(batchSize);
-        for (int32_t i = 0; i < batchSize; i++) {
-            result[i] = static_cast<int8_t>(buffer[i]);
-        }
-        delete[] buffer;
-        return result;
     }
 
     // Snapshot entry holding raw (unserialized) copies of key, namespace, and value.

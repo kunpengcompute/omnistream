@@ -31,7 +31,6 @@
 class SavepointRestoreResultIterator;
 
 namespace omnistream {
-class VectorBatch;
 class OmniTaskBridge;
 class RestoreBackendDelegate;
 

@@ -18,27 +18,24 @@
 #include <vector>
 
 #include "core/typeutils/TypeSerializer.h"
-#include "runtime/state/VectorBatchStateAccessor.h"
 #include "runtime/state/metainfo/StateMetaInfoSnapshot.h"
 #include "runtime/state/KeyGroupRange.h"
-#include "table/data/vectorbatch/VectorBatchStorageInfo.h"
 
 namespace omnistream {
 
 // ============================================================================
-// RestoreStateType — 保存/恢复流程的状态类型分发
+// 保存流程的状态类型分发
 // ============================================================================
 enum class VectorBatchStateType {
-    KV,           // 普通 KV 状态（无转换、无 VB side table）
-    KV_TRANSFORM, // 需要 Adaptor 转换 entry，但不访问 VB side table
-    KV_WITH_VB,   // 带 VectorBatch side table 的 KV 状态（单 comboId）
+    KV,           // 普通 KV 状态（无需转换）
+    KV_TRANSFORM, // 需要 Adaptor 转换 entry
     PQ,           // PriorityQueue 状态
 };
 
 // ============================================================================
 // VectorBatchSaveStateContext — 保存阶段按 source kvStateId 下标访问的状态上下文
 // 由 Adaptor 在 buildSaveStateContexts() 中构造，VectorBatchSaveFlow 根据 entry.kvStateId 读取。
-// stateType 为 KV 时直接 pass-through；KV_TRANSFORM 由 adaptor 转换但不创建 VB accessor。
+// stateType 为 KV 时直接透传；KV_TRANSFORM 由 adaptor 转换。
 // ============================================================================
 
 struct VectorBatchSaveStateContext {
@@ -47,53 +44,7 @@ struct VectorBatchSaveStateContext {
     std::string logicalStateName;
     TypeSerializer* valueSerializer = nullptr;
     TypeSerializer* sourceValueSerializer = nullptr;
-    std::shared_ptr<VectorBatchStateAccessor> vbAccessor;
     VectorBatchStateType stateType = VectorBatchStateType::KV;
-
-    VectorBatchSaveStateContext() = default;
-    ~VectorBatchSaveStateContext()
-    {
-        closeAccessor();
-    }
-
-    VectorBatchSaveStateContext(const VectorBatchSaveStateContext&) = delete;
-    VectorBatchSaveStateContext& operator=(const VectorBatchSaveStateContext&) = delete;
-
-    VectorBatchSaveStateContext(VectorBatchSaveStateContext&& other) noexcept
-        : writable(other.writable),
-          mappedKvStateId(other.mappedKvStateId),
-          logicalStateName(std::move(other.logicalStateName)),
-          valueSerializer(other.valueSerializer),
-          sourceValueSerializer(other.sourceValueSerializer),
-          vbAccessor(std::move(other.vbAccessor)),
-          stateType(other.stateType)
-    {
-        other.writable = false;
-        other.mappedKvStateId = -1;
-        other.valueSerializer = nullptr;
-        other.sourceValueSerializer = nullptr;
-        other.stateType = VectorBatchStateType::KV;
-    }
-
-    VectorBatchSaveStateContext& operator=(VectorBatchSaveStateContext&& other) noexcept
-    {
-        if (this != &other) {
-            closeAccessor();
-            writable = other.writable;
-            mappedKvStateId = other.mappedKvStateId;
-            logicalStateName = std::move(other.logicalStateName);
-            valueSerializer = other.valueSerializer;
-            sourceValueSerializer = other.sourceValueSerializer;
-            vbAccessor = std::move(other.vbAccessor);
-            stateType = other.stateType;
-            other.writable = false;
-            other.mappedKvStateId = -1;
-            other.valueSerializer = nullptr;
-            other.sourceValueSerializer = nullptr;
-            other.stateType = VectorBatchStateType::KV;
-        }
-        return *this;
-    }
 
     bool isValid() const
     {
@@ -104,24 +55,7 @@ struct VectorBatchSaveStateContext {
             valueSerializer == nullptr) {
             return false;
         }
-        if (stateType != VectorBatchStateType::KV && stateType != VectorBatchStateType::KV_TRANSFORM &&
-            stateType != VectorBatchStateType::PQ && vbAccessor == nullptr) {
-            return false;
-        }
         return true;
-    }
-
-private:
-    void closeAccessor() noexcept
-    {
-        if (vbAccessor == nullptr) {
-            return;
-        }
-        try {
-            vbAccessor->close();
-        } catch (...) {
-        }
-        vbAccessor.reset();
     }
 };
 
@@ -138,8 +72,7 @@ struct VectorBatchSavePlan {
         int sourceKvStateId;
         std::string logicalStateName;
         TypeSerializer* valueSerializer = nullptr;
-        VectorBatchAccessorOptions accessorOptions;
-        VectorBatchStateType stateType = VectorBatchStateType::KV_WITH_VB;
+        VectorBatchStateType stateType = VectorBatchStateType::KV;
         TypeSerializer* sourceValueSerializer = nullptr;
     };
     std::vector<StateContextSpec> stateContextSpecs;
@@ -159,8 +92,6 @@ struct ConvertedEntry {
     const VectorBatchSaveStateContext* context = nullptr;
     std::vector<int8_t> keyBytes;
     std::vector<int8_t> valueBytes;
-    // 当前转换结果引用的 Omni VectorBatch 行标识，保持完整的无符号 ComboId 位布局。
-    omnistream::ComboId comboRef = 0;
 };
 
 } // namespace omnistream

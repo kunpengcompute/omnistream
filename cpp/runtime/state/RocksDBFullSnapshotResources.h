@@ -35,13 +35,6 @@
 /**
  * RocksDBFullSnapshotResources 持有 RocksDB full snapshot 保存阶段需要的只读资源。
  *
- * 使用方式：createKVStateIterator() 继续按 metaData_ 的既有顺序创建全量 KV iterator；
- * createVectorBatchStateAccessor(logicalStateName, options) 则按 state name 查找对应的
- * VectorBatch 侧表 column family，并创建绑定当前 RocksDB snapshot 的 point lookup accessor。
- *
- * 生命周期/所有权边界：本类拥有 ResourceGuard lease，并负责释放 RocksDB snapshot；
- * 返回的 RocksDBVectorBatchStateAccessor 只借用 DB、column family 和 snapshot，不 acquire/release
- * snapshot，调用方关闭 accessor 只会释放 accessor 自身缓存和 pinned slice。
  */
 class RocksDBFullSnapshotResources : public FullSnapshotResources {
 private:
@@ -63,7 +56,6 @@ private:
     std::vector<std::shared_ptr<StateMetaInfoSnapshot>> stateMetaInfoSnapshots_;
     rocksdb::DB* db_;
     std::vector<std::shared_ptr<MetaData>> metaData_;
-    std::unordered_map<std::string, std::shared_ptr<MetaData>> metaDataByStateName_;
     int keyGroupPrefixBytes_;
     KeyGroupRange* keyGroupRange_;
     TypeSerializer* keySerializer_;
@@ -80,8 +72,6 @@ public:
     {
         return keyGroupPrefixBytes_;
     }
-    std::shared_ptr<VectorBatchStateAccessor> createVectorBatchStateAccessor(
-        const std::string& logicalStateName, const VectorBatchAccessorOptions& options) override;
     std::vector<std::pair<std::unique_ptr<RocksIteratorWrapper>, int>> createKVStateIterators(
         std::unique_ptr<CloseableRegistry>& closeableRegistry, const rocksdb::ReadOptions& readOptions);
 

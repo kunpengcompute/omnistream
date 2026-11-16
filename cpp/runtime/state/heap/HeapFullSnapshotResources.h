@@ -18,8 +18,6 @@
 #include "runtime/state/FullSnapshotResources.h"
 #include "runtime/state/KeyGroupRange.h"
 #include "runtime/state/KeyValueStateIterator.h"
-#include "runtime/state/heap/HeapSnapshotStateData.h"
-#include "runtime/state/heap/HeapVectorBatchStateAccessor.h"
 #include "runtime/state/metainfo/StateMetaInfoSnapshot.h"
 #include "runtime/state/rocksdb/iterator/SingleStateIterator.h"
 #include "runtime/state/rocksdb/iterator/RocksStatesPerKeyGroupMergeIterator.h"
@@ -45,14 +43,12 @@ public:
         std::vector<std::unique_ptr<SingleStateIterator>> stateIterators,
         KeyGroupRange* keyGroupRange,
         TypeSerializer* keySerializer,
-        int keyGroupPrefixBytes,
-        std::unordered_map<std::string, std::shared_ptr<HeapSnapshotStateData>> snapshotStateDataByName)
+        int keyGroupPrefixBytes)
         : stateMetaInfoSnapshots_(std::move(stateMetaInfoSnapshots)),
           stateIterators_(std::move(stateIterators)),
           keyGroupRange_(keyGroupRange),
           keySerializer_(keySerializer),
-          keyGroupPrefixBytes_(keyGroupPrefixBytes),
-          snapshotStateDataByName_(std::move(snapshotStateDataByName))
+          keyGroupPrefixBytes_(keyGroupPrefixBytes)
     {
     }
 
@@ -94,35 +90,17 @@ public:
             std::move(closeableRegistry), emptyRocksIterators, heapIterators, keyGroupPrefixBytes_);
     }
 
-    std::shared_ptr<VectorBatchStateAccessor> createVectorBatchStateAccessor(
-        const std::string& logicalStateName, const VectorBatchAccessorOptions& options) override
-    {
-        const std::string stateName = resolveVectorBatchStateName(logicalStateName);
-        auto iter = snapshotStateDataByName_.find(stateName);
-        if (iter == snapshotStateDataByName_.end() || iter->second == nullptr) {
-            return nullptr;
-        }
-        return std::make_shared<HeapVectorBatchStateAccessor>(iter->second, options);
-    }
-
     void cleanup() override
     {
-        // cleanup 只释放一次性 KV iterator；snapshotStateDataByName_ 需要保留给已创建或后续创建的 VB accessor。
         stateIterators_.clear();
     }
 
 private:
-    static std::string resolveVectorBatchStateName(const std::string& logicalStateName)
-    {
-        return logicalStateName + "vb";
-    }
-
     std::vector<std::shared_ptr<StateMetaInfoSnapshot>> stateMetaInfoSnapshots_;
     std::vector<std::unique_ptr<SingleStateIterator>> stateIterators_;
     KeyGroupRange* keyGroupRange_;
     TypeSerializer* keySerializer_;
     int keyGroupPrefixBytes_;
-    std::unordered_map<std::string, std::shared_ptr<HeapSnapshotStateData>> snapshotStateDataByName_;
 };
 
 #endif // OMNISTREAM_HEAPFULLSNAPSHOTRESOURCES_H

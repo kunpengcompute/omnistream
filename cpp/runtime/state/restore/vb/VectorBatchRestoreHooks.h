@@ -20,11 +20,10 @@
 namespace omnistream {
 
 class RestoreKVState;
-class RestoreKVStateVB;
 
-// VectorBatch 恢复方向的算子语义扩展接口。
+// 兼容 savepoint 恢复方向的算子语义扩展接口。
 // VectorBatchRestoreFlow 负责状态遍历、writer 创建和生命周期管理，具体 Adaptor 负责
-// stateType 分发、metadata 转换以及 KV_TRANSFORM / KV_WITH_VB 的数据转换逻辑。
+// stateType 分发、metadata 转换以及 KV_TRANSFORM 的数据转换逻辑。
 class VectorBatchRestoreHooks {
 public:
     virtual ~VectorBatchRestoreHooks() = default;
@@ -37,15 +36,6 @@ public:
     {
         ERROR_RELEASE("transformKVData not implemented by this adaptor.");
         throw std::runtime_error("transformKVData not implemented by this adaptor");
-    }
-
-    // VectorBatchRestoreFlow KV_WITH_VB 钩子：默认不支持，由具体 Adaptor 重写。
-    // 对应带 VectorBatch side table 的 KV 状态（如 deduplicate/TopN/join）。
-    virtual void retrieveKVRowData(
-        const std::vector<int8_t>& key, const std::vector<int8_t>& value, int kvStateId, RestoreKVStateVB* writer)
-    {
-        ERROR_RELEASE("retrieveKVRowData not implemented by this adaptor.");
-        throw std::runtime_error("retrieveKVRowData not implemented by this adaptor");
     }
 };
 

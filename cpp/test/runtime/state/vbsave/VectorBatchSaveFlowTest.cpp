@@ -70,11 +70,6 @@ public:
     MOCK_METHOD(std::shared_ptr<KeyValueStateIterator>, createKVStateIterator, (), (override));
     MOCK_METHOD(bool, isHeapPriorityQueueStateId, (int), (const, override));
     MOCK_METHOD(int, getKeyGroupPrefixBytes, (), (const, override));
-    MOCK_METHOD(
-        std::shared_ptr<VectorBatchStateAccessor>,
-        createVectorBatchStateAccessor,
-        (const std::string&, const VectorBatchAccessorOptions&),
-        (override));
     MOCK_METHOD(void, cleanup, (), (override));
 };
 

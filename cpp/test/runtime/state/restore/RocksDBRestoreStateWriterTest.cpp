@@ -20,8 +20,6 @@
 #include <utility>
 #include <vector>
 
-#include "core/memory/DataOutputSerializer.h"
-#include "core/typeutils/LongSerializer.h"
 #include "core/utils/ByteView.h"
 #include "runtime/state/RocksDbKvStateInfo.h"
 #include "runtime/state/metainfo/StateMetaInfoSnapshot.h"
@@ -38,18 +36,6 @@ StateMetaInfoSnapshot makeMetaInfo(const std::string& name, StateMetaInfoSnapsho
         type,
         std::unordered_map<std::string, std::string>{},
         std::unordered_map<std::string, std::shared_ptr<TypeSerializerSnapshot>>{});
-}
-
-std::vector<int8_t> serializeLong(int64_t value)
-{
-    DataOutputSerializer output;
-    OutputBufferStatus outputStatus{};
-    output.setBackendBuffer(&outputStatus);
-    LongSerializer serializer;
-    serializer.serialize(&value, output);
-    return {
-        reinterpret_cast<int8_t*>(output.getData()),
-        reinterpret_cast<int8_t*>(output.getData() + output.getPosition())};
 }
 
 class RocksDBRestoreStateWriterTest : public ::testing::Test {
@@ -100,7 +86,7 @@ protected:
 
     omnistream::RocksDBWriterContext makeContext(int64_t* mainEntryCount)
     {
-        return {rocksDbHandle_->getDb(), 2 * 1024 * 1024, 1, 0, -1, mainEntryCount, nullptr};
+        return {rocksDbHandle_->getDb(), 2 * 1024 * 1024, 1, 0, -1, mainEntryCount};
     }
 
     std::filesystem::path dbPath_;
@@ -113,23 +99,6 @@ protected:
 
 } // namespace
 
-TEST_F(RocksDBRestoreStateWriterTest, LongEntryUsesFlinkLongEncodingAndUpdatesCount)
-{
-    int64_t mainEntryCount = 0;
-    auto context = makeContext(&mainEntryCount);
-    const std::vector<int8_t> key{0, 1, 2};
-    constexpr int64_t value = 0x0102030405060708LL;
-
-    omnistream::RocksDBRestoreKVState<int> writer(context, mainCf_, 3);
-    writer.writeEntry<int64_t>(key, value);
-    writer.flush();
-
-    std::string restored;
-    ASSERT_TRUE(get(mainCf_, key, &restored).ok());
-    EXPECT_EQ(std::vector<int8_t>(restored.begin(), restored.end()), serializeLong(value));
-    EXPECT_EQ(mainEntryCount, 1);
-}
-
 TEST_F(RocksDBRestoreStateWriterTest, ByteViewEntryPreservesEmbeddedZeroBytes)
 {
     int64_t mainEntryCount = 0;
@@ -138,7 +107,7 @@ TEST_F(RocksDBRestoreStateWriterTest, ByteViewEntryPreservesEmbeddedZeroBytes)
     const std::vector<int8_t> value{0, 9, 0, 8, 0};
 
     omnistream::RocksDBRestoreKVState<int> writer(context, mainCf_, 4);
-    writer.writeEntry<ByteView>(key, ByteView::fromBuffer(value.data(), value.size()));
+    writer.writeEntry(key, ByteView::fromBuffer(value.data(), value.size()));
     writer.flush();
 
     std::string restored;
@@ -153,7 +122,7 @@ TEST_F(RocksDBRestoreStateWriterTest, EmptyByteViewIsStoredAsEmptyValueWithoutSt
     const std::vector<int8_t> key{7};
 
     omnistream::RocksDBRestoreKVState<int> writer(context, mainCf_, 5);
-    writer.writeEntry<ByteView>(key, ByteView());
+    writer.writeEntry(key, ByteView());
     writer.flush();
 
     std::string restored = "not-empty";
@@ -177,7 +146,7 @@ TEST_F(RocksDBRestoreStateWriterTest, DiscardDropsPendingKeyValueEntry)
     const std::vector<int8_t> value{7, 7};
     omnistream::RocksDBRestoreKVState<int> writer(context, mainCf_, 6);
 
-    writer.writeEntry<ByteView>(key, ByteView::fromBuffer(value.data(), value.size()));
+    writer.writeEntry(key, ByteView::fromBuffer(value.data(), value.size()));
     writer.discard();
     EXPECT_NO_THROW(writer.discard());
 
