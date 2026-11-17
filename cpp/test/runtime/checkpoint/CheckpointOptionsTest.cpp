@@ -7,7 +7,7 @@ TEST(CheckpointOptionsTest, ConstructorTest)
     auto targetLocation = CheckpointStorageLocationReference::GetDefault();
     CheckpointOptions* options = new CheckpointOptions(checkpointType, targetLocation);
 
-    EXPECT_EQ(options->GetCheckpointType(), checkpointType);
+    EXPECT_EQ(options->GetCheckpointType(), checkpointType.get());
     EXPECT_EQ(options->GetTargetLocation(), targetLocation);
     EXPECT_EQ(options->GetAlignment(), CheckpointOptions::AlignmentType::ALIGNED);
     EXPECT_EQ(options->GetAlignedCheckpointTimeout(), CheckpointOptions::NO_ALIGNED_CHECKPOINT_TIME_OUT);

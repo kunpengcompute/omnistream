@@ -25,145 +25,117 @@ using namespace omnistream;
 
 TEST(SavepointTypeTest, IsSavepointReturnsTrue)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     EXPECT_TRUE(sp->IsSavepoint());
-    delete sp;
 }
 
 TEST(SavepointTypeTest, SavepointIsSynchronousReturnsFalse)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     EXPECT_FALSE(sp->isSynchronous());
-    delete sp;
 }
 
 TEST(SavepointTypeTest, TerminateIsSynchronousReturnsTrue)
 {
-    auto* sp = SavepointType::terminate(SavepointFormatType::NATIVE);
+    auto sp = SavepointType::terminate(SavepointFormatType::NATIVE);
     EXPECT_TRUE(sp->isSynchronous());
-    delete sp;
 }
 
 TEST(SavepointTypeTest, SuspendIsSynchronousReturnsTrue)
 {
-    auto* sp = SavepointType::suspend(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::suspend(SavepointFormatType::CANONICAL);
     EXPECT_TRUE(sp->isSynchronous());
-    delete sp;
 }
 
 TEST(SavepointTypeTest, ShouldDrainTrueForTerminateFalseForOthers)
 {
-    auto* terminate = SavepointType::terminate(SavepointFormatType::NATIVE);
-    auto* savepoint = SavepointType::savepoint(SavepointFormatType::CANONICAL);
-    auto* suspend = SavepointType::suspend(SavepointFormatType::CANONICAL);
+    auto terminate = SavepointType::terminate(SavepointFormatType::NATIVE);
+    auto savepoint = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto suspend = SavepointType::suspend(SavepointFormatType::CANONICAL);
 
     EXPECT_TRUE(terminate->shouldDrain());
     EXPECT_FALSE(savepoint->shouldDrain());
     EXPECT_FALSE(suspend->shouldDrain());
-
-    delete terminate;
-    delete savepoint;
-    delete suspend;
 }
 
 TEST(SavepointTypeTest, ShouldIgnoreEndOfInputTrueForSuspendFalseForOthers)
 {
-    auto* terminate = SavepointType::terminate(SavepointFormatType::NATIVE);
-    auto* savepoint = SavepointType::savepoint(SavepointFormatType::CANONICAL);
-    auto* suspend = SavepointType::suspend(SavepointFormatType::CANONICAL);
+    auto terminate = SavepointType::terminate(SavepointFormatType::NATIVE);
+    auto savepoint = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto suspend = SavepointType::suspend(SavepointFormatType::CANONICAL);
 
     EXPECT_FALSE(terminate->shouldIgnoreEndOfInput());
     EXPECT_FALSE(savepoint->shouldIgnoreEndOfInput());
     EXPECT_TRUE(suspend->shouldIgnoreEndOfInput());
-
-    delete terminate;
-    delete savepoint;
-    delete suspend;
 }
 
 TEST(SavepointTypeTest, GetSharingFilesStrategyReturnsNoSharing)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::NATIVE);
+    auto sp = SavepointType::savepoint(SavepointFormatType::NATIVE);
     EXPECT_EQ(sp->GetSharingFilesStrategy(), SnapshotType::SharingFilesStrategy::NO_SHARING);
-    delete sp;
 }
 
 TEST(SavepointTypeTest, GetFormatTypeReturnsCorrectType)
 {
-    auto* canonical = SavepointType::savepoint(SavepointFormatType::CANONICAL);
-    auto* native = SavepointType::savepoint(SavepointFormatType::NATIVE);
+    auto canonical = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto native = SavepointType::savepoint(SavepointFormatType::NATIVE);
 
     EXPECT_EQ(canonical->getFormatType(), SavepointFormatType::CANONICAL);
     EXPECT_EQ(native->getFormatType(), SavepointFormatType::NATIVE);
-
-    delete canonical;
-    delete native;
 }
 
 TEST(SavepointTypeTest, OperatorEqualsWithSameTypeAndFormat)
 {
-    auto* a = SavepointType::savepoint(SavepointFormatType::NATIVE);
-    auto* b = SavepointType::savepoint(SavepointFormatType::NATIVE);
+    auto a = SavepointType::savepoint(SavepointFormatType::NATIVE);
+    auto b = SavepointType::savepoint(SavepointFormatType::NATIVE);
     EXPECT_TRUE(*a == *b);
-    delete a;
-    delete b;
 }
 
 TEST(SavepointTypeTest, OperatorEqualsDifferentFormat)
 {
-    auto* a = SavepointType::terminate(SavepointFormatType::CANONICAL);
-    auto* b = SavepointType::terminate(SavepointFormatType::NATIVE);
+    auto a = SavepointType::terminate(SavepointFormatType::CANONICAL);
+    auto b = SavepointType::terminate(SavepointFormatType::NATIVE);
     EXPECT_FALSE(*a == *b);
-    delete a;
-    delete b;
 }
 
 TEST(SavepointTypeTest, OperatorEqualsCrossTypeWithCheckpoint)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     EXPECT_FALSE((*sp) == (*CheckpointType::CHECKPOINT));
-    delete sp;
 }
 
 TEST(SavepointTypeTest, FactorySavepointProducesCorrectName)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     EXPECT_EQ(sp->GetName(), "Savepoint");
-    delete sp;
 }
 
 TEST(SavepointTypeTest, FactoryTerminateProducesCorrectName)
 {
-    auto* sp = SavepointType::terminate(SavepointFormatType::NATIVE);
+    auto sp = SavepointType::terminate(SavepointFormatType::NATIVE);
     EXPECT_EQ(sp->GetName(), "Terminate Savepoint");
-    delete sp;
 }
 
 TEST(SavepointTypeTest, FactorySuspendProducesCorrectName)
 {
-    auto* sp = SavepointType::suspend(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::suspend(SavepointFormatType::CANONICAL);
     EXPECT_EQ(sp->GetName(), "Suspend Savepoint");
-    delete sp;
 }
 
 TEST(SavepointTypeTest, ShouldAdvanceToEndOfTimeDelegatesToShouldDrain)
 {
-    auto* terminate = SavepointType::terminate(SavepointFormatType::NATIVE);
-    auto* savepoint = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto terminate = SavepointType::terminate(SavepointFormatType::NATIVE);
+    auto savepoint = SavepointType::savepoint(SavepointFormatType::CANONICAL);
 
     EXPECT_TRUE(terminate->shouldAdvanceToEndOfTime());
     EXPECT_FALSE(savepoint->shouldAdvanceToEndOfTime());
-
-    delete terminate;
-    delete savepoint;
 }
 
 TEST(SavepointTypeTest, ToStringContainsKeyFields)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::NATIVE);
+    auto sp = SavepointType::savepoint(SavepointFormatType::NATIVE);
     std::string str = sp->ToString();
     EXPECT_NE(str.find("Savepoint"), std::string::npos);
-    delete sp;
 }
 
 // =========================================================================
@@ -199,9 +171,8 @@ TEST(CheckpointTypeTest, OperatorEqualsDifferentType)
 
 TEST(CheckpointTypeTest, OperatorEqualsCrossTypeWithSavepoint)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     EXPECT_FALSE(CheckpointType::CHECKPOINT->operator==(*sp));
-    delete sp;
 }
 
 TEST(CheckpointTypeTest, GetNameReturnsCorrect)
@@ -216,7 +187,7 @@ TEST(CheckpointTypeTest, GetNameReturnsCorrect)
 
 TEST(CheckpointOptionsTest, SavepointCannotBeUnaligned)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     EXPECT_THROW(
         CheckpointOptions(
             sp,
@@ -224,7 +195,6 @@ TEST(CheckpointOptionsTest, SavepointCannotBeUnaligned)
             CheckpointOptions::AlignmentType::UNALIGNED,
             CheckpointOptions::NO_ALIGNED_CHECKPOINT_TIME_OUT),
         std::invalid_argument);
-    delete sp;
 }
 
 TEST(CheckpointOptionsTest, UnalignedCheckpointCannotHaveTimeout)
@@ -293,13 +263,12 @@ TEST(CheckpointOptionsTest, ForConfigNotExactlyOnceReturnsAtLeastOnce)
 
 TEST(CheckpointOptionsTest, ForConfigSavepointReturnsAlignedNoTimeout)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     auto* options =
         CheckpointOptions::ForConfig(*sp, CheckpointStorageLocationReference::GetDefault(), true, true, 10000L);
     EXPECT_EQ(options->GetAlignment(), CheckpointOptions::AlignmentType::ALIGNED);
     EXPECT_EQ(options->GetAlignedCheckpointTimeout(), CheckpointOptions::NO_ALIGNED_CHECKPOINT_TIME_OUT);
     delete options;
-    delete sp;
 }
 
 TEST(CheckpointOptionsTest, ForConfigUnalignedDisabledReturnsAlignedNoTimeout)
@@ -418,11 +387,10 @@ TEST(CheckpointOptionsTest, NeedsAlignmentForCheckpointUnaligned)
 
 TEST(CheckpointOptionsTest, NeedsAlignmentForSavepoint)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     auto* options = CheckpointOptions::AlignedNoTimeout(*sp, CheckpointStorageLocationReference::GetDefault());
     EXPECT_TRUE(options->NeedsAlignment());
     delete options;
-    delete sp;
 }
 
 // =========================================================================
@@ -614,11 +582,10 @@ TEST(CheckpointBarrierTest, IsCheckpointReturnsTrueForCheckpoint)
 
 TEST(CheckpointBarrierTest, IsCheckpointReturnsFalseForSavepoint)
 {
-    auto* sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto sp = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     auto options = std::make_shared<CheckpointOptions>(sp, CheckpointStorageLocationReference::GetDefault());
     CheckpointBarrier barrier(1, 1000, options);
     EXPECT_FALSE(barrier.IsCheckpoint());
-    delete sp;
 }
 
 TEST(CheckpointBarrierTest, WithOptionsSameReturnsThis)

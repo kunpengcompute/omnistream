@@ -179,7 +179,7 @@ protected:
         ON_CALL(*bridge_, AcquireSavepointOutputStream(_, _)).WillByDefault(Return(kMockProvider));
         ON_CALL(*bridge_, CreateSavepointOutputDirectBuffer(_, _)).WillByDefault(Return(kMockDirectBuffer));
         ON_CALL(*bridge_, GetSavepointOutputStreamPos(_)).WillByDefault(Return(0L));
-        savepointType_.reset(SavepointType::savepoint(SavepointFormatType::CANONICAL));
+        savepointType_ = SavepointType::savepoint(SavepointFormatType::CANONICAL);
         checkpointOptions_.reset(
             CheckpointOptions::AlignedNoTimeout(*savepointType_, CheckpointStorageLocationReference::GetDefault()));
     }
@@ -193,7 +193,7 @@ protected:
     }
 
     std::shared_ptr<NiceMock<MockSavepointBridge>> bridge_;
-    std::unique_ptr<SavepointType> savepointType_;
+    std::shared_ptr<SavepointType> savepointType_;
     std::unique_ptr<CheckpointOptions> checkpointOptions_;
 };
 

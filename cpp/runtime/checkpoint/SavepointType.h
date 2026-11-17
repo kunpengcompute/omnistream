@@ -27,19 +27,21 @@ public:
         TERMINATE
     };
 
-    static SavepointType* savepoint(SavepointFormatType formatType)
+    static std::shared_ptr<SavepointType> savepoint(SavepointFormatType formatType)
     {
-        return new SavepointType("Savepoint", PostCheckpointAction::NONE, formatType);
+        return std::shared_ptr<SavepointType>(new SavepointType("Savepoint", PostCheckpointAction::NONE, formatType));
     }
 
-    static SavepointType* terminate(SavepointFormatType formatType)
+    static std::shared_ptr<SavepointType> terminate(SavepointFormatType formatType)
     {
-        return new SavepointType("Terminate Savepoint", PostCheckpointAction::TERMINATE, formatType);
+        return std::shared_ptr<SavepointType>(
+            new SavepointType("Terminate Savepoint", PostCheckpointAction::TERMINATE, formatType));
     }
 
-    static SavepointType* suspend(SavepointFormatType formatType)
+    static std::shared_ptr<SavepointType> suspend(SavepointFormatType formatType)
     {
-        return new SavepointType("Suspend Savepoint", PostCheckpointAction::SUSPEND, formatType);
+        return std::shared_ptr<SavepointType>(
+            new SavepointType("Suspend Savepoint", PostCheckpointAction::SUSPEND, formatType));
     }
 
     bool IsSavepoint() const override

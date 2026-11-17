@@ -11,11 +11,11 @@
 #include "CheckpointType.h"
 #include "nlohmann/json.hpp"
 
-CheckpointType* CheckpointType::CHECKPOINT =
-    new CheckpointType("Checkpoint", SnapshotType::SharingFilesStrategy::FORWARD_BACKWARD);
+std::shared_ptr<CheckpointType> CheckpointType::CHECKPOINT = std::shared_ptr<CheckpointType>(
+    new CheckpointType("Checkpoint", SnapshotType::SharingFilesStrategy::FORWARD_BACKWARD));
 
-CheckpointType* CheckpointType::FULL_CHECKPOINT =
-    new CheckpointType("FullCheckpoint", SnapshotType::SharingFilesStrategy::FORWARD);
+std::shared_ptr<CheckpointType> CheckpointType::FULL_CHECKPOINT =
+    std::shared_ptr<CheckpointType>(new CheckpointType("FullCheckpoint", SnapshotType::SharingFilesStrategy::FORWARD));
 
 CheckpointType::CheckpointType(std::string name, SnapshotType::SharingFilesStrategy sharingFileStrategy)
     : name(name),

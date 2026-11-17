@@ -50,7 +50,7 @@ public:
     static MemorySegment* SerializeCheckpointBarrier(std::shared_ptr<CheckpointBarrier> checkpointBarrier);
     static void EncodeSavepointType(SavepointType* savepointType, ByteBuffer& buffer);
     static std::shared_ptr<CheckpointBarrier> DeserializeCheckpointBarrier(ByteBuffer& buffer);
-    static SnapshotType* DecodeSavepointType(uint8_t checkpointTypeCode, ByteBuffer& buffer);
+    static std::shared_ptr<SnapshotType> DecodeSavepointType(uint8_t checkpointTypeCode, ByteBuffer& buffer);
 
 public:
     static const int INVALID_EVENT;

@@ -17,8 +17,8 @@
 
 class CheckpointType : public SnapshotType {
 public:
-    static CheckpointType* CHECKPOINT;
-    static CheckpointType* FULL_CHECKPOINT;
+    static std::shared_ptr<CheckpointType> CHECKPOINT;
+    static std::shared_ptr<CheckpointType> FULL_CHECKPOINT;
     CheckpointType(std::string name, SnapshotType::SharingFilesStrategy sharingFilesStrategy);
 
     bool IsSavepoint() const override

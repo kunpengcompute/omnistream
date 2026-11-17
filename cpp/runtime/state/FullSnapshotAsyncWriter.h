@@ -21,13 +21,13 @@ class FullSnapshotAsyncWriter : public SnapshotResultSupplier<KeyedStateHandle> 
 private:
     std::shared_ptr<FullSnapshotResources> snapshotResources_;
     long checkpointId_;
-    SnapshotType* snapshotType_;
+    std::shared_ptr<SnapshotType> snapshotType_;
     CheckpointOptions* checkpointOptions_;
     std::string keySerializer_;
 
 public:
     FullSnapshotAsyncWriter(
-        SnapshotType* snapshotType,
+        std::shared_ptr<SnapshotType> snapshotType,
         CheckpointOptions* checkpointOptions,
         long checkpointId,
         const std::shared_ptr<FullSnapshotResources>& snapshotResources,

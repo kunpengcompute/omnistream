@@ -345,7 +345,7 @@ std::shared_ptr<CheckpointBarrier> EventSerializer::DeserializeCheckpointBarrier
     // Read the checkpoint type code
     uint8_t checkpointTypeCode = buffer.getByte();
     // Determine the snapshot type based on the checkpoint type code
-    SnapshotType* snapshotType = nullptr;
+    std::shared_ptr<SnapshotType> snapshotType = nullptr;
     if (checkpointTypeCode == CHECKPOINT_TYPE_CHECKPOINT) {
         snapshotType = CheckpointType::CHECKPOINT;
     } else if (checkpointTypeCode == CHECKPOINT_TYPE_FULL_CHECKPOINT) {
@@ -380,7 +380,7 @@ std::shared_ptr<CheckpointBarrier> EventSerializer::DeserializeCheckpointBarrier
     return std::make_shared<CheckpointBarrier>(id, timestamp, checkpointOptions);
 }
 
-SnapshotType* EventSerializer::DecodeSavepointType(uint8_t checkpointTypeCode, ByteBuffer& buffer)
+std::shared_ptr<SnapshotType> EventSerializer::DecodeSavepointType(uint8_t checkpointTypeCode, ByteBuffer& buffer)
 {
     uint8_t formatTypeCode = buffer.getByte();
     SavepointFormatType formatType;

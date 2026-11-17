@@ -106,7 +106,7 @@ TEST(CompatibleSavepointSnapshotStrategyTest, AsyncSnapshotValidatesEmptyMetaAnd
         makeAdaptor(&adaptorDestroyed, &validateCount),
         compatible_savepoint_test::makeCompatibleTestAdaptorInfo());
     CompatibleSavepointSnapshotStrategy strategy(resources);
-    std::unique_ptr<SavepointType> savepointType(SavepointType::savepoint(SavepointFormatType::COMPATIBLE));
+    auto savepointType = SavepointType::savepoint(SavepointFormatType::COMPATIBLE);
     std::unique_ptr<CheckpointOptions> checkpointOptions(
         CheckpointOptions::AlignedNoTimeout(*savepointType, CheckpointStorageLocationReference::GetDefault()));
 
@@ -132,7 +132,7 @@ TEST(CompatibleSavepointSnapshotStrategyTest, AsyncSnapshotTransfersAdaptorOwner
         makeAdaptor(&adaptorDestroyed),
         compatible_savepoint_test::makeCompatibleTestAdaptorInfo());
     CompatibleSavepointSnapshotStrategy strategy(resources);
-    std::unique_ptr<SavepointType> savepointType(SavepointType::savepoint(SavepointFormatType::COMPATIBLE));
+    auto savepointType = SavepointType::savepoint(SavepointFormatType::COMPATIBLE);
     std::unique_ptr<CheckpointOptions> checkpointOptions(
         CheckpointOptions::AlignedNoTimeout(*savepointType, CheckpointStorageLocationReference::GetDefault()));
 

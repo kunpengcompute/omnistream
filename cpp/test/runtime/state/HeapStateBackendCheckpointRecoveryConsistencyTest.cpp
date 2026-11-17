@@ -1155,7 +1155,7 @@ TEST(HeapStateBackendDtTest, BackendCheckpointRestoreKeepsKeyedReduceStateConsis
 // but forces SavepointType::CANONICAL to exercise savepoint metadata/data restore.
 TEST(HeapStateBackendDtTest, BackendSavepointRestoreKeepsKeyedReduceStateConsistent)
 {
-    std::unique_ptr<SavepointType> savepointType(SavepointType::savepoint(SavepointFormatType::CANONICAL));
+    auto savepointType = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     std::unique_ptr<CheckpointOptions> options(
         CheckpointOptions::AlignedNoTimeout(*savepointType, CheckpointStorageLocationReference::GetDefault()));
     assertBackendSnapshotRestoreKeepsReduceStateConsistent(options.get());
@@ -1177,7 +1177,7 @@ TEST(HeapStateBackendDtTest, OperatorChainCheckpointRestoreKeepsHeapKeyedReduceS
 // immediate reduce state, downstream records, and final reduce state as the baseline.
 TEST(HeapStateBackendDtTest, OperatorChainSavepointRestoreKeepsHeapKeyedReduceStateConsistent)
 {
-    std::unique_ptr<SavepointType> savepointType(SavepointType::savepoint(SavepointFormatType::CANONICAL));
+    auto savepointType = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     std::unique_ptr<CheckpointOptions> options(
         CheckpointOptions::AlignedNoTimeout(*savepointType, CheckpointStorageLocationReference::GetDefault()));
     assertOperatorChainRestoreKeepsHeapKeyedReduceStateConsistent(options.get());

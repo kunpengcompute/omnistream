@@ -77,7 +77,7 @@ TEST(CheckpointBarrierTest, serializeDeserializeTestWithSavePointNoneCanonical)
     std::vector<uint8_t> bytes = {0x01, 0x02, 0x03, 0x04};
     auto refBytes = std::make_shared<std::vector<uint8_t>>(bytes);
     auto location = std::make_shared<CheckpointStorageLocationReference>(refBytes);
-    SavepointType* savepoint = SavepointType::savepoint(SavepointFormatType::CANONICAL);
+    auto savepoint = SavepointType::savepoint(SavepointFormatType::CANONICAL);
     CheckpointOptions* options = new CheckpointOptions(savepoint, location);
     CheckpointBarrier barrier(1, 1000, options);
 
@@ -97,7 +97,7 @@ TEST(CheckpointBarrierTest, serializeDeserializeTestWithSavePointNoneNative)
     std::vector<uint8_t> bytes = {0x01, 0x02, 0x03, 0x04};
     auto refBytes = std::make_shared<std::vector<uint8_t>>(bytes);
     auto location = std::make_shared<CheckpointStorageLocationReference>(refBytes);
-    SavepointType* savepoint = SavepointType::savepoint(SavepointFormatType::NATIVE);
+    auto savepoint = SavepointType::savepoint(SavepointFormatType::NATIVE);
     CheckpointOptions* options = new CheckpointOptions(savepoint, location);
     CheckpointBarrier barrier(1, 1000, options);
 
@@ -117,7 +117,7 @@ TEST(CheckpointBarrierTest, serializeDeserializeTestWithSavePointTerminateNative
     std::vector<uint8_t> bytes = {0x01, 0x02, 0x03, 0x04};
     auto refBytes = std::make_shared<std::vector<uint8_t>>(bytes);
     auto location = std::make_shared<CheckpointStorageLocationReference>(refBytes);
-    SavepointType* savepoint = SavepointType::terminate(SavepointFormatType::NATIVE);
+    auto savepoint = SavepointType::terminate(SavepointFormatType::NATIVE);
     CheckpointOptions* options = new CheckpointOptions(savepoint, location);
     CheckpointBarrier barrier(1, 1000, options);
 
@@ -137,7 +137,7 @@ TEST(CheckpointBarrierTest, serializeDeserializeTestWithSavePointTerminateCanoni
     std::vector<uint8_t> bytes = {0x01, 0x02, 0x03, 0x04};
     auto refBytes = std::make_shared<std::vector<uint8_t>>(bytes);
     auto location = std::make_shared<CheckpointStorageLocationReference>(refBytes);
-    SavepointType* savepoint = SavepointType::terminate(SavepointFormatType::CANONICAL);
+    auto savepoint = SavepointType::terminate(SavepointFormatType::CANONICAL);
     CheckpointOptions* options = new CheckpointOptions(savepoint, location);
     CheckpointBarrier barrier(1, 1000, options);
 
@@ -157,7 +157,7 @@ TEST(CheckpointBarrierTest, serializeDeserializeTestWithSavePointSuspendCanonica
     std::vector<uint8_t> bytes = {0x01, 0x02, 0x03, 0x04};
     auto refBytes = std::make_shared<std::vector<uint8_t>>(bytes);
     auto location = std::make_shared<CheckpointStorageLocationReference>(refBytes);
-    SavepointType* savepoint = SavepointType::suspend(SavepointFormatType::CANONICAL);
+    auto savepoint = SavepointType::suspend(SavepointFormatType::CANONICAL);
     CheckpointOptions* options = new CheckpointOptions(savepoint, location);
     CheckpointBarrier barrier(1, 1000, options);
 
@@ -177,7 +177,7 @@ TEST(CheckpointBarrierTest, serializeDeserializeTestWithSavePointSuspendNative)
     std::vector<uint8_t> bytes = {0x01, 0x02, 0x03, 0x04};
     auto refBytes = std::make_shared<std::vector<uint8_t>>(bytes);
     auto location = std::make_shared<CheckpointStorageLocationReference>(refBytes);
-    SavepointType* savepoint = SavepointType::suspend(SavepointFormatType::NATIVE);
+    auto savepoint = SavepointType::suspend(SavepointFormatType::NATIVE);
     CheckpointOptions* options = new CheckpointOptions(savepoint, location);
     CheckpointBarrier barrier(1, 1000, options);
 
