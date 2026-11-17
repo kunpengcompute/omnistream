@@ -379,6 +379,10 @@ void DebeziumJsonDeserializationSchema::processMessage(
 
         collectRows(*schemaRoot, *payload, rows, hasTimestamp, timestamp, out);
     } catch (const std::exception& e) {
+        // Intentional parity with Flink 1.16 DebeziumJsonDeserializationSchema, which wraps
+        // emitRow()/out.collect() in the same big try/catch and ignores all Throwables when
+        // ignore-parse-errors is enabled (DebeziumJsonDeserializationSchema.java:135-180).
+        // This is a deliberate port, not a defect introduced by this change.
         if (!ignoreParseErrors) {
             throw std::runtime_error(
                 "Corrupt Debezium JSON message '" + std::string(raw) + "'. " + std::string(e.what()));

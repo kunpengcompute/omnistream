@@ -50,6 +50,9 @@ public:
         // path (see StreamCalcBatch.cpp and KeyedProcessOperator). The VectorBatch it wraps is
         // released or forwarded separately below.
         auto inputGuard = std::unique_ptr<StreamRecord>(input);
+        // Align with Flink's StreamFilter, which forwards the original element and therefore keeps
+        // its record-level timestamp. Both collect paths below must carry this timestamp.
+        timestampedCollector_->setTimestamp(input);
         auto* record = reinterpret_cast<VectorBatch*>(input->getValue());
         const int32_t rowCount = record->GetRowCount();
         if (rowCount <= 0) {

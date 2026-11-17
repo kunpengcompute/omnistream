@@ -382,6 +382,9 @@ private:
         if (hour > 23 || minute > 59 || second > 59) {
             throw std::runtime_error("Failed to parse time string: " + text);
         }
+        // Flink's JsonToRowDataConverters.convertToTime parses SQL_TIME_FORMAT (which accepts an
+        // optional fractional second) and then returns localTime.toSecondOfDay() * 1000. Fractional
+        // seconds are intentionally truncated, so keep this behavior for Flink compatibility.
         return static_cast<long>(hour * 3600 + minute * 60 + second) * 1000;
     }
 
