@@ -278,6 +278,7 @@ omnistream::VectorBatch* AbstractTopNFunction<KeyType>::createOutputBatch()
     for (int colIndex = 0; colIndex < numColumns; ++colIndex) {
         switch (inputRowType->at(colIndex)) {
             case DataTypeId::OMNI_LONG:
+            case DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP: {
@@ -288,7 +289,8 @@ omnistream::VectorBatch* AbstractTopNFunction<KeyType>::createOutputBatch()
                 outputBatch->Append(vector);
                 break;
             }
-            case DataTypeId::OMNI_INT: {
+            case DataTypeId::OMNI_INT:
+            case DataTypeId::OMNI_DATE32: {
                 auto* vector = new omniruntime::vec::Vector<int32_t>(numRows);
                 for (int rowIndex = 0; rowIndex < numRows; ++rowIndex) {
                     vector->SetValue(rowIndex, *collectedRows[rowIndex]->getInt(colIndex));
@@ -312,6 +314,7 @@ omnistream::VectorBatch* AbstractTopNFunction<KeyType>::createOutputBatch()
                 outputBatch->Append(vector);
                 break;
             }
+            case DataTypeId::OMNI_CHAR:
             case DataTypeId::OMNI_VARCHAR: {
                 using VarcharVector =
                     omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>;

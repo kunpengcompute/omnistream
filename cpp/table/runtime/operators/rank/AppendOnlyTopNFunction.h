@@ -685,11 +685,14 @@ private:
         int numRows = static_cast<int>(outputs.size());
         switch (this->inputRowType->at(col)) {
             case DataTypeId::OMNI_LONG:
+            case DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP: return copyLongColumn(col, outputs, numRows);
-            case DataTypeId::OMNI_INT: return copyIntColumn(col, outputs, numRows);
+            case DataTypeId::OMNI_INT:
+            case DataTypeId::OMNI_DATE32: return copyIntColumn(col, outputs, numRows);
             case DataTypeId::OMNI_BOOLEAN: return copyBoolColumn(col, outputs, numRows);
+            case DataTypeId::OMNI_CHAR:
             case DataTypeId::OMNI_VARCHAR: return copyVarcharColumn(col, outputs, numRows);
             default: throw std::runtime_error("Unsupported column type in AppendOnlyTopNFunction");
         }

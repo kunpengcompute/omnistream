@@ -276,13 +276,15 @@ private:
                 return false;
             }
             switch (this->inputRowType->at(col)) {
-                case DataTypeId::OMNI_INT: {
+                case DataTypeId::OMNI_INT:
+                case DataTypeId::OMNI_DATE32: {
                     if (*left->getInt(col) != *right->getInt(col)) {
                         return false;
                     }
                     break;
                 }
                 case DataTypeId::OMNI_LONG:
+                case DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
                 case DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
                 case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 case DataTypeId::OMNI_TIMESTAMP: {
