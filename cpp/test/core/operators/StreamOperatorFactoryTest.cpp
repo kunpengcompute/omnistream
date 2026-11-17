@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <stdexcept>
 
 #include "streaming/api/operators/StreamOperatorFactory.h"
 #include "streaming/api/operators/AbstractStreamOperator.h"
 #include "table/data/RowData.h"
+#include "table/runtime/operators/misc/DropUpdateBeforeOperator.h"
 #include "core/graph/OperatorConfig.h"
 #include "streaming/runtime/tasks/WatermarkGaugeExposingOutput.h"
 #include "streaming/api/operators/OneInputStreamOperator.h"
@@ -71,6 +73,38 @@ TEST(StreamOperatorFactoryTest, CreateOperatorAndCollector_UnknownOperator)
 
     MockOutput output;
     EXPECT_EQ(MockStreamOperatorFactory::createOperatorAndCollector(id, description, &output), nullptr);
+}
+
+TEST(StreamOperatorFactoryTest, CreateOperatorAndCollector_DropUpdateBeforeSqlFilter)
+{
+    omnistream::OperatorPOD operatorPod;
+    operatorPod.setId("org.apache.flink.streaming.api.operators.StreamFilter");
+    operatorPod.setDescription(R"({"operator":"DropUpdateBefore"})");
+    operatorPod.setVOperatorType(omnistream::Type_o::SQL);
+
+    MockOutput output;
+    std::unique_ptr<StreamOperator> operatorAndCollector(
+        omnistream::StreamOperatorFactory::createOperatorAndCollector(operatorPod, &output, nullptr));
+
+    ASSERT_NE(operatorAndCollector, nullptr);
+    auto* dropUpdateBefore =
+        dynamic_cast<omnistream::DropUpdateBeforeOperator*>(operatorAndCollector.get());
+    ASSERT_NE(dropUpdateBefore, nullptr);
+    EXPECT_STREQ(dropUpdateBefore->getName(), "DropUpdateBefore");
+    EXPECT_NE(dropUpdateBefore->getTypeName().find("DropUpdateBefore"), std::string::npos);
+}
+
+TEST(StreamOperatorFactoryTest, CreateOperatorAndCollector_SqlFilterWithoutDropUpdateBeforeMarkerFailsFast)
+{
+    omnistream::OperatorPOD operatorPod;
+    operatorPod.setId("org.apache.flink.streaming.api.operators.StreamFilter");
+    operatorPod.setDescription("{}");
+    operatorPod.setVOperatorType(omnistream::Type_o::SQL);
+
+    MockOutput output;
+    EXPECT_THROW(
+        omnistream::StreamOperatorFactory::createOperatorAndCollector(operatorPod, &output, nullptr),
+        std::logic_error);
 }
 
 TEST(StreamOperatorFactoryTest, CreateWindowJoinConfiguresCompatibleSavepointAdaptor)

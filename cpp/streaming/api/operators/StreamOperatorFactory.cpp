@@ -25,6 +25,7 @@
 #include "StreamGroupedReduceOperator.h"
 #include "table/runtime/operators/aggregate/GroupAggFunction.h"
 #include "table/runtime/operators/deduplicate/RowTimeDeduplicateFunction.h"
+#include "table/runtime/operators/misc/DropUpdateBeforeOperator.h"
 #include "table/runtime/operators/deduplicate/ProcTimeDeduplicateKeepLastRowFunction.h"
 #include "streaming/api/operators/KeyedProcessOperator.h"
 #include "table/runtime/operators/join/stream/StreamingJoinOperator.h"
@@ -922,6 +923,21 @@ StreamOperator* StreamOperatorFactory::CreateFilterOp(
         return static_cast<OneInputStreamOperator*>(filterOp);
     } else if (operatorType == Type_o::SQL) {
         // operatorType == "sql"
+        // SQL StreamFilter currently only corresponds to Flink's StreamExecDropUpdateBefore
+        // (StreamFilter<RowData> + DropUpdateBeforeFunction). Route it to the native
+        // DropUpdateBeforeOperator only when the shadowed planner node injected the
+        // "operator":"DropUpdateBefore" marker; otherwise fail fast instead of mis-routing.
+        std::string operatorMarker = opDescriptionJSON.value("operator", "");
+        if (operatorMarker == "DropUpdateBefore") {
+            auto* dropUpdateBeforeOp = new DropUpdateBeforeOperator(opDescriptionJSON, chainOutput);
+            dropUpdateBeforeOp->setup(std::move(task));
+            // DropUpdateBefore is stateless: the Omni native format is already Flink-compatible.
+            dropUpdateBeforeOp->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);
+            LOG(
+                "Operator DropUpdateBeforeOperator address " +
+                std::to_string(reinterpret_cast<long>(dropUpdateBeforeOp)));
+            return static_cast<OneInputStreamOperator*>(dropUpdateBeforeOp);
+        }
         NOT_IMPL_EXCEPTION;
     } else {
         THROW_LOGIC_EXCEPTION("createOperator: invalid operatorType");
