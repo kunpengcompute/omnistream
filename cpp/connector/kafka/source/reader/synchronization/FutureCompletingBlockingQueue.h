@@ -47,6 +47,7 @@ public:
 
     std::shared_ptr<omnistream::CompletableFuture> getAvailabilityFuture() const
     {
+        std::lock_guard<std::mutex> guard(lock);
         return currentFuture;
     }
 
@@ -122,7 +123,7 @@ public:
 private:
     const uint64_t capacity;
     std::shared_ptr<omnistream::CompletableFuture> currentFuture;
-    std::mutex lock;
+    mutable std::mutex lock;
     std::queue<RecordsWithSplitIds<E>*> queue;
     std::queue<std::condition_variable*> notFull;
     int32_t coreId = -1;
