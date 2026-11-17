@@ -335,7 +335,8 @@ CheckpointOptions* CheckpointOptions::WithUnalignedUnsupported()
     return this;
 }
 
-CheckpointOptions* CheckpointOptions::ToAlignedWithTimeout()
+std::shared_ptr<CheckpointOptions> CheckpointOptions::ToAlignedWithTimeout()
 {
-    return AlignedWithTimeout(*checkpointType_, targetLocation_, alignedCheckpointTimeout_);
+    return std::shared_ptr<CheckpointOptions>(
+        AlignedWithTimeout(*checkpointType_, targetLocation_, alignedCheckpointTimeout_));
 }

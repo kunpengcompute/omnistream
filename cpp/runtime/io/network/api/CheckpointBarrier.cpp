@@ -39,9 +39,9 @@ std::shared_ptr<CheckpointOptions> CheckpointBarrier::GetCheckpointOptions() con
     return checkpointOptions_;
 }
 
-CheckpointBarrier* CheckpointBarrier::WithOptions(CheckpointOptions* checkpointOptions)
+CheckpointBarrier* CheckpointBarrier::WithOptions(std::shared_ptr<CheckpointOptions> checkpointOptions)
 {
-    return this->checkpointOptions_.get() == checkpointOptions
+    return this->checkpointOptions_.get() == checkpointOptions.get()
                ? this
                : new CheckpointBarrier(id_, timestamp_, checkpointOptions);
 }

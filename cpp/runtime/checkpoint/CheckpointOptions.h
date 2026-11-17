@@ -72,7 +72,7 @@ public:
 
     CheckpointOptions* WithUnalignedSupported();
     CheckpointOptions* WithUnalignedUnsupported();
-    CheckpointOptions* ToAlignedWithTimeout();
+    std::shared_ptr<CheckpointOptions> ToAlignedWithTimeout();
     bool operator==(const CheckpointOptions& other) const;
     bool operator!=(const CheckpointOptions& other) const;
     std::string ToString() const;
