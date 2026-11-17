@@ -106,6 +106,9 @@ private:
 
     static bool readStringField(const nlohmann::json& object, const char* key, std::string& value);
 
+    // The Debezium envelope (op/before/after, metadata, RowKind) is handled by this class;
+    // field values are delegated to the shared JSON row converter with Flink-compatible
+    // conversions (see JsonRowDataDeserializationSchema's flinkCompatibleConversions).
     JsonRowDataDeserializationSchema rowDeserializer;
     std::vector<std::string> outputNames;
     std::vector<omniruntime::type::DataTypeId> fieldTypes;

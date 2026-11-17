@@ -27,9 +27,11 @@ class JsonRowDataDeserializationSchema : public DeserializationSchema {
 public:
     /**
      * @param flinkCompatibleConversions When true, scalar conversions mirror Flink's
-     *        JsonToRowDataConverters (numeric/string fallbacks, strict TIME parsing). Debezium
-     *        enables this so that the CDC source follows Flink semantics for the supported types,
-     *        while other JSON sources keep the legacy behaviour.
+     *        JsonToRowDataConverters (numeric/string fallbacks, strict TIME parsing); otherwise
+     *        the legacy JSON behaviour is kept. This is a field-conversion switch only, not
+     *        Debezium format support: DebeziumJsonDeserializationSchema parses the CDC envelope
+     *        (op/before/after, metadata, RowKind) itself and composes this class as its per-field
+     *        JSON -> VectorBatch converter, so it needs the same conversions as Flink.
      */
     explicit JsonRowDataDeserializationSchema(
         const nlohmann::json& opDescriptionJSON, bool enableFlinkCompatibleConversions = false)

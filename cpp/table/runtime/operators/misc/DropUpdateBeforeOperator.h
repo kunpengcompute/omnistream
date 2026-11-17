@@ -29,10 +29,19 @@ namespace omnistream {
 /**
  * Native DropUpdateBefore operator.
  *
- * Stateless row-kind filter that drops only rows with RowKind::UPDATE_BEFORE and forwards every
- * other row unchanged (INSERT, UPDATE_AFTER, DELETE), preserving row order, per-row timestamps and
- * row kinds. This matches the semantics of Flink's
- * org.apache.flink.table.runtime.operators.misc.DropUpdateBeforeFunction.
+ * <p>Flink maps a DropUpdateBefore plan node to a filter operator: the planner node
+ * org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecDropUpdateBefore builds a
+ * StreamFilter<RowData> whose user function is
+ * org.apache.flink.table.runtime.operators.misc.DropUpdateBeforeFunction, an implementation of
+ * FilterFunction<RowData> that only rejects RowKind::UPDATE_BEFORE. The StreamFilter forwards the
+ * original element unchanged for every accepted row.
+ *
+ * <p>OmniStream fuses that generic StreamFilter wrapper and the built-in predicate into this
+ * dedicated native operator (SQL StreamFilter is currently only produced for DropUpdateBefore; see
+ * StreamOperatorFactory::CreateFilterOp). It applies the same row-level predicate to a
+ * VectorBatch: drop UPDATE_BEFORE rows and forward all remaining rows (INSERT, UPDATE_AFTER,
+ * DELETE) in their original order, preserving per-row timestamps and row kinds, which is the batch
+ * equivalent of StreamFilter forwarding the original RowData.
  */
 class DropUpdateBeforeOperator : public OneInputStreamOperator, public AbstractStreamOperator<int> {
 public:
