@@ -599,6 +599,7 @@ uintptr_t RocksdbKeyedStateBackend<K>::GetValueState(TypeSerializer* namespaceSe
     } else if (dataId == BackendDataType::ROW_LIST_BK) {
         // ValueState<List<RowData>> (e.g. SinkUpsertMaterializer "values")
         return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, std::vector<RowData*>*>(
+            namespaceSerializer, stateDesc);
     } else if (dataId == BackendDataType::SORTED_MAP_BK) {
         return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, SortedMapValue*>(
             namespaceSerializer, stateDesc);
