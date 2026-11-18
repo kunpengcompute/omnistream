@@ -286,6 +286,7 @@ private:
                 case DataTypeId::OMNI_LONG:
                 case DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
                 case DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+                case DataTypeId::OMNI_TIMESTAMP_WITH_TIME_ZONE:
                 case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 case DataTypeId::OMNI_TIMESTAMP: {
                     if (*left->getLong(col) != *right->getLong(col)) {

@@ -274,17 +274,26 @@ omnistream::VectorBatch* AbstractTopNFunction<KeyType>::createOutputBatch()
 
     // Create a new VectorBatch (empty if no rows exist)
     auto* outputBatch = new omnistream::VectorBatch(numRows);
-    //  Loop through each column and create vectors
+    //  Loop through each column and create vectors. Collected rows keep the
+    // null bits of the source rows (extractRowData sets setNullAt), so every
+    // value copy must check the null bit and call SetNull - a blind
+    // getLong/getInt/getStringView dereference would silently emit 0/empty
+    // (and for CHAR read stale fixed-slot bytes as a bogus string_view).
     for (int colIndex = 0; colIndex < numColumns; ++colIndex) {
         switch (inputRowType->at(colIndex)) {
             case DataTypeId::OMNI_LONG:
             case DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+            case DataTypeId::OMNI_TIMESTAMP_WITH_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP: {
                 auto* vector = new omniruntime::vec::Vector<int64_t>(numRows);
                 for (int rowIndex = 0; rowIndex < numRows; ++rowIndex) {
-                    vector->SetValue(rowIndex, *collectedRows[rowIndex]->getLong(colIndex));
+                    if (collectedRows[rowIndex]->isNullAt(colIndex)) {
+                        vector->SetNull(rowIndex);
+                    } else {
+                        vector->SetValue(rowIndex, *collectedRows[rowIndex]->getLong(colIndex));
+                    }
                 }
                 outputBatch->Append(vector);
                 break;
@@ -293,7 +302,11 @@ omnistream::VectorBatch* AbstractTopNFunction<KeyType>::createOutputBatch()
             case DataTypeId::OMNI_DATE32: {
                 auto* vector = new omniruntime::vec::Vector<int32_t>(numRows);
                 for (int rowIndex = 0; rowIndex < numRows; ++rowIndex) {
-                    vector->SetValue(rowIndex, *collectedRows[rowIndex]->getInt(colIndex));
+                    if (collectedRows[rowIndex]->isNullAt(colIndex)) {
+                        vector->SetNull(rowIndex);
+                    } else {
+                        vector->SetValue(rowIndex, *collectedRows[rowIndex]->getInt(colIndex));
+                    }
                 }
                 outputBatch->Append(vector);
                 break;
@@ -301,7 +314,11 @@ omnistream::VectorBatch* AbstractTopNFunction<KeyType>::createOutputBatch()
             case DataTypeId::OMNI_DOUBLE: {
                 auto* vector = new omniruntime::vec::Vector<double>(numRows);
                 for (int rowIndex = 0; rowIndex < numRows; ++rowIndex) {
-                    vector->SetValue(rowIndex, *collectedRows[rowIndex]->getLong(colIndex));
+                    if (collectedRows[rowIndex]->isNullAt(colIndex)) {
+                        vector->SetNull(rowIndex);
+                    } else {
+                        vector->SetValue(rowIndex, *collectedRows[rowIndex]->getLong(colIndex));
+                    }
                 }
                 outputBatch->Append(vector);
                 break;
@@ -309,7 +326,11 @@ omnistream::VectorBatch* AbstractTopNFunction<KeyType>::createOutputBatch()
             case DataTypeId::OMNI_BOOLEAN: {
                 auto* vector = new omniruntime::vec::Vector<bool>(numRows);
                 for (int rowIndex = 0; rowIndex < numRows; ++rowIndex) {
-                    vector->SetValue(rowIndex, *collectedRows[rowIndex]->getInt(colIndex));
+                    if (collectedRows[rowIndex]->isNullAt(colIndex)) {
+                        vector->SetNull(rowIndex);
+                    } else {
+                        vector->SetValue(rowIndex, *collectedRows[rowIndex]->getInt(colIndex));
+                    }
                 }
                 outputBatch->Append(vector);
                 break;
@@ -320,9 +341,13 @@ omnistream::VectorBatch* AbstractTopNFunction<KeyType>::createOutputBatch()
                     omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>;
                 VarcharVector* vector = new VarcharVector(numRows);
                 for (int rowIndex = 0; rowIndex < numRows; ++rowIndex) {
-                    auto value = std::string(collectedRows[rowIndex]->getStringView(colIndex));
-                    omniruntime::vec::VectorHelper::VectorSetValue<DataTypeId::OMNI_VARCHAR>(
-                        vector, rowIndex, (void*)&value);
+                    if (collectedRows[rowIndex]->isNullAt(colIndex)) {
+                        vector->SetNull(rowIndex);
+                    } else {
+                        auto value = std::string(collectedRows[rowIndex]->getStringView(colIndex));
+                        omniruntime::vec::VectorHelper::VectorSetValue<DataTypeId::OMNI_VARCHAR>(
+                            vector, rowIndex, (void*)&value);
+                    }
                 }
                 outputBatch->Append(vector);
                 break;
