@@ -224,7 +224,7 @@ std::string VectorBatch::TransformTimeWithTimeZone(
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
 
     if (milliseconds == 0) {
-        return std::string(buffer) + "Z";
+        return std::string(buffer) + ".000";
     }
 
     std::ostringstream oss;
@@ -238,7 +238,7 @@ std::string VectorBatch::TransformTimeWithTimeZone(
         oss << std::setw(3) << std::setfill('0') << milliseconds << std::string(6, '0');
     }
 
-    return oss.str() + "Z";
+    return oss.str();
 }
 
 std::string VectorBatch::TransformOnlyTime(int vectorID, int rowID, int precision) const
