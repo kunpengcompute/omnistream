@@ -22,7 +22,7 @@ void SerializeIntIntoRowData(vec::BaseVector* baseVector, int32_t rowIdx, Binary
     }
 }
 
-void SerializeDoubleIntoRowData(vec::BaseVector *baseVector, int32_t rowIdx, BinaryRowData *result, int32_t pos)
+void SerializeDoubleIntoRowData(vec::BaseVector* baseVector, int32_t rowIdx, BinaryRowData* result, int32_t pos)
 {
     if (baseVector->IsNull(rowIdx)) {
         result->setNullAt(pos);
@@ -89,12 +89,21 @@ void DeserializeLongFromRowData(vec::BaseVector* baseVector, int32_t rowIdx, Bin
     }
 }
 
-void DeserializeDoubleFromRowData(vec::BaseVector *baseVector, int32_t rowIdx, BinaryRowData *input, int32_t pos)
+void DeserializeDoubleFromRowData(vec::BaseVector* baseVector, int32_t rowIdx, BinaryRowData* input, int32_t pos)
 {
     if (input->isNullAt(pos)) {
         baseVector->SetNull(rowIdx);
     } else {
         reinterpret_cast<vec::Vector<double>*>(baseVector)->SetValue(rowIdx, *input->getDouble(pos));
+    }
+}
+
+void DeserializeBooleanFromRowData(vec::BaseVector* baseVector, int32_t rowIdx, BinaryRowData* input, int32_t pos)
+{
+    if (input->isNullAt(pos)) {
+        baseVector->SetNull(rowIdx);
+    } else {
+        static_cast<vec::Vector<bool>*>(baseVector)->SetValue(rowIdx, *input->getBool(pos));
     }
 }
 
@@ -144,7 +153,7 @@ std::vector<RowToVBDeSerializer> rowDeserializerCenter = {
     DeserializeIntFromRowData,     // OMNI_INT
     DeserializeLongFromRowData,    // OMNI_LONG
     DeserializeDoubleFromRowData,  // OMNI_DOUBLE
-    nullptr,                       // OMNI_BOOLEAN
+    DeserializeBooleanFromRowData, // OMNI_BOOLEAN
     nullptr,                       // OMNI_SHORT
     DeserializeLongFromRowData,    // OMNI_DECIMAL64,
     nullptr,                       // OMNI_DECIMAL128

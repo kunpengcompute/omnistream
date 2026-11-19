@@ -59,11 +59,13 @@ TypeSerializer* InternalSerializers::createInternal(LogicalType* type)
             return LongSerializer::INSTANCE; // DATE is a fixed-width (int days) field; reuse the dummy serializer like
                                              // INT
         case DataTypeId::OMNI_BOOLEAN: return LongSerializer::INSTANCE;
+        case DataTypeId::OMNI_TIMESTAMP: return LongSerializer::INSTANCE; // TIMESTAMP stored as int64 millis
         case DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE: return LongSerializer::INSTANCE;
         case DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE: return LongSerializer::INSTANCE;
         case DataTypeId::OMNI_TIMESTAMP_WITH_TIME_ZONE: return LongSerializer::INSTANCE;
         case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE: return LongSerializer::INSTANCE;
         case DataTypeId::OMNI_VARCHAR: return StringDataSerializer::INSTANCE;
+        case DataTypeId::OMNI_CHAR: return StringDataSerializer::INSTANCE;
         default: THROW_LOGIC_EXCEPTION("Unknown type" + std::to_string(type->getTypeId()));
     }
 }

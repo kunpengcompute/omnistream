@@ -1,7 +1,7 @@
 # Prerequisites
 *.d
 build
-cmake_build_*/
+cmake[-_]build[-_]*/
 conf/
 3rdparty/
 .idea

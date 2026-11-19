@@ -14,13 +14,14 @@
 #include <tuple>
 #include <regex>
 #include "core/api/common/serialization/DeserializationSchema.h"
+#include "OmniOperatorJIT/core/src/type/TimestampConversion.h"
 
 class JsonRowDataDeserializationSchema : public DeserializationSchema {
 public:
-    explicit JsonRowDataDeserializationSchema(nlohmann::json& opDescriptionJSON)
-        : fieldNames(opDescriptionJSON["outputNames"].get<std::vector<std::string>>())
+    explicit JsonRowDataDeserializationSchema(const nlohmann::json& opDescriptionJSON)
+        : fieldNames(opDescriptionJSON.at("outputNames").get<std::vector<std::string>>())
     {
-        auto outputTypes = opDescriptionJSON["outputTypes"].get<std::vector<std::string>>();
+        auto outputTypes = opDescriptionJSON.at("outputTypes").get<std::vector<std::string>>();
         std::regex pattern(R"(DECIMAL\d*\((\d+),\s*(\d+)\))");
         std::smatch match;
         for (std::string type : outputTypes) {
@@ -63,10 +64,14 @@ public:
 
     void setColValue(int rowIndex, int colIndex, omnistream::VectorBatch* vectorBatch, nlohmann::json& node)
     {
-        auto& type = fieldTypes[colIndex];
-        auto& name = fieldNames[colIndex];
-        auto fieldIt = node.find(name);
-        if (fieldIt == node.end() || fieldIt->is_null()) {
+        auto field = node.find(fieldNames[colIndex]);
+        setColValue(rowIndex, colIndex, vectorBatch, field == node.end() ? nullptr : &*field);
+    }
+
+    void setColValue(int rowIndex, int colIndex, omnistream::VectorBatch* vectorBatch, const nlohmann::json* fieldIt)
+    {
+        auto type = fieldTypes[colIndex];
+        if (fieldIt == nullptr || fieldIt->is_null()) {
             vectorBatch->Get(colIndex)->SetNull(rowIndex);
             return;
         }
@@ -76,22 +81,39 @@ public:
                 vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<bool>());
                 break;
             }
-            case omniruntime::type::DataTypeId::OMNI_INT:
-            case omniruntime::type::DataTypeId::OMNI_DATE32: {
+            case omniruntime::type::DataTypeId::OMNI_INT: {
                 vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<int32_t>());
+                break;
+            }
+            case omniruntime::type::DataTypeId::OMNI_DATE32: {
+                // Flink JSON format serializes DATE as an ISO-8601 string (e.g. "2024-01-01"),
+                // so parse the string form; keep numeric epoch-days support for compatibility.
+                int32_t epochDays;
+                if (fieldIt->is_number()) {
+                    epochDays = fieldIt->get<int32_t>();
+                } else if (fieldIt->is_string()) {
+                    auto result = omniruntime::type::util::fromDateString(fieldIt->get<std::string>());
+                    if (result.hasError()) {
+                        throw std::runtime_error("invalid date value: " + fieldIt->dump());
+                    }
+                    epochDays = result.value();
+                } else {
+                    throw std::runtime_error("invalid date value: " + fieldIt->dump());
+                }
+                vectorBatch->SetValueAt(colIndex, rowIndex, epochDays);
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_LONG: {
                 vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<int64_t>());
                 break;
             }
-            case omniruntime::type::DataTypeId::OMNI_DOUBLE:{
+            case omniruntime::type::DataTypeId::OMNI_DOUBLE: {
                 vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<double>());
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE: {
-                vectorBatch->SetValueAt(colIndex, rowIndex,
-                                        TimestampData::stringToMillisOfDay(fieldIt->get<std::string>()));
+                vectorBatch->SetValueAt(
+                    colIndex, rowIndex, TimestampData::stringToMillisOfDay(fieldIt->get<std::string>()));
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:

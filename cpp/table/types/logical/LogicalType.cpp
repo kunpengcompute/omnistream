@@ -70,7 +70,8 @@ DataTypeId LogicalType::flinkTypeToOmniTypeId(const std::string& flinkType)
     }
     // TIMESTAMP TYPE
     std::string typeStr;
-    if (basicStrippedType.substr(0, 13) == "TIMESTAMP_LTZ") {
+    if (LogicTypeUtils::startsWith(basicStrippedType, "TIMESTAMP_LTZ") ||
+        LogicTypeUtils::startsWith(basicStrippedType, "TIMESTAMP_WITH_LOCAL_TIME_ZONE(")) {
         return DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE;
     } else {
         typeStr = basicStrippedType.substr(basicStrippedType.find(')') + 1);
@@ -166,7 +167,8 @@ LogicalType* LogicalType::flinkTypeToOmniType(const std::string& flinkType)
     }
 
     std::string typeStr;
-    if (LogicTypeUtils::startsWith(basicStrippedType, "TIMESTAMP_LTZ")) {
+    if (LogicTypeUtils::startsWith(basicStrippedType, "TIMESTAMP_LTZ") ||
+        LogicTypeUtils::startsWith(basicStrippedType, "TIMESTAMP_WITH_LOCAL_TIME_ZONE(")) {
         return BasicLogicalType::getTypeBy(DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE, options);
     } else {
         typeStr = basicStrippedType.substr(basicStrippedType.find(')') + 1);
@@ -242,10 +244,8 @@ bool LogicalType::isSharedLogicalType(const LogicalType* logicalType)
            logicalType == BasicLogicalType::TIMESTAMP_WITHOUT_TIME_ZONE ||
            logicalType == BasicLogicalType::TIMESTAMP_WITH_TIME_ZONE ||
            logicalType == BasicLogicalType::TIMESTAMP_WITH_LOCAL_TIME_ZONE ||
-           logicalType == BasicLogicalType::TIMESTAMP ||
-           logicalType == BasicLogicalType::INTERVAL_YEAR_MONTH ||
-           logicalType == BasicLogicalType::INTERVAL_DAY_TIME ||
-           logicalType == BasicLogicalType::INVALID_TYPE;
+           logicalType == BasicLogicalType::TIMESTAMP || logicalType == BasicLogicalType::INTERVAL_YEAR_MONTH ||
+           logicalType == BasicLogicalType::INTERVAL_DAY_TIME || logicalType == BasicLogicalType::INVALID_TYPE;
 }
 
 void LogicalType::buildNameToIdMap()

@@ -89,6 +89,7 @@ private:
     DynamicKafkaRecordSerializationSchema* recordSerializer = nullptr;
     std::exception_ptr asyncProducerException;
     nlohmann::json description;
+    bool upsertMode;
     std::vector<std::string> inputFields;
     std::vector<std::string> inputTypes;
 

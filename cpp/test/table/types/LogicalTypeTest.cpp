@@ -5,6 +5,13 @@
 #include <string.h>
 #include "OmniOperatorJIT/core/src/type/data_type.h"
 
+TEST(LogicalTypeTest, PlannerTimestampLtzType)
+{
+    EXPECT_EQ(
+        LogicalType::flinkTypeToOmniTypeId("TIMESTAMP_WITH_LOCAL_TIME_ZONE(3) NOT NULL"),
+        omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE);
+}
+
 TEST(LogicalTypeTest, flinkTypeToOmniTypeIdTest)
 {
     // types without extra info

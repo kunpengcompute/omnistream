@@ -11,7 +11,13 @@
 
 #include "DynamicKafkaRecordSerializationSchema.h"
 #include "data/vectorbatch/VectorBatch.h"
+#include "table/types/logical/LogicalType.h"
+#include "OmniOperatorJIT/core/src/type/Conversions.h"
+#include "OmniOperatorJIT/core/src/type/TimestampConversion.h"
 #include <algorithm>
+#include <cmath>
+
+using namespace omniruntime::type;
 
 DynamicKafkaRecordSerializationSchema::DynamicKafkaRecordSerializationSchema(
     std::vector<std::string>& inputFields, std::vector<std::string>& inputTypes)
@@ -72,6 +78,90 @@ void DynamicKafkaRecordSerializationSchema::RowToJson(RowData* row)
 void DynamicKafkaRecordSerializationSchema::RowToJson(omnistream::VectorBatch* input, int rowIndex)
 {
     input->convertToJson(j, rowIndex, decimalInfo, inputTypes_, inputFields_);
+}
+
+DynamicKafkaRecordSerializationSchema::DynamicKafkaRecordSerializationSchema(const nlohmann::json& description)
+    : keyProjection(description.at("keyProjection").get<std::vector<int>>()),
+      valueProjection(description.at("valueProjection").get<std::vector<int>>()),
+      keyFieldNames(description.at("keyFieldNames").get<std::vector<std::string>>()),
+      valueFieldNames(description.at("valueFieldNames").get<std::vector<std::string>>())
+{
+    for (const auto& type : description.at("physicalTypes")) {
+        const auto& name = type.get_ref<const std::string&>();
+        physicalTypes.push_back(LogicalType::flinkTypeToOmniTypeId(name));
+        decimalInfo.push_back(LogicalType::parseDecimalPrecisionScale(name));
+    }
+}
+
+std::string DynamicKafkaRecordSerializationSchema::serializeProjection(
+    omnistream::VectorBatch* input,
+    int rowIndex,
+    const std::vector<int>& projection,
+    const std::vector<std::string>& names)
+{
+    using namespace omniruntime::vec;
+    std::string object = "{";
+    for (size_t i = 0; i < projection.size(); ++i) {
+        if (i != 0) {
+            object += ',';
+        }
+        int column = projection[i];
+        auto* vector = input->Get(column);
+        object += nlohmann::json(names[i]).dump();
+        object += ':';
+        if (vector->IsNull(rowIndex)) {
+            object += "null";
+            continue;
+        }
+        nlohmann::json value;
+        switch (physicalTypes[column]) {
+            case OMNI_LONG: value = static_cast<Vector<int64_t>*>(vector)->GetValue(rowIndex); break;
+            case OMNI_INT: value = static_cast<Vector<int32_t>*>(vector)->GetValue(rowIndex); break;
+            case OMNI_DOUBLE: {
+                double number = static_cast<Vector<double>*>(vector)->GetValue(rowIndex);
+                auto formatted = omniruntime::type::util::Converter<OMNI_VARCHAR>::tryCast(number).value();
+                object += std::isfinite(number) ? formatted : nlohmann::json(formatted).dump();
+                continue;
+            }
+            case OMNI_BOOLEAN: value = static_cast<Vector<bool>*>(vector)->GetValue(rowIndex); break;
+            case OMNI_CHAR:
+            case OMNI_VARCHAR:
+                value = vector->GetEncoding() == OMNI_FLAT
+                            ? static_cast<Vector<LargeStringContainer<std::string_view>>*>(vector)->GetValue(rowIndex)
+                            : static_cast<Vector<DictionaryContainer<std::string_view, LargeStringContainer>>*>(vector)
+                                  ->GetValue(rowIndex);
+                break;
+            case OMNI_DATE32:
+                value = omniruntime::type::util::ToIso8601(static_cast<Vector<int32_t>*>(vector)->GetValue(rowIndex));
+                break;
+            case OMNI_TIME_WITHOUT_TIME_ZONE: value = input->TransformOnlyTime(column, rowIndex); break;
+            case OMNI_TIMESTAMP:
+            case OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+                value = omnistream::VectorBatch::RemoveTrailingZeros(input->TransformTime(column, rowIndex));
+                break;
+            case OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+                value = omnistream::VectorBatch::RemoveTrailingZeros(input->TransformTime(column, rowIndex)) + "Z";
+                break;
+            case OMNI_DECIMAL64: object += input->transformDecimal64(column, rowIndex, decimalInfo); continue;
+            case OMNI_DECIMAL128: object += input->transformDecimal128(column, rowIndex, decimalInfo); continue;
+            default: throw std::runtime_error("Unsupported upsert-kafka JSON field type");
+        }
+        object += value.dump();
+    }
+    object += '}';
+    return object;
+}
+
+DynamicKafkaRecordSerializationSchema::UpsertRecord DynamicKafkaRecordSerializationSchema::serializeUpsert(
+    omnistream::VectorBatch* input, int rowIndex)
+{
+    UpsertRecord record;
+    record.key = serializeProjection(input, rowIndex, keyProjection, keyFieldNames);
+    const auto kind = input->getRowKind(rowIndex);
+    if (kind != RowKind::DELETE && kind != RowKind::UPDATE_BEFORE) {
+        record.value = serializeProjection(input, rowIndex, valueProjection, valueFieldNames);
+    }
+    return record;
 }
 
 KeyValueByteContainer DynamicKafkaRecordSerializationSchema::Serialize(RowData* consumedRow)
