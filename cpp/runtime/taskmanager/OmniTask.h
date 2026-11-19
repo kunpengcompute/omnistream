@@ -157,6 +157,7 @@ public:
 
 private:
     std::atomic<bool> flag{false};
+    std::atomic<bool> cancelRequested_{false};
     JobInformationPOD jobInfo_;
     TaskInformationPOD taskInfo_;
     TaskDeploymentDescriptorPOD taskDeploymentDescriptor_;

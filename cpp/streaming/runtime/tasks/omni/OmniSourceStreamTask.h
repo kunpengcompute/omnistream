@@ -15,6 +15,7 @@
 #include "OmniStreamTask.h"
 #include "streaming/api/operators/StreamSource.h"
 #include "io/network/api/StopMode.h"
+#include <atomic>
 #include <thread>
 
 namespace omnistream {
@@ -49,6 +50,7 @@ private:
 
     std::unique_ptr<Object> lockObject_;
     std::unique_ptr<std::thread> sourceThread_;
+    std::atomic<bool> sourceCancelRequested_{false};
 
     void CompleteProcessing();
     void runSourceInThread();

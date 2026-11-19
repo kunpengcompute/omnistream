@@ -315,7 +315,12 @@ void OmniStreamTask::invoke()
 
 void OmniStreamTask::cancel()
 {
-    mailboxProcessor_->suspend();
+    if (recordWriter_) {
+        recordWriter_->cancel();
+    }
+    if (mailboxProcessor_) {
+        mailboxProcessor_->suspend();
+    }
 }
 
 void OmniStreamTask::cleanup()
