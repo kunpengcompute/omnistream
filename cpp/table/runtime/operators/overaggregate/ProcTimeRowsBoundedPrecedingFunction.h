@@ -60,11 +60,19 @@ using namespace omniruntime::type;
  * batch/columnar data is ever written into the state backend:
  *   - ValueState<RowData> "accState"          accumulator row
  *   - MapState<Long, List<RowData>> "inputState"  window rows, bucketed by
- *     ingestion time; same-millisecond rows keep FIFO order inside a bucket
+ *     ingestion time; same-millisecond rows keep FIFO order inside a bucket.
+ *     (C++ note: the native state backends have no BIGINT-key / row-list-value
+ *     MapState combination, so the Java Long key is wrapped into a one-column
+ *     BinaryRowData and the state is created as the TopN "data-state" shape
+ *     MapState<RowData, List<RowData>> — the key content is the timestamp.)
  *   - ValueState<Long> "processedCountState"  buffered-row counter (capped at
  *     precedingOffset)
  *   - ValueState<Long> "smallestTSState"      ingestion time of the oldest
- *     buffered row (Long.MAX_VALUE when all buckets drained, as in Java)
+ *     buffered row. "All buckets drained" is Long.MAX_VALUE in Java; the
+ *     native ValueState<int64_t> reserves INT64_MAX as its absent-sentinel
+ *     (value() maps it back to the default 0, HeapValueState.h), so the C++
+ *     marker is -1 instead - no real ingestion time (epoch millis) is ever
+ *     negative, and 0 alone means "never initialised" (Java null).
  *
  * Java's onTimer only performs TTL state cleanup (registerProcessingCleanupTimer
  * with stateCleaningEnabled == false by default); v1 does not model state TTL,
@@ -109,6 +117,20 @@ private:
     /** Copies the aggregated values into the reusable aggValue row. */
     void materialiseAggValue();
 
+    /** Wraps an ingestion timestamp as a one-column key row for inputState. */
+    BinaryRowData* makeTsKeyRow(int64_t ts) const;
+
+    /**
+     * Wall-clock processing time in milliseconds. Java reads
+     * ctx.timerService().currentProcessingTime(); the C++ KeyedProcessOperator
+     * ContextImpl never wires a timer service (localTimerService is always
+     * null — no other operator in the tree uses it either), so the operator
+     * keeps its own clock, mirroring SliceAssigners. Bucketing by ingestion
+     * time only affects which bucket a row lands in; eviction is always
+     * oldest-arrival-first, so outputs are invariant to exact clock values.
+     */
+    static int64_t currentProcessingTimeMillis();
+
     /** Materialises row @p rowId of @p batch as an owned BinaryRowData. */
     RowData* materialiseRow(omnistream::VectorBatch* batch, int rowId);
 
@@ -135,7 +157,7 @@ private:
     // ---- runtime state ----
     int backend = 0; // 0: heap/memory, 1: bss, 2: rocksdb
     ValueState<RowData*>* accState = nullptr;
-    MapState<int64_t, std::vector<RowData*>*>* inputState = nullptr;
+    MapState<RowData*, std::vector<RowData*>*>* inputState = nullptr;
     ValueState<int64_t>* counterState = nullptr;
     ValueState<int64_t>* smallestTsState = nullptr;
     BinaryRowData* reuseAggValue = nullptr;        // reusable "aggregate values" row

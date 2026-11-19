@@ -11,6 +11,7 @@
 
 #include "ProcTimeRowsBoundedPrecedingFunction.h"
 
+#include <chrono>
 #include <climits>
 #include <regex>
 #include <utility>
@@ -254,12 +255,18 @@ void ProcTimeRowsBoundedPrecedingFunction::open(const Configuration& parameters)
 
     // Java: MapStateDescriptor<Long, List<RowData>> inputState
     // ("inputState", LONG_TYPE_INFO, new ListTypeInfo<>(inputType));
+    // The native backends have no BIGINT-key / row-list-value MapState
+    // combination, so the timestamp key is wrapped into a one-column
+    // BinaryRowData and the state uses the TopN "data-state" shape
+    // MapState<RowData, List<RowData>> (ROW_BK + ROW_LIST_BK).
     omnistream::RowType inputRowType(true, this->inputTypes);
     auto* listSerializer = new BinaryRowDataListSerializer(
         static_cast<int>(inputTypes.size()), new RowDataSerializer(&inputRowType));
-    auto* inputDesc =
-        new MapStateDescriptor<int64_t, std::vector<RowData*>*>("inputState", new LongSerializer(), listSerializer);
-    inputState = runtimeContext->getMapState<int64_t, std::vector<RowData*>*>(inputDesc);
+    omnistream::RowType tsRowType(false, std::vector<std::string>{"BIGINT"});
+    auto* inputDesc = new MapStateDescriptor<RowData*, std::vector<RowData*>*>(
+        "inputState", new RowDataSerializer(&tsRowType), listSerializer);
+    inputDesc->setKeyValueBackendTypeId(BackendDataType::ROW_BK, BackendDataType::ROW_LIST_BK);
+    inputState = runtimeContext->getMapState<RowData*, std::vector<RowData*>*>(inputDesc);
 
 #ifdef WITH_OMNISTATESTORE
     if (dynamic_cast<BssValueState<RowData*, VoidNamespace, RowData*>*>(accState)) {
@@ -306,10 +313,18 @@ void ProcTimeRowsBoundedPrecedingFunction::processRowForKey(RowData* input, RowD
         func->setBackend(backend);
     }
 
-    // 2. oldest ingestion time (Java: null check on smallestTsState; an empty
-    //    state reads as 0 here, and real ingestion times are always > 0).
+    // 2. oldest ingestion time. Two markers share this state, mirroring the
+    //    two Java values that must stay distinguishable:
+    //      0  = never initialised (Java: smallestTsState.value() == null)
+    //      -1 = every bucket drained (Java: Long.MAX_VALUE). INT64_MAX
+    //           cannot be stored here: the native ValueState<int64_t>
+    //           reserves numeric_limits<int64_t>::max() as its "absent"
+    //           sentinel (HeapValueState.h value() maps it back to the
+    //           default 0), which would silently re-arm this init and make
+    //           the next eviction retract the wrong bucket. Real ingestion
+    //           times are epoch millis, so a negative marker is unambiguous.
     int64_t smallestTs = smallestTsState->value();
-    if (smallestTs <= 0) {
+    if (smallestTs == 0) {
         smallestTs = currentTime;
         smallestTsState->update(smallestTs);
     }
@@ -319,8 +334,9 @@ void ProcTimeRowsBoundedPrecedingFunction::processRowForKey(RowData* input, RowD
 
     // 4. window full -> retract the oldest row; otherwise grow the counter
     if (counter == precedingOffset) {
+        BinaryRowData* smallestKey = makeTsKeyRow(smallestTs);
         std::vector<RowData*>* bucket = nullptr;
-        auto bucketOpt = inputState->get(smallestTs);
+        auto bucketOpt = inputState->get(smallestKey);
         if (bucketOpt.has_value()) {
             bucket = *bucketOpt;
         }
@@ -331,40 +347,106 @@ void ProcTimeRowsBoundedPrecedingFunction::processRowForKey(RowData* input, RowD
                 func->getAccumulators(static_cast<BinaryRowData*>(accumulators));
             }
             bucket->erase(bucket->begin());
+            // The evicted row's buffered copy leaves the window: free it here,
+            // exactly once. Java relies on GC for the buffered row object; in
+            // C++ the heap backend stored our copy and the RocksDB get()
+            // returned a fresh deserialised copy for us to own.
+            delete retractRow;
         }
         // Java LOG.warns and skips the retraction when the bucket is already
         // gone (state TTL cleared it). v1 never TTL-clears state, so this is
         // purely defensive and keeps the Java semantics of "skip, do not fail".
         if (bucket != nullptr && !bucket->empty()) {
-            inputState->put(smallestTs, bucket);
+            inputState->put(smallestKey, bucket); // key exists: value update only
+            // Heap: the state map keeps storing this very vector pointer, so
+            // it stays alive until the last row is evicted. RocksDB: put()
+            // serialised it into the backend and retains nothing - free our copy.
+            if (backend == 2) {
+                for (auto* row : *bucket) {
+                    delete row;
+                }
+                delete bucket;
+            }
         } else {
-            inputState->remove(smallestTs);
-            int64_t newSmallestTs = INT64_MAX; // Java keeps Long.MAX_VALUE when no bucket is left
+            // Heap remove() only erases the map entry: it orphans both the
+            // stored key row and the vector (Java's GC reclaims both; v1
+            // accepts the bounded one-key-row-per-drain leak). The RocksDB
+            // get() allocated the vector fresh for us. Either way the vector
+            // is ours to free.
+            inputState->remove(smallestKey);
+            if (bucket != nullptr) {
+                for (auto* row : *bucket) {
+                    delete row;
+                }
+                delete bucket;
+            }
+            // Min-finding seed, exactly Java's newSmallestTs = Long.MAX_VALUE.
+            // Real bucket keys are epoch millis, always smaller than this.
+            int64_t newSmallestTs = INT64_MAX;
+            // HeapMapState::entries() returns nullptr once the last entry was
+            // removed (remove() clears the whole per-namespace map when it
+            // empties). Java's inputState.keys() yields an empty iterator in
+            // that case, so nullptr means "no buckets": keep the drained
+            // marker.
             auto* allEntries = inputState->entries();
-            for (auto& entry : *allEntries) {
-                if (entry.first < newSmallestTs) {
-                    newSmallestTs = entry.first;
+            if (allEntries != nullptr) {
+                for (auto& entry : *allEntries) {
+                    // entry.first is owned by the state; read the timestamp column.
+                    int64_t ts = *entry.first->getLong(0);
+                    if (ts < newSmallestTs) {
+                        newSmallestTs = ts;
+                    }
                 }
             }
-            smallestTsState->update(newSmallestTs);
+            // Java stores Long.MAX_VALUE when no bucket is left. The native
+            // ValueState<int64_t> cannot hold INT64_MAX: value() treats it as
+            // the "absent" sentinel and returns the default 0 (HeapValueState.h),
+            // which would re-arm the == 0 init on the next row and evict the
+            // wrong bucket (this exact failure produced {10,20,30,40} where
+            // Java yields {10,20,50,70}). -1 is the drained marker instead.
+            smallestTsState->update(newSmallestTs == INT64_MAX ? -1 : newSmallestTs);
         }
+        // Temporary lookup key: no backend retains it (the heap map only
+        // stores pointers for keys it did not have, and this key was present).
+        delete smallestKey;
     } else {
         counter += 1;
         counterState->update(counter);
     }
 
-    // 5. buffer the input row in its ingestion-time bucket (bucket ownership
-    //    follows the TopN data-state pattern: put hands the vector over).
+    // 5. buffer the input row in its ingestion-time bucket. The bucket keeps
+    //    its OWN copy of the row: Java buffers the input row object itself and
+    //    lets the GC keep it alive, but the C++ collector frees the collected
+    //    rows right after emission, so sharing the pointer would dangle the
+    //    next time this bucket is retracted from. Key/vector ownership: the
+    //    heap backend takes over the key row and the vector on the first put
+    //    (they live until eviction); the RocksDB backend serialises both and
+    //    retains nothing, so its temporary copies are freed right here.
     {
-        auto bucketOpt = inputState->get(currentTime);
+        BinaryRowData* tsKey = makeTsKeyRow(currentTime);
+        auto bucketOpt = inputState->get(tsKey);
         if (bucketOpt.has_value()) {
             std::vector<RowData*>* bucket = *bucketOpt;
-            bucket->push_back(input);
-            inputState->put(currentTime, bucket);
+            bucket->push_back(input->copy());
+            inputState->put(tsKey, bucket);
+            delete tsKey;
+            if (backend == 2) {
+                for (auto* row : *bucket) {
+                    delete row;
+                }
+                delete bucket;
+            }
         } else {
             auto* bucket = new std::vector<RowData*>();
-            bucket->push_back(input);
-            inputState->put(currentTime, bucket);
+            bucket->push_back(input->copy());
+            inputState->put(tsKey, bucket);
+            if (backend == 2) {
+                for (auto* row : *bucket) {
+                    delete row;
+                }
+                delete bucket;
+                delete tsKey;
+            }
         }
     }
 
@@ -389,6 +471,26 @@ void ProcTimeRowsBoundedPrecedingFunction::materialiseAggValue()
             func->getValue(reuseAggValue);
         }
     }
+}
+
+BinaryRowData* ProcTimeRowsBoundedPrecedingFunction::makeTsKeyRow(int64_t ts) const
+{
+    // inputState keys are one-column BIGINT rows holding the ingestion time
+    // (the wrapped Java Long key, see the class comment).
+    BinaryRowData* key = BinaryRowData::createBinaryRowDataWithMem(1);
+    key->setLong(0, ts);
+    return key;
+}
+
+int64_t ProcTimeRowsBoundedPrecedingFunction::currentProcessingTimeMillis()
+{
+    // See the header comment: ContextImpl::timerService() is never wired in
+    // the C++ KeyedProcessOperator, so the operator reads the wall clock
+    // directly (the same approach as SliceAssigners). Java's
+    // currentProcessingTime is likewise "now" at element processing.
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
 }
 
 RowData* ProcTimeRowsBoundedPrecedingFunction::materialiseRow(omnistream::VectorBatch* batch, int rowId)
@@ -436,7 +538,7 @@ void ProcTimeRowsBoundedPrecedingFunction::processElement(
     RowData* input, Context* ctx, TimestampedCollector* out)
 {
     // Single-row entry point (unit tests). The production path is processBatch.
-    long currentTime = ctx->timerService()->currentProcessingTime();
+    long currentTime = currentProcessingTimeMillis();
     RowData* owned = input->copy();
     processRowForKey(owned, ctx->getCurrentKey(), currentTime);
     flushCollected(*out);
@@ -456,7 +558,7 @@ void ProcTimeRowsBoundedPrecedingFunction::processBatch(
     // v1: row-at-a-time over the batch. Rows are processed in arrival order;
     // the processing time is re-read per row like Java's processElement.
     for (int i = 0; i < rowCount; ++i) {
-        long currentTime = ctx.timerService()->currentProcessingTime();
+        long currentTime = currentProcessingTimeMillis();
         RowData* key = groupByKeySelector->getKey(inputBatch, i);
         ctx.setCurrentKey(key);
         RowData* row = materialiseRow(inputBatch, i);
