@@ -12,6 +12,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <type_traits>
 
 #include "State.h"
 
@@ -28,6 +29,32 @@ public:
     virtual T value() = 0;
     virtual void update(const T& value, bool copyKey = false) = 0;
     virtual void updateByBatch(std::unordered_map<RowData*, T>& pendingUpdates) {};
+
+    // Presence of a state entry, independent of the stored value. This is what
+    // makes nullable scalar state (e.g. Flink's ValueState<Long>) possible: a
+    // stored 0 / LONG_MAX must not be confused with "not set". Scalar backends
+    // override this with a key-existence check; for pointer values the default
+    // (value() == nullptr) is exact.
+    virtual bool isEmpty()
+    {
+        if constexpr (std::is_pointer_v<T>) {
+            return value() == nullptr;
+        } else {
+            return false;
+        }
+    }
+
+    // Reads the stored value only when present, bypassing the scalar sentinel
+    // collapsing (numeric_limits<T>::max() -> default) so all values including
+    // LONG_MAX round-trip. Returns false when the entry is absent.
+    virtual bool getIfPresent(T& out)
+    {
+        if (isEmpty()) {
+            return false;
+        }
+        out = value();
+        return true;
+    }
 };
 
 using DataStreamValueState = ValueState<Object*>;
