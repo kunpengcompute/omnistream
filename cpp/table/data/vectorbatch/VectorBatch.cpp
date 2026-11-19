@@ -304,7 +304,7 @@ std::string VectorBatch::TransformTime(int vectorID, int rowID, int precision) c
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
 
     if (milliseconds == 0) {
-        return std::string(buffer);
+        return std::string(buffer) + ".000"; //timestamp格式只接收到毫秒精度，所以输出最多也是毫秒精度
     }
 
     std::ostringstream oss;
