@@ -647,6 +647,17 @@ void HeapKeyedStateBackendBuilder<K>::restoreEntryToHeap(
                 static_cast<RowData*>(rawVal)->copy());
             delete static_cast<K*>(rawKey);
             delete static_cast<VoidNamespace*>(rawNs);
+        } else if (dataId == BackendDataType::ROW_LIST_BK) {
+            void* rawVal = info.valueSerializer->deserialize(valInput);
+            auto* table =
+                reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, std::vector<RowData*>*>*>(stateTablePtr);
+            table->put(
+                *static_cast<K*>(rawKey),
+                keyGroupId,
+                *static_cast<VoidNamespace*>(rawNs),
+                static_cast<std::vector<RowData*>*>(rawVal));
+            delete static_cast<K*>(rawKey);
+            delete static_cast<VoidNamespace*>(rawNs);
         } else if (dataId == BackendDataType::SET_LONG) {
             void* rawVal = info.valueSerializer->deserialize(valInput);
             auto* table = reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, std::vector<long>*>*>(stateTablePtr);

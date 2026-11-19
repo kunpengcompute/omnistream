@@ -232,6 +232,14 @@ private:
                         preparedData.stateIterators.push_back(
                             std::make_unique<HeapSingleStateIterator<K, VoidNamespace, RowData*>>(
                                 table, kvStateId, preparedData.keyGroupPrefixBytes));
+                    } else if (dataId == BackendDataType::ROW_LIST_BK) {
+                        auto* table =
+                            reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, std::vector<RowData*>*>*>(
+                                stateTablePtr);
+                        preparedData.metaInfoSnapshots.push_back(table->getMetaInfo()->snapshot());
+                        preparedData.stateIterators.push_back(
+                            std::make_unique<HeapSingleStateIterator<K, VoidNamespace, std::vector<RowData*>*>>(
+                                table, kvStateId, preparedData.keyGroupPrefixBytes));
                     } else if (dataId == BackendDataType::SET_LONG) {
                         auto* table = reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, std::vector<long>*>*>(
                             stateTablePtr);

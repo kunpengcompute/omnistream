@@ -60,6 +60,8 @@ public:
     };
     V value() override;
     void update(const V& value, bool copyKey = false) override;
+    bool isEmpty() override;
+    bool getIfPresent(V& out) override;
     void clear() override;
     void setDefaultValue(V value)
     {
@@ -248,4 +250,28 @@ V HeapValueState<K, N, V>::value()
     } else {
         return result == std::numeric_limits<V>::max() ? defaultValue : result;
     }
+}
+
+template <typename K, typename N, typename V>
+bool HeapValueState<K, N, V>::isEmpty()
+{
+    return !stateTable->containsKey(currentNamespace);
+}
+
+template <typename K, typename N, typename V>
+bool HeapValueState<K, N, V>::getIfPresent(V& out)
+{
+    if (!stateTable->containsKey(currentNamespace)) {
+        return false;
+    }
+    // Raw read: StateTable::get returns numeric_limits<V>::max() only when the
+    // entry is absent, so a present LONG_MAX is returned unchanged here.
+    out = stateTable->get(currentNamespace);
+    // Match value()'s refcount contract for Object* values.
+    if constexpr (std::is_same_v<V, Object*>) {
+        if (out != nullptr) {
+            reinterpret_cast<Object*>(out)->getRefCount();
+        }
+    }
+    return true;
 }

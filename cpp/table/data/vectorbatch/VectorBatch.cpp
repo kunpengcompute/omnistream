@@ -224,7 +224,7 @@ std::string VectorBatch::TransformTimeWithTimeZone(
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
 
     if (milliseconds == 0) {
-        return std::string(buffer) + "Z";
+        return std::string(buffer) + ".000";
     }
 
     std::ostringstream oss;
@@ -238,7 +238,7 @@ std::string VectorBatch::TransformTimeWithTimeZone(
         oss << std::setw(3) << std::setfill('0') << milliseconds << std::string(6, '0');
     }
 
-    return oss.str() + "Z";
+    return oss.str();
 }
 
 std::string VectorBatch::TransformOnlyTime(int vectorID, int rowID, int precision) const
@@ -304,7 +304,7 @@ std::string VectorBatch::TransformTime(int vectorID, int rowID, int precision) c
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
 
     if (milliseconds == 0) {
-        return std::string(buffer);
+        return std::string(buffer) + ".000"; //timestamp格式只接收到毫秒精度，所以输出最多也是毫秒精度
     }
 
     std::ostringstream oss;
@@ -430,7 +430,7 @@ void VectorBatch::WriteToFileInternal(
             LOG("vb writefile inputType is " << inputTypes[vectorID]);
             if (inputTypes[vectorID].substr(0, 30) == "TIMESTAMP_WITH_LOCAL_TIME_ZONE") {
                 auto result = TransformTimeWithTimeZone(vectorID, rowID, tzStr);
-                file << "\"" << result << "\"";
+                file << result;
             } else if (inputTypes[vectorID].substr(0, 9) == "TIMESTAMP") {
                 int precision = 3;
                 size_t parenPos = inputTypes[vectorID].find('(');
@@ -442,7 +442,7 @@ void VectorBatch::WriteToFileInternal(
                     }
                 }
                 auto result = TransformTime(vectorID, rowID, precision);
-                file << "\"" << result << "\"";
+                file << result;
             } else if (inputTypes[vectorID].substr(0, 22) == "TIME_WITHOUT_TIME_ZONE") {
                 int precision = 3;
                 size_t parenPos = inputTypes[vectorID].find('(');
@@ -754,17 +754,19 @@ omnistream::VectorBatch* VectorBatch::CreateVectorBatch(int rowCount, const std:
                 break;
             }
             case (omniruntime::type::DataTypeId::OMNI_DECIMAL64): {
-                auto vec = new omniruntime::vec::Vector<long>(rowCount, omniruntime::type::DataTypeId::OMNI_DECIMAL64);
+                auto vec =
+                    new omniruntime::vec::Vector<int64_t>(rowCount, omniruntime::type::DataTypeId::OMNI_DECIMAL64);
                 vectorBatch->Append(vec);
                 break;
             }
             case (omniruntime::type::DataTypeId::OMNI_DECIMAL128): {
-                auto vec =
-                    new omniruntime::vec::Vector<Decimal128>(rowCount, omniruntime::type::DataTypeId::OMNI_DECIMAL128);
+                auto vec = new omniruntime::vec::Vector<omniruntime::type::Decimal128>(rowCount);
                 vectorBatch->Append(vec);
                 break;
             }
-            default: throw std::runtime_error("Unsupported type: " + dataTypes[i]);
+            default:
+                throw std::runtime_error(
+                    "CreateVectorBatch: unsupported type id " + std::to_string(static_cast<int>(dataTypes[i])));
         }
     }
     return vectorBatch;

@@ -50,6 +50,7 @@
 #include "core/typeutils/LongSerializer.h"
 #include "core/typeutils/MapSerializer.h"
 #include "core/typeutils/ListSerializer.h"
+#include "table/typeutils/SortedMapValue.h"
 #include "core/api/common/state/RestoreStateDescriptor.h"
 
 using namespace omniruntime::type;
@@ -212,6 +213,10 @@ public:
                     } else {
                         delete reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, RowData*>*>(stateTablePtr);
                     }
+                } else if (dataId == BackendDataType::ROW_LIST_BK) {
+                    auto stateTable =
+                        reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, std::vector<RowData*>*>*>(stateTablePtr);
+                    delete stateTable;
                 } else if (dataId == BackendDataType::SET_LONG) {
                     auto stateTable =
                         reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, std::vector<long>*>*>(stateTablePtr);
@@ -219,6 +224,10 @@ public:
                 } else if (dataId == BackendDataType::EXTERNAL_BIGINT_BK) {
                     auto stateTable =
                         reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, int64_t>*>(stateTablePtr);
+                    delete stateTable;
+                } else if (dataId == BackendDataType::SORTED_MAP_BK) {
+                    auto stateTable =
+                        reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, SortedMapValue*>*>(stateTablePtr);
                     delete stateTable;
                 } else {
                     NOT_IMPL_EXCEPTION;
@@ -552,6 +561,10 @@ uintptr_t HeapKeyedStateBackend<K>::createOrUpdateInternalState(
             return (uintptr_t)createOrUpdateInternalValueState<TimeWindow, RowData*>(namespaceSerializer, stateDesc);
         } else if (dataId == BackendDataType::ROW_BK) {
             return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, RowData*>(namespaceSerializer, stateDesc);
+        } else if (dataId == BackendDataType::ROW_LIST_BK) {
+            // ValueState<List<RowData>> (e.g. SinkUpsertMaterializer "values")
+            return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, std::vector<RowData*>*>(
+                namespaceSerializer, stateDesc);
         } else if (dataId == BackendDataType::INT_BK) {
             return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, int32_t>(namespaceSerializer, stateDesc);
         } else if (dataId == BackendDataType::BIGINT_BK) {
@@ -565,6 +578,9 @@ uintptr_t HeapKeyedStateBackend<K>::createOrUpdateInternalState(
             return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, Object*>(namespaceSerializer, stateDesc);
         } else if (dataId == BackendDataType::SET_LONG) {
             return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, std::vector<long>*>(
+                namespaceSerializer, stateDesc);
+        } else if (dataId == BackendDataType::SORTED_MAP_BK) {
+            return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, SortedMapValue*>(
                 namespaceSerializer, stateDesc);
         } else if (dataId == BackendDataType::EXTERNAL_BIGINT_BK) {
             return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, int64_t>(namespaceSerializer, stateDesc);

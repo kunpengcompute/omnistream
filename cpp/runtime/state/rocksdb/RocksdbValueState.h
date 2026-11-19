@@ -57,6 +57,8 @@ public:
     };
     V value() override;
     void update(const V& value, bool copyKey = false) override;
+    bool isEmpty() override;
+    bool getIfPresent(V& out) override;
 
     void setDefaultValue(V value)
     {
@@ -440,6 +442,48 @@ V RocksdbValueState<K, N, V>::value()
     } else {
         return stateCache->get(getCurrentKey(), getNamespace());
     }
+}
+
+template <typename K, typename N, typename V>
+bool RocksdbValueState<K, N, V>::isEmpty()
+{
+    if (stateCache->getSizeLimit() == 0) {
+        return !stateTable->containsKey(currentNamespace);
+    }
+    // With the falcon cache a freshly written entry may sit dirty in the cache
+    // (not yet flushed to RocksDB); presence is true if either side holds it.
+    return !(stateCache->contains(getCurrentKey(), getNamespace()) ||
+             stateTable->containsKey(currentNamespace));
+}
+
+template <typename K, typename N, typename V>
+bool RocksdbValueState<K, N, V>::getIfPresent(V& out)
+{
+    if (isEmpty()) {
+        return false;
+    }
+    if (stateCache->getSizeLimit() == 0) {
+        if constexpr (std::is_pointer_v<V>) {
+            // Pointer types: go through getValue() to keep the RowData-derived
+            // (e.g. BinaryRowData) copy() semantics. RocksdbStateTable::get()
+            // hands back a shared deserialize buffer that the next read
+            // overwrites, so returning it directly would allow use-after-overwrite.
+            out = getValue();
+        } else {
+            // Raw read: RocksdbStateTable::get returns max() only for an absent entry,
+            // so a present LONG_MAX is returned unchanged here.
+            out = stateTable->get(currentNamespace);
+        }
+    } else if (stateCache->contains(getCurrentKey(), getNamespace())) {
+        out = stateCache->get(getCurrentKey(), getNamespace());
+    } else {
+        if constexpr (std::is_pointer_v<V>) {
+            out = getValue();
+        } else {
+            out = stateTable->get(currentNamespace);
+        }
+    }
+    return true;
 }
 
 template <typename K, typename N, typename V>

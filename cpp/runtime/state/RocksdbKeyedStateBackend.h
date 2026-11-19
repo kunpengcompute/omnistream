@@ -37,6 +37,7 @@
 #include "runtime/state/RocksDBFullSnapshotResources.h"
 #include "RegisteredKeyValueStateBackendMetaInfo.h"
 #include "table/data/RowData.h"
+#include "table/typeutils/SortedMapValue.h"
 #include "table/runtime/operators/window/TimeWindow.h"
 #include "RocksDBConfigurableOptions.h"
 
@@ -274,8 +275,15 @@ public:
                         delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, int64_t>*>(stateTablePtr);
                     } else if (dataId == BackendDataType::OBJECT_BK || dataId == BackendDataType::POJO_BK) {
                         delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, Object*>*>(stateTablePtr);
+                    } else if (dataId == BackendDataType::ROW_LIST_BK) {
+                        delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, std::vector<RowData*>*>*>(
+                            stateTablePtr);
                     } else if (dataId == BackendDataType::EXTERNAL_BIGINT_BK) {
                         delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, int64_t>*>(stateTablePtr);
+                    } else if (dataId == BackendDataType::SORTED_MAP_BK) {
+                        delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, SortedMapValue*>*>(stateTablePtr);
+                    } else if (dataId == BackendDataType::SET_LONG) {
+                        delete reinterpret_cast<RocksdbStateTable<K, VoidNamespace, std::vector<long>*>*>(stateTablePtr);
                     } else {
                         GErrorLog("Unhandled VALUE state type in dispose: dataId=" + std::to_string((int)dataId));
                     }
@@ -471,6 +479,14 @@ void RocksdbKeyedStateBackend<K>::flushFalconCacheBeforeCheckpoint()
                 state->stateCache->flush();
                 state->stateCache->clearAll();
             }
+        } else if (dataId == BackendDataType::ROW_LIST_BK) {
+            // ValueState<List<RowData>> (e.g. SinkUpsertMaterializer "values")
+            auto* state =
+                reinterpret_cast<RocksdbValueState<K, VoidNamespace, std::vector<RowData*>*>*>(entry.second);
+            if (state != nullptr && state->stateCache != nullptr) {
+                state->stateCache->flush();
+                state->stateCache->clearAll();
+            }
         } else {
             NOT_IMPL_EXCEPTION;
         }
@@ -579,6 +595,13 @@ uintptr_t RocksdbKeyedStateBackend<K>::GetValueState(TypeSerializer* namespaceSe
         return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, Object*>(namespaceSerializer, stateDesc);
     } else if (dataId == BackendDataType::SET_LONG) {
         return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, std::vector<long>*>(
+            namespaceSerializer, stateDesc);
+    } else if (dataId == BackendDataType::ROW_LIST_BK) {
+        // ValueState<List<RowData>> (e.g. SinkUpsertMaterializer "values")
+        return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, std::vector<RowData*>*>(
+            namespaceSerializer, stateDesc);
+    } else if (dataId == BackendDataType::SORTED_MAP_BK) {
+        return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, SortedMapValue*>(
             namespaceSerializer, stateDesc);
     } else if (dataId == BackendDataType::EXTERNAL_BIGINT_BK) {
         return (uintptr_t)createOrUpdateInternalValueState<VoidNamespace, int64_t>(namespaceSerializer, stateDesc);

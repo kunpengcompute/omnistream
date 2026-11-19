@@ -38,6 +38,12 @@ public:
         } else if (config["joinType"] == "LeftOuterJoin") {
             leftIsOuter = true;
             rightIsOuter = false;
+        } else if (config["joinType"] == "RightOuterJoin") {
+            leftIsOuter = false;
+            rightIsOuter = true;
+        } else if (config["joinType"] == "FullOuterJoin") {
+            leftIsOuter = true;
+            rightIsOuter = true;
         } else {
             NOT_IMPL_EXCEPTION;
         }

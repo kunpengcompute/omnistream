@@ -11,15 +11,32 @@
 
 #pragma once
 
-#include <tuple>
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <regex>
+#include <stdexcept>
+#include <string>
+#include <tuple>
 #include "core/api/common/serialization/DeserializationSchema.h"
 #include "OmniOperatorJIT/core/src/type/TimestampConversion.h"
 
 class JsonRowDataDeserializationSchema : public DeserializationSchema {
 public:
-    explicit JsonRowDataDeserializationSchema(const nlohmann::json& opDescriptionJSON)
-        : fieldNames(opDescriptionJSON.at("outputNames").get<std::vector<std::string>>())
+    /**
+     * @param flinkCompatibleConversions When true, scalar conversions mirror Flink's
+     *        JsonToRowDataConverters (numeric/string fallbacks, strict TIME parsing); otherwise
+     *        the legacy JSON behaviour is kept. This is a field-conversion switch only, not
+     *        Debezium format support: DebeziumJsonDeserializationSchema parses the CDC envelope
+     *        (op/before/after, metadata, RowKind) itself and composes this class as its per-field
+     *        JSON -> VectorBatch converter, so it needs the same conversions as Flink.
+     */
+    explicit JsonRowDataDeserializationSchema(
+        const nlohmann::json& opDescriptionJSON, bool enableFlinkCompatibleConversions = false)
+        : fieldNames(opDescriptionJSON.at("outputNames").get<std::vector<std::string>>()),
+          flinkCompatibleConversions(enableFlinkCompatibleConversions)
     {
         auto outputTypes = opDescriptionJSON.at("outputTypes").get<std::vector<std::string>>();
         std::regex pattern(R"(DECIMAL\d*\((\d+),\s*(\d+)\))");
@@ -78,11 +95,13 @@ public:
 
         switch (type) {
             case omniruntime::type::DataTypeId::OMNI_BOOLEAN: {
-                vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<bool>());
+                bool value = flinkCompatibleConversions ? convertToBoolean(*fieldIt) : fieldIt->get<bool>();
+                vectorBatch->SetValueAt(colIndex, rowIndex, value);
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_INT: {
-                vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<int32_t>());
+                int32_t value = flinkCompatibleConversions ? convertToInt(*fieldIt) : fieldIt->get<int32_t>();
+                vectorBatch->SetValueAt(colIndex, rowIndex, value);
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_DATE32: {
@@ -104,7 +123,8 @@ public:
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_LONG: {
-                vectorBatch->SetValueAt(colIndex, rowIndex, fieldIt->get<int64_t>());
+                int64_t value = flinkCompatibleConversions ? convertToLong(*fieldIt) : fieldIt->get<int64_t>();
+                vectorBatch->SetValueAt(colIndex, rowIndex, value);
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_DOUBLE: {
@@ -112,8 +132,10 @@ public:
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE: {
-                vectorBatch->SetValueAt(
-                    colIndex, rowIndex, TimestampData::stringToMillisOfDay(fieldIt->get<std::string>()));
+                long value = flinkCompatibleConversions
+                                 ? convertToTimeMillisOfDay(*fieldIt)
+                                 : TimestampData::stringToMillisOfDay(fieldIt->get<std::string>());
+                vectorBatch->SetValueAt(colIndex, rowIndex, value);
                 break;
             }
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
@@ -228,7 +250,148 @@ private:
         return reinterpret_cast<omnistream::VectorBatch*>(deserialize(messageVec, lengthVec));
     }
 
+    static std::string trimSpaces(const std::string& value)
+    {
+        const char* whitespace = " \t\r\n";
+        size_t start = value.find_first_not_of(whitespace);
+        if (start == std::string::npos) {
+            return "";
+        }
+        size_t end = value.find_last_not_of(whitespace);
+        return value.substr(start, end - start + 1);
+    }
+
+    static long long parseIntegerText(const std::string& value)
+    {
+        std::string text = trimSpaces(value);
+        if (text.empty()) {
+            throw std::runtime_error("Failed to parse integer from an empty value");
+        }
+        size_t parsed = 0;
+        long long parsedValue = std::stoll(text, &parsed);
+        if (parsed != text.size()) {
+            throw std::runtime_error("Failed to parse integer from '" + value + "'");
+        }
+        return parsedValue;
+    }
+
+    static bool convertToBoolean(const nlohmann::json& node)
+    {
+        if (node.is_boolean()) {
+            return node.get<bool>();
+        }
+        if (node.is_string()) {
+            std::string text = trimSpaces(node.get<std::string>());
+            std::transform(text.begin(), text.end(), text.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return text == "true";
+        }
+        // Flink uses jsonNode.asText(): non-string scalars are never "true".
+        return false;
+    }
+
+    static int32_t convertToInt(const nlohmann::json& node)
+    {
+        if (node.is_number_integer()) {
+            long long value = node.get<long long>();
+            if (value >= std::numeric_limits<int32_t>::min() &&
+                value <= std::numeric_limits<int32_t>::max()) {
+                return static_cast<int32_t>(value);
+            }
+            throw std::runtime_error("Integer value out of range: " + node.dump());
+        }
+        if (node.is_number_unsigned()) {
+            unsigned long long value = node.get<unsigned long long>();
+            if (value <= static_cast<unsigned long long>(std::numeric_limits<int32_t>::max())) {
+                return static_cast<int32_t>(value);
+            }
+            throw std::runtime_error("Integer value out of range: " + node.dump());
+        }
+        if (node.is_number_float()) {
+            double value = node.get<double>();
+            if (std::isfinite(value) &&
+                value >= static_cast<double>(std::numeric_limits<int32_t>::min()) &&
+                value <= static_cast<double>(std::numeric_limits<int32_t>::max())) {
+                return static_cast<int32_t>(value);
+            }
+            throw std::runtime_error("Integer value out of range: " + node.dump());
+        }
+        if (node.is_string()) {
+            long long value = parseIntegerText(node.get<std::string>());
+            if (value >= std::numeric_limits<int32_t>::min() &&
+                value <= std::numeric_limits<int32_t>::max()) {
+                return static_cast<int32_t>(value);
+            }
+            throw std::runtime_error("Integer value out of range: " + node.dump());
+        }
+        throw std::runtime_error("Cannot convert JSON value to INTEGER: " + node.dump());
+    }
+
+    static int64_t convertToLong(const nlohmann::json& node)
+    {
+        if (node.is_number_integer()) {
+            return node.get<int64_t>();
+        }
+        if (node.is_number_unsigned()) {
+            unsigned long long value = node.get<unsigned long long>();
+            if (value <= static_cast<unsigned long long>(std::numeric_limits<int64_t>::max())) {
+                return static_cast<int64_t>(value);
+            }
+            throw std::runtime_error("Bigint value out of range: " + node.dump());
+        }
+        if (node.is_number_float()) {
+            double value = node.get<double>();
+            if (std::isfinite(value) && value >= -9223372036854775808.0 && value < 9223372036854775808.0) {
+                return static_cast<int64_t>(value);
+            }
+            throw std::runtime_error("Bigint value out of range: " + node.dump());
+        }
+        if (node.is_string()) {
+            return static_cast<int64_t>(parseIntegerText(node.get<std::string>()));
+        }
+        throw std::runtime_error("Cannot convert JSON value to BIGINT: " + node.dump());
+    }
+
+    static long convertToTimeMillisOfDay(const nlohmann::json& node)
+    {
+        if (!node.is_string()) {
+            throw std::runtime_error("Cannot convert JSON value to TIME: " + node.dump());
+        }
+        std::string text = trimSpaces(node.get<std::string>());
+        // Mirrors Flink's SQL_TIME_FORMAT: HH:mm:ss with an optional fractional second.
+        if (text.size() < 8) {
+            throw std::runtime_error("Failed to parse time string: " + text);
+        }
+        auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
+        if (!isDigit(text[0]) || !isDigit(text[1]) || text[2] != ':' ||
+            !isDigit(text[3]) || !isDigit(text[4]) || text[5] != ':' ||
+            !isDigit(text[6]) || !isDigit(text[7])) {
+            throw std::runtime_error("Failed to parse time string: " + text);
+        }
+        if (text.size() > 8) {
+            if (text[8] != '.') {
+                throw std::runtime_error("Failed to parse time string: " + text);
+            }
+            for (size_t i = 9; i < text.size(); ++i) {
+                if (!isDigit(text[i])) {
+                    throw std::runtime_error("Failed to parse time string: " + text);
+                }
+            }
+        }
+        const int hour = (text[0] - '0') * 10 + (text[1] - '0');
+        const int minute = (text[3] - '0') * 10 + (text[4] - '0');
+        const int second = (text[6] - '0') * 10 + (text[7] - '0');
+        if (hour > 23 || minute > 59 || second > 59) {
+            throw std::runtime_error("Failed to parse time string: " + text);
+        }
+        // Flink's JsonToRowDataConverters.convertToTime parses SQL_TIME_FORMAT (which accepts an
+        // optional fractional second) and then returns localTime.toSecondOfDay() * 1000. Fractional
+        // seconds are intentionally truncated, so keep this behavior for Flink compatibility.
+        return static_cast<long>(hour * 3600 + minute * 60 + second) * 1000;
+    }
+
     std::vector<std::string> fieldNames;
     std::vector<omniruntime::type::DataTypeId> fieldTypes;
     std::vector<int32_t> decimalScales;
+    bool flinkCompatibleConversions = false;
 };
