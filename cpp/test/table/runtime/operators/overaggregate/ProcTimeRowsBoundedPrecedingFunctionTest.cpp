@@ -243,6 +243,36 @@ std::string rowsBoundedOverDescription(
         "partition":{"channelNumber":1,"partitionName":"forward"}})DELIM";
 }
 
+// Two-aggregate ROWS-bounded description (e.g. SUM($1) + COUNT(*)): one
+// window, one accumulator row with a slot per call, one output column per
+// call. Mirrors production SELECTs that project several OVER aggregates.
+std::string rowsBoundedTwoAggOverDescription(
+    const std::vector<int>& grouping, int precedingOffset,
+    const std::string& aggCallJson1, const std::string& aggCallJson2)
+{
+    std::string groupingStr = grouping.empty() ? "[]" : "[" + std::to_string(grouping[0]) + "]";
+    std::string frame = "ROWS BETWEEN " + std::to_string(precedingOffset) + " PRECEDING AND CURRENT ROW";
+    return R"DELIM({"input_channels":[0],
+        "operators":[{"description":{
+                    "processFunction":"ProcTimeRowsBoundedPrecedingFunction",
+                    "precedingOffset":)DELIM" + std::to_string(precedingOffset) +
+        R"DELIM(,
+                    "aggInfoList":{"accTypes":["BIGINT","BIGINT"],"aggValueTypes":["BIGINT","BIGINT"],
+                        "aggregateCalls":[)DELIM" + aggCallJson1 + "," + aggCallJson2 +
+        R"DELIM(],"indexOfCountStar":-1},
+                    "grouping":)DELIM" + groupingStr + R"DELIM(,
+                    "distinctInfos":[],
+                    "inputTypes":["BIGINT","BIGINT"],
+                    "originDescription":"[3]:OverAggregate(partitionBy=[bidder], window=[)DELIM" + frame +
+        R"DELIM(], select=[bidder, price, sum(...), cnt(...)])",
+                    "outputTypes":["BIGINT","BIGINT","BIGINT","BIGINT"]},
+                    "id":"org.apache.flink.streaming.api.operators.KeyedProcessOperator",
+                    "inputs":[{"kind":"Row","type":[{"isNull":true,"kind":"logical","type":"BIGINT"},{"isNull":true,"kind":"logical","type":"BIGINT"}]}],
+                    "name":"OverAggregate[3]",
+                    "output":{"kind":"Row","type":[{"kind":"logical","type":"BIGINT"},{"kind":"logical","type":"BIGINT"},{"kind":"logical","type":"BIGINT"},{"kind":"logical","type":"BIGINT"}]}}],
+        "partition":{"channelNumber":1,"partitionName":"forward"}})DELIM";
+}
+
 // Note: custom AGG delimiters — the default R"(...)" would terminate early
 // because the JSON payload itself contains the )" sequence ("SUM($1)","...").
 const char* SUM_PRICE = R"AGG({"argIndexes":[1],"name":"SUM($1)","filterArg":-1})AGG";
@@ -287,6 +317,8 @@ TEST(ProcTimeRowsBoundedPrecedingFunctionTest, WindowSizeOneSlidesEveryRow)
 }
 
 // N = 2: window fills first (10, then 10+20), then slides (20+30, 30+40).
+// Also pins the output layout: input columns pass through untouched (col 0
+// bidder, col 1 current price) in front of the aggregate column.
 TEST(ProcTimeRowsBoundedPrecedingFunctionTest, WindowSizeTwoFillsThenSlides)
 {
     RowsBoundedOverTestHarness h(rowsBoundedOverDescription({0}, 2, SUM_PRICE), "HashMapStateBackend", 2);
@@ -297,8 +329,34 @@ TEST(ProcTimeRowsBoundedPrecedingFunctionTest, WindowSizeTwoFillsThenSlides)
 
     ASSERT_EQ(h.batchCount(), 4);
     const int64_t expected[] = {10, 30, 50, 70};
+    const int64_t price[] = {10, 20, 30, 40};
     for (int i = 0; i < 4; ++i) {
         EXPECT_EQ(h.longAt(i, 2, 0), expected[i]);
+        EXPECT_EQ(h.longAt(i, 0, 0), 7);
+        EXPECT_EQ(h.longAt(i, 1, 0), price[i]);
+    }
+}
+
+// Two aggregates share one window (SUM($1) + COUNT(*)): the accumulator row
+// carries one slot per call and every retract/accumulate round must hit both
+// functions. The mixed zero-arg (COUNT(*)) / one-arg (SUM($1)) shapes also
+// pin the per-call argIndexes wiring. This is the closest unit-level
+// stand-in for production SELECTs that project several OVER aggregates.
+TEST(ProcTimeRowsBoundedPrecedingFunctionTest, TwoAggregatesShareOneWindow)
+{
+    RowsBoundedOverTestHarness h(
+        rowsBoundedTwoAggOverDescription({0}, 2, SUM_PRICE, COUNT_STAR), "HashMapStateBackend", 2);
+    h.feed({7, 10});
+    h.feed({7, 20});
+    h.feed({7, 30});
+    h.feed({7, 40});
+
+    ASSERT_EQ(h.batchCount(), 4);
+    const int64_t expectedSum[] = {10, 30, 50, 70};
+    const int64_t expectedCount[] = {1, 2, 2, 2};
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_EQ(h.longAt(i, 2, 0), expectedSum[i]);
+        EXPECT_EQ(h.longAt(i, 3, 0), expectedCount[i]);
     }
 }
 
