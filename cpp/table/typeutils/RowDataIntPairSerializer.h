@@ -46,6 +46,16 @@ public:
     void* deserialize(DataInputView& source) override
     {
         const int length = source.readInt();
+        if (length <= 0) {
+            ERROR_RELEASE("RowDataIntPairSerializer::deserialize invalid length: " << length);
+            THROW_LOGIC_EXCEPTION("RowDataIntPairSerializer::deserialize invalid length " + std::to_string(length));
+        }
+        if (length > MAX_ROW_BYTES) {
+            ERROR_RELEASE("RowDataIntPairSerializer::deserialize length " << length << " exceeds max " << MAX_ROW_BYTES);
+            THROW_LOGIC_EXCEPTION(
+                "RowDataIntPairSerializer::deserialize length " + std::to_string(length) + " exceeds max " +
+                std::to_string(MAX_ROW_BYTES));
+        }
         auto* bytes = new uint8_t[length];
         source.readFully(bytes, length, 0, length);
         auto* row = new BinaryRowData(numFields_);
@@ -73,6 +83,8 @@ public:
     }
 
 private:
+    static constexpr int MAX_ROW_BYTES = 2048;
+
     BinaryRowDataSerializer rowSerializer_;
     int numFields_;
 };
