@@ -112,7 +112,7 @@ public:
         std::ios_base::openmode mode = std::ios::out,
         std::vector<std::pair<int32_t, int32_t>> decimalInfo = {},
         std::vector<std::string> inputTypes = {},
-        const std::string& tzStr = "Asia/Shanghai") const;
+        const std::string& tzStr = "") const;
     void convertToJson(
         nlohmann::ordered_json& j,
         int rowIndex,

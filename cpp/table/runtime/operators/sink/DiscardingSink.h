@@ -35,7 +35,10 @@ public:
             }
         }
         if (sinkDescription.contains("timeZone")) {
-            timeZone = sinkDescription.value("timeZone", "Asia/Shanghai");
+            // The session zone (table.local-time-zone) is resolved on the Java side,
+            // defaulting to ZoneId.systemDefault(). An empty value means "use the
+            // native OS local time", matching Flink's systemDefault fallback.
+            timeZone = sinkDescription.value("timeZone", "");
         }
     };
 
@@ -66,7 +69,7 @@ private:
     std::vector<std::string> inputTypes;
     std::string outfile;
     std::vector<std::pair<int32_t, int32_t>> decimalInfo; // precision, scale
-    std::string timeZone = "Asia/Shanghai";
+    std::string timeZone;
 };
 
 #endif // FLINK_TNEL_DISCARDINGSINK_H
