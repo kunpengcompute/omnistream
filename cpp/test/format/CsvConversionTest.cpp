@@ -1,5 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <limits>
+#include <memory>
+#include <optional>
+
 #include "streaming/runtime/streamrecord/StreamRecord.h"
 #include "table/data/binary/BinaryRowData.h"
 #include "table/runtime/operators/source/InputSplit.h"
@@ -23,6 +27,45 @@ TEST(CsvConversionTest, CsvRowBigIntConversion)
     EXPECT_EQ(*rowData->getLong(0), 1);
     EXPECT_EQ(*rowData->getLong(1), 2);
     EXPECT_EQ(*rowData->getLong(2), 3);
+}
+
+TEST(CsvConversionTest, CsvBigIntRequiresCompleteInteger)
+{
+    struct TestCase {
+        const char* input;
+        std::optional<int64_t> expected;
+    };
+    const std::vector<TestCase> cases = {
+        {"1.17E+18", std::nullopt},
+        {"123abc", std::nullopt},
+        {"9223372036854775808", std::nullopt},
+        {"-9223372036854775809", std::nullopt},
+        {"null", std::nullopt},
+        {"", std::nullopt},
+        {"\t +42 \r", 42},
+        {"9223372036854775807", std::numeric_limits<int64_t>::max()},
+        {"-9223372036854775808", std::numeric_limits<int64_t>::min()},
+    };
+
+    omnistream::csv::CsvSchema schema({OMNI_LONG_TYPE});
+    schema.setNullValue("null");
+    std::vector<omnistream::csv::CsvRow> rows;
+    for (const auto& testCase : cases) {
+        rows.emplace_back(testCase.input, schema);
+    }
+
+    const std::unique_ptr<omnistream::VectorBatch> batch(omnistream::csv::CsvConverter::convert(rows));
+    for (size_t i = 0; i < cases.size(); ++i) {
+        SCOPED_TRACE(cases[i].input);
+        const std::unique_ptr<BinaryRowData> row(omnistream::csv::CsvConverter::convert(rows[i]));
+        const auto expected = cases[i].expected;
+        ASSERT_EQ(row->isNullAt(0), !expected.has_value());
+        ASSERT_EQ(batch->Get(0)->IsNull(i), !expected.has_value());
+        if (expected.has_value()) {
+            EXPECT_EQ(*row->getLong(0), *expected);
+            EXPECT_EQ(batch->GetValueAt<int64_t>(0, i), *expected);
+        }
+    }
 }
 
 TEST(CsvConversionTest, CsvRowVarCharConversion)
