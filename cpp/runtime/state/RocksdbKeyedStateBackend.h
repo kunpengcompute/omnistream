@@ -38,6 +38,7 @@
 #include "RegisteredKeyValueStateBackendMetaInfo.h"
 #include "table/data/RowData.h"
 #include "table/typeutils/SortedMapValue.h"
+#include "table/typeutils/RowDataIntPairSerializer.h"
 #include "table/runtime/operators/window/TimeWindow.h"
 #include "RocksDBConfigurableOptions.h"
 
@@ -241,6 +242,9 @@ public:
                     } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_LIST_BK) {
                         delete reinterpret_cast<
                             RocksdbMapStateTable<K, VoidNamespace, RowData*, std::vector<RowData*>*>*>(stateTablePtr);
+                    } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_INT_PAIR_BK) {
+                        delete reinterpret_cast<RocksdbMapStateTable<K, VoidNamespace, RowData*, RowDataIntPair*>*>(
+                            stateTablePtr);
                     } else if (
                         (keyId == BackendDataType::VARCHAR_BK && valueId == BackendDataType::BIGINT_BK) ||
                         (keyId == BackendDataType::OBJECT_BK && valueId == BackendDataType::POJO_BK) ||
@@ -558,6 +562,10 @@ uintptr_t RocksdbKeyedStateBackend<K>::GetMapState(TypeSerializer* namespaceSeri
             namespaceSerializer, stateDesc);
     } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_LIST_BK) {
         return (uintptr_t)createOrUpdateInternalMapState<VoidNamespace, RowData*, std::vector<RowData*>*>(
+            namespaceSerializer, stateDesc);
+    } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_INT_PAIR_BK) {
+        // UpdatableTopNFunction's "data-state-with-update": MapState<rowKey, RowDataIntPair>.
+        return (uintptr_t)createOrUpdateInternalMapState<VoidNamespace, RowData*, RowDataIntPair*>(
             namespaceSerializer, stateDesc);
     } else if (keyId == BackendDataType::VARCHAR_BK && valueId == BackendDataType::BIGINT_BK) {
         return (uintptr_t)createOrUpdateInternalMapState<VoidNamespace, Object*, Object*>(

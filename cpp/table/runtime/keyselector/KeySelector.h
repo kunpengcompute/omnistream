@@ -183,13 +183,18 @@ K KeySelector<K>::getKey(RowData* input)
                 case OMNI_LONG:
                 case OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 case OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
-                case OMNI_TIMESTAMP: key->setLong(i, input->getLong(keyColIndices[i])); break;
-                case OMNI_VARCHAR: {
+                case OMNI_TIMESTAMP:
+                case OMNI_TIME_WITHOUT_TIME_ZONE: key->setLong(i, input->getLong(keyColIndices[i])); break;
+                case OMNI_VARCHAR:
+                case OMNI_CHAR: {
                     std::string_view sv = input->getStringView(keyColIndices[i]);
                     key->setStringView(i, sv);
                     break;
                 }
-                case OMNI_INT: key->setInt(i, *input->getInt(keyColIndices[i])); break;
+                case OMNI_INT:
+                case OMNI_DATE32: key->setInt(i, *input->getInt(keyColIndices[i])); break;
+                case OMNI_DOUBLE: key->setDouble(i, *input->getDouble(keyColIndices[i])); break;
+                case OMNI_BOOLEAN: key->setBool(i, *input->getBool(keyColIndices[i])); break;
                 default: THROW_LOGIC_EXCEPTION("Key type not supported, typeId: " << keyColTypeIds[i]);
             }
         }
