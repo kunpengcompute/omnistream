@@ -26,6 +26,7 @@
 #include "table/runtime/operators/aggregate/GroupAggFunction.h"
 #include "table/runtime/operators/deduplicate/RowTimeDeduplicateFunction.h"
 #include "table/runtime/operators/misc/DropUpdateBeforeOperator.h"
+#include "table/runtime/operators/deduplicate/ProcTimeDeduplicateKeepFirstRowFunction.h"
 #include "table/runtime/operators/deduplicate/ProcTimeDeduplicateKeepLastRowFunction.h"
 #include "streaming/api/operators/KeyedProcessOperator.h"
 #include "table/runtime/operators/join/stream/StreamingJoinOperator.h"
@@ -99,6 +100,97 @@ RankProcessFunction* CreateRankFunction(const nlohmann::json& description)
         return new FastTop1Function<RowData*>(description);
     }
     return nullptr;
+}
+
+enum class ProcTimeDedupKind { None, KeepFirst, KeepLast, RowTime };
+
+// a158e28b / 008259ae: EXPLAIN 名 Deduplicate(...) + isRowtime/keepLastRow。
+// 当前分支另外用 processFunction 区分 ChangelogNormalize 与 proc-time Keep-Last。
+// keepLastRow 缺省 true，避免没写字段时被当成 Keep-First。
+ProcTimeDedupKind ClassifyDeduplicate(const nlohmann::json& description, const std::string& name)
+{
+    const auto processFunction = description.value("processFunction", "");
+    if (processFunction == "ProcTimeDeduplicateKeepFirstRowFunction") {
+        return ProcTimeDedupKind::KeepFirst;
+    }
+    if (processFunction == "ProcTimeDeduplicateKeepLastRowFunction") {
+        return ProcTimeDedupKind::KeepLast;
+    }
+    const bool namedDedup = !name.empty() && name[0] == 'D';
+    const bool isRowtime = description.value("isRowtime", false);
+    if (!namedDedup && !isRowtime) {
+        return ProcTimeDedupKind::None;
+    }
+    if (isRowtime) {
+        return ProcTimeDedupKind::RowTime;
+    }
+    return description.value("keepLastRow", true) ? ProcTimeDedupKind::KeepLast : ProcTimeDedupKind::KeepFirst;
+}
+
+StreamOperator* CreateDeduplicateOp(
+    ProcTimeDedupKind kind,
+    const nlohmann::json& description,
+    WatermarkGaugeExposingOutput* chainOutput,
+    std::shared_ptr<omnistream::OmniStreamTask> task)
+{
+    if (kind == ProcTimeDedupKind::None) {
+        return nullptr;
+    }
+    if (kind == ProcTimeDedupKind::KeepFirst) {
+        auto* function = new ProcTimeDeduplicateKeepFirstRowFunction(description);
+        auto* op = new KeyedProcessOperator(function, chainOutput, description);
+        if (task) {
+            op->setup(std::move(task));
+        } else {
+            op->setup();
+        }
+        op->setDescription(description);
+        op->setFlinkSavepointUnsupported(
+            "ProcTimeDeduplicateKeepFirstRowFunction uses a seen-flag state, "
+            "not compatible with RowTime DeduplicateAdaptor");
+        LOG("Routed proc-time Deduplicate -> ProcTimeDeduplicateKeepFirstRowFunction");
+        return static_cast<OneInputStreamOperator*>(op);
+    }
+    if (kind == ProcTimeDedupKind::KeepLast) {
+        nlohmann::json desc = description;
+        // EXPLAIN 名 Deduplicate(keep=[LastRow]) 没有 processFunction。那是 append-only
+        // proc-time 去重，对应 Flink processLastRowOnProcTime（inputInsertOnly=true）。
+        // processFunction 显式为 KeepLast 时保留 JSON 里的 inputInsertOnly，ChangelogNormalize 为 false。
+        if (description.value("processFunction", "") != "ProcTimeDeduplicateKeepLastRowFunction" &&
+            !desc.contains("inputInsertOnly")) {
+            desc["inputInsertOnly"] = true;
+        }
+        const bool inputInsertOnly = desc.value("inputInsertOnly", false);
+        auto* function = new ProcTimeDeduplicateKeepLastRowFunction(desc);
+        auto* op = new KeyedProcessOperator(function, chainOutput, desc);
+        if (task) {
+            op->setup(std::move(task));
+        } else {
+            op->setup();
+        }
+        op->setDescription(desc);
+        // ChangelogNormalize 与 append-only proc-time Deduplicate 复用同一 Function，
+        // 仅以 inputInsertOnly 区分。
+        if (inputInsertOnly) {
+            op->setFlinkSavepointUnsupported("proc-time Deduplicate savepoints are unsupported");
+            LOG("Routed ProcTimeDeduplicateKeepLastRowFunction -> proc-time Deduplicate (inputInsertOnly=true)");
+        } else {
+            op->setFlinkSavepointUnsupported("ChangelogNormalize savepoints are unsupported");
+            LOG("Routed ProcTimeDeduplicateKeepLastRowFunction -> ChangelogNormalize (inputInsertOnly=false)");
+        }
+        return static_cast<OneInputStreamOperator*>(op);
+    }
+    auto* func = new RowTimeDeduplicateFunction(description);
+    auto* op = new KeyedProcessOperator(func, chainOutput, description);
+    if (task) {
+        op->setup(std::move(task));
+    } else {
+        op->setup();
+    }
+    op->setDescription(description);
+    op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::DeduplicateAdaptor);
+    LOG("Routed Deduplicate -> RowTimeDeduplicateFunction");
+    return static_cast<OneInputStreamOperator*>(op);
 }
 
 template <typename OperatorT>
@@ -202,14 +294,12 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         watermarkAssignerOperator->setup();
         return static_cast<OneInputStreamOperator*>(watermarkAssignerOperator);
     } else if (uniqueName == OPERATOR_NAME_KEYED_PROCESS_OPERATOR) {
-        if (opConfig.getDescription().value("isRowtime", false) ||
-            (!opConfig.getName().empty() && opConfig.getName()[0] == 'D')) {
-            RowTimeDeduplicateFunction* func = new RowTimeDeduplicateFunction(opConfig.getDescription());
-            auto* op = new KeyedProcessOperator(func, chainOutput, opConfig.getDescription());
-            op->setup();
-            LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
-
-            return static_cast<OneInputStreamOperator*>(op);
+        if (auto* dedup = CreateDeduplicateOp(
+                ClassifyDeduplicate(opConfig.getDescription(), opConfig.getName()),
+                opConfig.getDescription(),
+                chainOutput,
+                nullptr)) {
+            return dedup;
         } else if (
             opConfig.getDescription().contains("processFunction") &&
             opConfig.getDescription()["processFunction"] == "ProcTimeUnboundedPrecedingFunction") {
@@ -537,36 +627,9 @@ StreamOperator* StreamOperatorFactory::CreateKeyedProcessOp(
     auto description = opConfig.getDescription();
     nlohmann::json opDescriptionJSON = nlohmann::json::parse(description);
 
-    if (opDescriptionJSON.value("processFunction", "") == "ProcTimeDeduplicateKeepLastRowFunction") {
-        const bool inputInsertOnly = opDescriptionJSON.value("inputInsertOnly", false);
-        auto* function = new ProcTimeDeduplicateKeepLastRowFunction(opDescriptionJSON);
-        auto* op = new KeyedProcessOperator(function, chainOutput, opDescriptionJSON);
-        op->setup(std::move(task));
-        op->setDescription(opDescriptionJSON);
-        // 路由隔离：ChangelogNormalize 与 append-only proc-time Deduplicate 在 Flink 中复用同一
-        // ProcTimeDeduplicateKeepLastRowFunction，仅以 inputInsertOnly 区分。这里据该标志分离，
-        // 避免仅按函数名路由把 Deduplicate 误当 ChangelogNormalize。
-        if (inputInsertOnly) {
-            op->setFlinkSavepointUnsupported("proc-time Deduplicate savepoints are unsupported");
-            LOG("Routed ProcTimeDeduplicateKeepLastRowFunction -> proc-time Deduplicate (inputInsertOnly=true)");
-        } else {
-            op->setFlinkSavepointUnsupported("ChangelogNormalize savepoints are unsupported");
-            LOG("Routed ProcTimeDeduplicateKeepLastRowFunction -> ChangelogNormalize (inputInsertOnly=false)");
-        }
-        return static_cast<OneInputStreamOperator*>(op);
-    }
-    if (opDescriptionJSON.value("isRowtime", false) ||
-        (!opConfig.getName().empty() && opConfig.getName()[0] == 'D')) {
-        LOG("Deduplicate description: " << opConfig.getDescription());
-        RowTimeDeduplicateFunction* func = new RowTimeDeduplicateFunction(opDescriptionJSON);
-        LOG("Deduplicate2");
-        auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
-        LOG("Deduplicate3");
-        op->setup(std::move(task));
-        op->setDescription(opDescriptionJSON);
-        op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::DeduplicateAdaptor);
-        LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
-        return static_cast<OneInputStreamOperator*>(op);
+    const auto dedupKind = ClassifyDeduplicate(opDescriptionJSON, opConfig.getName());
+    if (dedupKind != ProcTimeDedupKind::None) {
+        return CreateDeduplicateOp(dedupKind, opDescriptionJSON, chainOutput, std::move(task));
     } else if (RankProcessFunction* rankFunc = CreateRankFunction(opDescriptionJSON)) {
         LOG("Rank processFunction description: " << opConfig.getDescription());
         auto* op = new KeyedProcessOperator(rankFunc, chainOutput, opDescriptionJSON);
