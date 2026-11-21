@@ -71,6 +71,21 @@ TEST(VectorBatchTest, GetRowKindArrayTest)
     EXPECT_EQ(rowKinds[1], rowKind2);
 }
 
+TEST(VectorBatchTest, TransformTimeWithTimeZoneTest)
+{
+    constexpr int rowCount = 3;
+    int64_t values[rowCount] = {1609459200000LL, -1LL, 1609459200000LL};
+    omnistream::VectorBatch vectorBatch(rowCount);
+    vectorBatch.Append(omniruntime::TestUtil::CreateVector<int64_t>(rowCount, values));
+
+    EXPECT_EQ(vectorBatch.TransformTimeWithTimeZone(0, 0, "UTC"), "2021-01-01 00:00:00.000");
+    EXPECT_EQ(vectorBatch.TransformTimeWithTimeZone(0, 0, "Asia/Shanghai"), "2021-01-01 08:00:00.000");
+    EXPECT_EQ(vectorBatch.TransformTimeWithTimeZone(0, 0, "GMT+08:00"), "2021-01-01 08:00:00.000");
+    EXPECT_EQ(vectorBatch.TransformTimeWithTimeZone(0, 0, "+08:00"), "2021-01-01 08:00:00.000");
+    EXPECT_EQ(vectorBatch.TransformTimeWithTimeZone(0, 1, "UTC"), "1969-12-31 23:59:59.999");
+    EXPECT_THROW(vectorBatch.TransformTimeWithTimeZone(0, 2, "Not/AZone"), std::exception);
+}
+
 TEST(VectorBatchTest, DISABLED_NullValueTest)
 {
     int rowCnt = 5;

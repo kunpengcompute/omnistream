@@ -21,6 +21,8 @@
 #include <string>
 #include <tuple>
 #include "core/api/common/serialization/DeserializationSchema.h"
+#include "table/types/logical/LogicTypeUtils.h"
+#include "table/types/logical/LogicalType.h"
 #include "OmniOperatorJIT/core/src/type/TimestampConversion.h"
 
 class JsonRowDataDeserializationSchema : public DeserializationSchema {
@@ -36,13 +38,19 @@ public:
     explicit JsonRowDataDeserializationSchema(
         const nlohmann::json& opDescriptionJSON, bool enableFlinkCompatibleConversions = false)
         : fieldNames(opDescriptionJSON.at("outputNames").get<std::vector<std::string>>()),
-          flinkCompatibleConversions(enableFlinkCompatibleConversions)
+          flinkCompatibleConversions(enableFlinkCompatibleConversions),
+          ignoreParseErrors(opDescriptionJSON.value<bool>("ignoreParseErrors", false)),
+          failOnMissingField(opDescriptionJSON.value<bool>("failOnMissingField", false))
     {
         auto outputTypes = opDescriptionJSON.at("outputTypes").get<std::vector<std::string>>();
         std::regex pattern(R"(DECIMAL\d*\((\d+),\s*(\d+)\))");
         std::smatch match;
-        for (std::string type : outputTypes) {
-            fieldTypes.push_back(LogicalType::flinkTypeToOmniTypeId(type));
+        for (const auto& type : outputTypes) {
+            if (LogicTypeUtils::startsWith(type, "TIMESTAMP_WITH_LOCAL_TIME_ZONE(")) {
+                fieldTypes.push_back(DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE);
+            } else {
+                fieldTypes.push_back(LogicalType::flinkTypeToOmniTypeId(type));
+            }
             if (std::regex_search(type, match, pattern)) {
                 decimalScales.push_back(std::stoi(match[2].str()));
             } else {
@@ -55,29 +63,15 @@ public:
     {
     }
 
-    void deserialize(const uint8_t* message, size_t length, Collector* out) override
-    {
-        auto* vectorBatch = deserializeSingleRecord(message, length);
-        if (vectorBatch != nullptr) {
-            out->collect(vectorBatch);
-        }
-    }
+    void deserialize(const uint8_t* message, size_t length, Collector* out) override;
 
-    void* deserialize(std::vector<const uint8_t*>& messageVec, std::vector<size_t>& lengthVec) override
-    {
-        int rowSize = static_cast<int>(messageVec.size());
-        int colSize = static_cast<int>(fieldNames.size());
-        auto* vectorBatch = createBatch(rowSize, fieldTypes);
-        nlohmann::json node;
-        for (int rowIndex = 0; rowIndex < rowSize; rowIndex++) {
-            node = nlohmann::json::parse(
-                std::string_view(reinterpret_cast<const char*>(messageVec[rowIndex]), lengthVec[rowIndex]));
-            for (int colIndex = 0; colIndex < colSize; colIndex++) {
-                setColValue(rowIndex, colIndex, vectorBatch, node);
-            }
-        }
-        return vectorBatch;
-    }
+    void* deserialize(std::vector<const uint8_t*>& messageVec, std::vector<size_t>& lengthVec) override;
+
+    void deserialize(
+        std::vector<const uint8_t*>& messageVec,
+        std::vector<size_t>& lengthVec,
+        std::vector<int64_t>& timeVec,
+        Collector* out) override;
 
     void setColValue(int rowIndex, int colIndex, omnistream::VectorBatch* vectorBatch, nlohmann::json& node)
     {
@@ -243,12 +237,12 @@ public:
     }
 
 private:
-    omnistream::VectorBatch* deserializeSingleRecord(const uint8_t* message, size_t length)
-    {
-        std::vector<const uint8_t*> messageVec{message};
-        std::vector<size_t> lengthVec{length};
-        return reinterpret_cast<omnistream::VectorBatch*>(deserialize(messageVec, lengthVec));
-    }
+    std::unique_ptr<omnistream::VectorBatch> deserializeBatch(
+        const std::vector<const uint8_t*>& messages,
+        const std::vector<size_t>& lengths,
+        const std::vector<int64_t>& timestamps = {});
+    void setColValue(int row, int column, omnistream::VectorBatch& batch, const nlohmann::json& value);
+    void handleFieldError(int row, int column, omnistream::VectorBatch& batch, const std::exception& error);
 
     static std::string trimSpaces(const std::string& value)
     {
@@ -282,8 +276,9 @@ private:
         }
         if (node.is_string()) {
             std::string text = trimSpaces(node.get<std::string>());
-            std::transform(text.begin(), text.end(), text.begin(),
-                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
             return text == "true";
         }
         // Flink uses jsonNode.asText(): non-string scalars are never "true".
@@ -294,8 +289,7 @@ private:
     {
         if (node.is_number_integer()) {
             long long value = node.get<long long>();
-            if (value >= std::numeric_limits<int32_t>::min() &&
-                value <= std::numeric_limits<int32_t>::max()) {
+            if (value >= std::numeric_limits<int32_t>::min() && value <= std::numeric_limits<int32_t>::max()) {
                 return static_cast<int32_t>(value);
             }
             throw std::runtime_error("Integer value out of range: " + node.dump());
@@ -309,8 +303,7 @@ private:
         }
         if (node.is_number_float()) {
             double value = node.get<double>();
-            if (std::isfinite(value) &&
-                value >= static_cast<double>(std::numeric_limits<int32_t>::min()) &&
+            if (std::isfinite(value) && value >= static_cast<double>(std::numeric_limits<int32_t>::min()) &&
                 value <= static_cast<double>(std::numeric_limits<int32_t>::max())) {
                 return static_cast<int32_t>(value);
             }
@@ -318,8 +311,7 @@ private:
         }
         if (node.is_string()) {
             long long value = parseIntegerText(node.get<std::string>());
-            if (value >= std::numeric_limits<int32_t>::min() &&
-                value <= std::numeric_limits<int32_t>::max()) {
+            if (value >= std::numeric_limits<int32_t>::min() && value <= std::numeric_limits<int32_t>::max()) {
                 return static_cast<int32_t>(value);
             }
             throw std::runtime_error("Integer value out of range: " + node.dump());
@@ -363,9 +355,8 @@ private:
             throw std::runtime_error("Failed to parse time string: " + text);
         }
         auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
-        if (!isDigit(text[0]) || !isDigit(text[1]) || text[2] != ':' ||
-            !isDigit(text[3]) || !isDigit(text[4]) || text[5] != ':' ||
-            !isDigit(text[6]) || !isDigit(text[7])) {
+        if (!isDigit(text[0]) || !isDigit(text[1]) || text[2] != ':' || !isDigit(text[3]) || !isDigit(text[4]) ||
+            text[5] != ':' || !isDigit(text[6]) || !isDigit(text[7])) {
             throw std::runtime_error("Failed to parse time string: " + text);
         }
         if (text.size() > 8) {
@@ -394,4 +385,6 @@ private:
     std::vector<omniruntime::type::DataTypeId> fieldTypes;
     std::vector<int32_t> decimalScales;
     bool flinkCompatibleConversions = false;
+    bool ignoreParseErrors;
+    bool failOnMissingField;
 };

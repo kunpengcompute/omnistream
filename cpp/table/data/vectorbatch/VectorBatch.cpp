@@ -19,6 +19,7 @@
 #include "OmniOperatorJIT/core/src/codegen/time_util.h"
 #include "OmniOperatorJIT/core/src/type/Conversions.h"
 #include "OmniOperatorJIT/core/src/type/TimestampConversion.h"
+#include "OmniOperatorJIT/core/src/type/tz/TimeZoneMap.h"
 #include "OmniOperatorJIT/core/src/vector/map_vector.h"
 
 namespace {
@@ -210,16 +211,32 @@ RowData* VectorBatch::extractRowData(int rowIndex)
 std::string VectorBatch::TransformTimeWithTimeZone(
     int vectorID, int rowID, const std::string& tzStr, int precision) const
 {
-    (void)tzStr;
     auto millis = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(vectors[vectorID])->GetValue(rowID);
-    int64_t adjusted_seconds = (millis >= 0) ? (millis / 1000) : ((millis - 999) / 1000);
-    int milliseconds = millis % 1000;
+    // TIMESTAMP_WITH_LOCAL_TIME_ZONE is stored as a UTC epoch. Shift it into the
+    // session time zone before formatting, matching Flink's
+    // LocalDateTime.ofInstant(instant, zoneId) semantics (no zone suffix).
+    int64_t localMillis = millis;
+    if (!tzStr.empty()) {
+        std::string zoneId = (tzStr == "Asia/Beijing") ? "Asia/Shanghai" : tzStr;
+        const auto* zone = omniruntime::tz::locateZone(zoneId);
+        localMillis = zone->to_local(std::chrono::milliseconds(millis)).count();
+    }
+    int64_t adjusted_seconds = (localMillis >= 0) ? (localMillis / 1000) : ((localMillis - 999) / 1000);
+    int milliseconds = localMillis % 1000;
     if (milliseconds < 0) {
         const int addTime = 1000;
         milliseconds += addTime; // 确保毫秒非负（如-1234ms → -2秒 + 766ms）
     }
     struct tm timeinfo;
-    gmtime_r(&adjusted_seconds, &timeinfo);
+    if (tzStr.empty()) {
+        // An empty value means "use the native OS local time", matching Flink's
+        // ZoneId.systemDefault() fallback.
+        localtime_r(&adjusted_seconds, &timeinfo);
+    } else {
+        // localMillis already encodes the local wall-clock time, so interpret it
+        // with gmtime_r to avoid applying the OS zone a second time.
+        gmtime_r(&adjusted_seconds, &timeinfo);
+    }
     char buffer[80];
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
 
