@@ -325,7 +325,9 @@ RowData* ProcTimeUnboundedPrecedingFunction::materialiseRow(omnistream::VectorBa
             row->setInt(
                 i, reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(batch->Get(i))->GetValue(rowId));
         } else if (typeStr == "DOUBLE") {
-            row->setLong(
+            // Native 8-byte IEEE754 slot: setDouble keeps the exact bits; an
+            // arithmetic setLong would silently truncate 3.14 to 3.
+            row->setDouble(
                 i, reinterpret_cast<omniruntime::vec::Vector<double>*>(batch->Get(i))->GetValue(rowId));
         } else if (typeStr == "BOOLEAN") {
             row->setInt(
@@ -438,12 +440,16 @@ omnistream::VectorBatch* ProcTimeUnboundedPrecedingFunction::createOutputBatch()
                 break;
             }
             case DataTypeId::OMNI_DOUBLE: {
-                auto* vector = new omniruntime::vec::Vector<int64_t>(numRows);
+                // The vector type must match the declared DOUBLE column: an
+                // int64 vector here would make every downstream reader
+                // reinterpret the IEEE754 bits (or worse). Values are read
+                // back through the row's native double slot.
+                auto* vector = new omniruntime::vec::Vector<double>(numRows);
                 for (int rowIndex = 0; rowIndex < numRows; ++rowIndex) {
                     if (src[rowIndex]->isNullAt(srcCol)) {
                         vector->SetNull(rowIndex);
                     } else {
-                        vector->SetValue(rowIndex, *src[rowIndex]->getLong(srcCol));
+                        vector->SetValue(rowIndex, *src[rowIndex]->getDouble(srcCol));
                     }
                 }
                 outputBatch->Append(vector);

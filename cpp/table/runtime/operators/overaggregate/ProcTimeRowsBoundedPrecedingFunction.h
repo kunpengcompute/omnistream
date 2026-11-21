@@ -143,7 +143,6 @@ private:
     std::vector<std::string> accTypes;
     std::vector<std::string> aggValueTypes;
     std::vector<int> groupingIndices;
-    std::vector<omniruntime::type::DataTypeId> inputRowTypes;
     nlohmann::json aggInfoList;
     long precedingOffset = 0; // ROWS BETWEEN <n> PRECEDING AND CURRENT ROW, n > 0
     long stateRetentionTime;

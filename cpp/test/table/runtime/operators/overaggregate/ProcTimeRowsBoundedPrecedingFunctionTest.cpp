@@ -27,6 +27,7 @@
 #include <nlohmann/json.hpp>
 #include <gtest/gtest.h>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -278,6 +279,36 @@ std::string rowsBoundedTwoAggOverDescription(
 const char* SUM_PRICE = R"AGG({"argIndexes":[1],"name":"SUM($1)","filterArg":-1})AGG";
 const char* COUNT_STAR = R"AGG({"argIndexes":[],"name":"COUNT(*)","filterArg":-1})AGG";
 const char* MAX_PRICE = R"AGG({"argIndexes":[1],"name":"MAX($1)","filterArg":-1})AGG";
+const char* SUM_BIDDER = R"AGG({"argIndexes":[0],"name":"SUM($0)","filterArg":-1})AGG";
+
+// DOUBLE pass-through description over (bidder BIGINT, weight DOUBLE): the
+// aggregate stays on the BIGINT column (v1 whitelist), the DOUBLE column only
+// rides along in front of the aggregate value.
+std::string rowsBoundedDoubleOverDescription(
+    const std::vector<int>& grouping, int precedingOffset, const std::string& aggCallJson)
+{
+    std::string groupingStr = grouping.empty() ? "[]" : "[" + std::to_string(grouping[0]) + "]";
+    std::string frame = "ROWS BETWEEN " + std::to_string(precedingOffset) + " PRECEDING AND CURRENT ROW";
+    return R"DELIM({"input_channels":[0],
+        "operators":[{"description":{
+                    "processFunction":"ProcTimeRowsBoundedPrecedingFunction",
+                    "precedingOffset":)DELIM" + std::to_string(precedingOffset) +
+        R"DELIM(,
+                    "aggInfoList":{"accTypes":["BIGINT"],"aggValueTypes":["BIGINT"],
+                        "aggregateCalls":[)DELIM" + aggCallJson +
+        R"DELIM(],"indexOfCountStar":-1},
+                    "grouping":)DELIM" + groupingStr + R"DELIM(,
+                    "distinctInfos":[],
+                    "inputTypes":["BIGINT","DOUBLE"],
+                    "originDescription":"[3]:OverAggregate(partitionBy=[bidder], window=[)DELIM" + frame +
+        R"DELIM(], select=[bidder, weight, agg(...)])",
+                    "outputTypes":["BIGINT","DOUBLE","BIGINT"]},
+                    "id":"org.apache.flink.streaming.api.operators.KeyedProcessOperator",
+                    "inputs":[{"kind":"Row","type":[{"isNull":true,"kind":"logical","type":"BIGINT"},{"isNull":true,"kind":"logical","type":"DOUBLE"}]}],
+                    "name":"OverAggregate[3]",
+                    "output":{"kind":"Row","type":[{"kind":"logical","type":"BIGINT"},{"kind":"logical","type":"DOUBLE"},{"kind":"logical","type":"BIGINT"}]}}],
+        "partition":{"channelNumber":1,"partitionName":"forward"}})DELIM";
+}
 
 } // namespace
 
@@ -358,6 +389,30 @@ TEST(ProcTimeRowsBoundedPrecedingFunctionTest, TwoAggregatesShareOneWindow)
         EXPECT_EQ(h.longAt(i, 2, 0), expectedSum[i]);
         EXPECT_EQ(h.longAt(i, 3, 0), expectedCount[i]);
     }
+}
+
+// DOUBLE pass-through column: the input row is re-emitted in front of the
+// aggregate columns, and the DOUBLE slot must round-trip through the native
+// 8-byte IEEE754 row slot into a DOUBLE-typed output vector. Regression test
+// for the code-review pair "setLong on a Vector<double> (arithmetic
+// truncation, 3.14 -> 3) + OMNI_DOUBLE emitted as Vector<int64_t>": the
+// input-side (materialiseRow) half is batch-path only and is covered by e2e;
+// this row-path test pins the output half.
+TEST(ProcTimeRowsBoundedPrecedingFunctionTest, DoublePassthroughColumnRoundTrips)
+{
+    RowsBoundedOverTestHarness h(
+        rowsBoundedDoubleOverDescription({0}, 2, SUM_BIDDER), "HashMapStateBackend", 2);
+    const double weight = 3.5;
+    int64_t bits = 0;
+    std::memcpy(&bits, &weight, sizeof(bits));
+    h.feed({7, bits});
+
+    ASSERT_EQ(h.batchCount(), 1);
+    EXPECT_EQ(h.longAt(0, 0, 0), 7);  // bidder passthrough
+    EXPECT_EQ(h.longAt(0, 2, 0), 7);  // SUM(bidder)
+    auto* weightVec = reinterpret_cast<omniruntime::vec::Vector<double>*>(h.batch(0)->Get(1));
+    ASSERT_NE(weightVec, nullptr);
+    EXPECT_DOUBLE_EQ(weightVec->GetValue(0), weight);
 }
 
 // MAX with a sliding window: the peak (50) leaves the window with the 4th row,

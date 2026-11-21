@@ -115,9 +115,6 @@ void ProcTimeRowsBoundedPrecedingFunction::parseDescription(const nlohmann::json
         throw std::runtime_error("ProcTimeRowsBoundedPrecedingFunction: missing or empty inputTypes");
     }
     inputTypes = config["inputTypes"].get<std::vector<std::string>>();
-    for (const auto& typeStr : inputTypes) {
-        inputRowTypes.push_back(LogicalType::flinkTypeToOmniTypeId(typeStr));
-    }
 
     if (!config.contains("outputTypes") || !config["outputTypes"].is_array()) {
         throw std::runtime_error("ProcTimeRowsBoundedPrecedingFunction: missing outputTypes");
@@ -184,6 +181,15 @@ void ProcTimeRowsBoundedPrecedingFunction::initAggFunctions(int& accStartingInde
         meta.filterIndex = aggCall["filterArg"].get<int>();
         meta.argIndexes = aggCall["argIndexes"].get<std::vector<int>>();
         meta.aggIndex = meta.argIndexes.empty() ? -1 : meta.argIndexes[0];
+        // Same range contract as the grouping indices in the constructor: an
+        // argIndex outside inputTypes must fail construction instead of
+        // indexing out of bounds below.
+        if (meta.aggIndex != -1 &&
+            (meta.aggIndex < 0 || meta.aggIndex >= static_cast<int>(inputTypes.size()))) {
+            throw std::runtime_error(
+                "ProcTimeRowsBoundedPrecedingFunction: aggregate arg index out of range: " +
+                std::to_string(meta.aggIndex));
+        }
 
         if (meta.aggType == "COUNT") {
             if (meta.argIndexes.size() > 1) {
@@ -499,6 +505,14 @@ RowData* ProcTimeRowsBoundedPrecedingFunction::materialiseRow(omnistream::Vector
     // owned BinaryRowData from the columnar batch, dispatching on the JSON
     // inputTypes (the same type vocabulary every validation layer checked).
     int colsCount = batch->GetVectorCount();
+    // The batch must carry exactly the described input columns: a mismatch
+    // would both read inputTypes out of bounds here and shift the
+    // input||aggValue column boundary on the output side.
+    if (colsCount != static_cast<int>(inputTypes.size())) {
+        throw std::runtime_error(
+            "ProcTimeRowsBoundedPrecedingFunction: batch column count " + std::to_string(colsCount) +
+            " != described inputTypes arity " + std::to_string(inputTypes.size()));
+    }
     BinaryRowData* row = BinaryRowData::createBinaryRowDataWithMem(colsCount);
     for (int32_t i = 0; i < colsCount; i++) {
         const std::string& typeStr = inputTypes[i];
@@ -510,7 +524,10 @@ RowData* ProcTimeRowsBoundedPrecedingFunction::materialiseRow(omnistream::Vector
             row->setInt(
                 i, reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(batch->Get(i))->GetValue(rowId));
         } else if (typeStr == "DOUBLE") {
-            row->setLong(
+            // Native 8-byte IEEE754 slot (Java BinaryRowData equivalent):
+            // setDouble keeps the exact bits; an arithmetic setLong would
+            // silently truncate 3.14 to 3.
+            row->setDouble(
                 i, reinterpret_cast<omniruntime::vec::Vector<double>*>(batch->Get(i))->GetValue(rowId));
         } else if (typeStr == "BOOLEAN") {
             row->setInt(
@@ -622,12 +639,16 @@ omnistream::VectorBatch* ProcTimeRowsBoundedPrecedingFunction::createOutputBatch
                 break;
             }
             case DataTypeId::OMNI_DOUBLE: {
-                auto* vector = new omniruntime::vec::Vector<int64_t>(numRows);
+                // The vector type must match the declared DOUBLE column: an
+                // int64 vector here would make every downstream reader
+                // reinterpret the IEEE754 bits (or worse). Values are read
+                // back through the row's native double slot.
+                auto* vector = new omniruntime::vec::Vector<double>(numRows);
                 for (int rowIndex = 0; rowIndex < numRows; ++rowIndex) {
                     if (src[rowIndex]->isNullAt(srcCol)) {
                         vector->SetNull(rowIndex);
                     } else {
-                        vector->SetValue(rowIndex, *src[rowIndex]->getLong(srcCol));
+                        vector->SetValue(rowIndex, *src[rowIndex]->getDouble(srcCol));
                     }
                 }
                 outputBatch->Append(vector);
