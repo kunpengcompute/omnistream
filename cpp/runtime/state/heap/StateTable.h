@@ -222,7 +222,8 @@ protected:
 
     bool containsKey(const K& key, int keyGroupIndex, const N& nameSpace)
     {
-        return getMapForKeyGroup(keyGroupIndex)->containsKey(key, nameSpace);
+        StateMap<K, N, S>* stateMap = getMapForKeyGroup(keyGroupIndex);
+        return stateMap != nullptr && stateMap->containsKey(key, nameSpace);
     };
 
     S removeAndGetOld(const K& key, int keyGroupIndex, const N& nameSpace)

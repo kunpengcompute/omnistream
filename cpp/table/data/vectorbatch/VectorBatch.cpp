@@ -19,6 +19,7 @@
 #include "OmniOperatorJIT/core/src/codegen/time_util.h"
 #include "OmniOperatorJIT/core/src/type/Conversions.h"
 #include "OmniOperatorJIT/core/src/type/TimestampConversion.h"
+#include "OmniOperatorJIT/core/src/type/tz/TimeZoneMap.h"
 #include "OmniOperatorJIT/core/src/vector/map_vector.h"
 
 namespace {
@@ -210,21 +211,37 @@ RowData* VectorBatch::extractRowData(int rowIndex)
 std::string VectorBatch::TransformTimeWithTimeZone(
     int vectorID, int rowID, const std::string& tzStr, int precision) const
 {
-    (void)tzStr;
     auto millis = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(vectors[vectorID])->GetValue(rowID);
-    int64_t adjusted_seconds = (millis >= 0) ? (millis / 1000) : ((millis - 999) / 1000);
-    int milliseconds = millis % 1000;
+    // TIMESTAMP_WITH_LOCAL_TIME_ZONE is stored as a UTC epoch. Shift it into the
+    // session time zone before formatting, matching Flink's
+    // LocalDateTime.ofInstant(instant, zoneId) semantics (no zone suffix).
+    int64_t localMillis = millis;
+    if (!tzStr.empty()) {
+        std::string zoneId = (tzStr == "Asia/Beijing") ? "Asia/Shanghai" : tzStr;
+        const auto* zone = omniruntime::tz::locateZone(zoneId);
+        localMillis = zone->to_local(std::chrono::milliseconds(millis)).count();
+    }
+    int64_t adjusted_seconds = (localMillis >= 0) ? (localMillis / 1000) : ((localMillis - 999) / 1000);
+    int milliseconds = localMillis % 1000;
     if (milliseconds < 0) {
         const int addTime = 1000;
         milliseconds += addTime; // 确保毫秒非负（如-1234ms → -2秒 + 766ms）
     }
     struct tm timeinfo;
-    gmtime_r(&adjusted_seconds, &timeinfo);
+    if (tzStr.empty()) {
+        // An empty value means "use the native OS local time", matching Flink's
+        // ZoneId.systemDefault() fallback.
+        localtime_r(&adjusted_seconds, &timeinfo);
+    } else {
+        // localMillis already encodes the local wall-clock time, so interpret it
+        // with gmtime_r to avoid applying the OS zone a second time.
+        gmtime_r(&adjusted_seconds, &timeinfo);
+    }
     char buffer[80];
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
 
     if (milliseconds == 0) {
-        return std::string(buffer) + "Z";
+        return std::string(buffer) + ".000";
     }
 
     std::ostringstream oss;
@@ -238,7 +255,7 @@ std::string VectorBatch::TransformTimeWithTimeZone(
         oss << std::setw(3) << std::setfill('0') << milliseconds << std::string(6, '0');
     }
 
-    return oss.str() + "Z";
+    return oss.str();
 }
 
 std::string VectorBatch::TransformOnlyTime(int vectorID, int rowID, int precision) const
@@ -304,7 +321,7 @@ std::string VectorBatch::TransformTime(int vectorID, int rowID, int precision) c
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
 
     if (milliseconds == 0) {
-        return std::string(buffer);
+        return std::string(buffer) + ".000"; //timestamp格式只接收到毫秒精度，所以输出最多也是毫秒精度
     }
 
     std::ostringstream oss;
@@ -430,7 +447,7 @@ void VectorBatch::WriteToFileInternal(
             LOG("vb writefile inputType is " << inputTypes[vectorID]);
             if (inputTypes[vectorID].substr(0, 30) == "TIMESTAMP_WITH_LOCAL_TIME_ZONE") {
                 auto result = TransformTimeWithTimeZone(vectorID, rowID, tzStr);
-                file << "\"" << result << "\"";
+                file << result;
             } else if (inputTypes[vectorID].substr(0, 9) == "TIMESTAMP") {
                 int precision = 3;
                 size_t parenPos = inputTypes[vectorID].find('(');
@@ -442,7 +459,7 @@ void VectorBatch::WriteToFileInternal(
                     }
                 }
                 auto result = TransformTime(vectorID, rowID, precision);
-                file << "\"" << result << "\"";
+                file << result;
             } else if (inputTypes[vectorID].substr(0, 22) == "TIME_WITHOUT_TIME_ZONE") {
                 int precision = 3;
                 size_t parenPos = inputTypes[vectorID].find('(');
@@ -754,17 +771,19 @@ omnistream::VectorBatch* VectorBatch::CreateVectorBatch(int rowCount, const std:
                 break;
             }
             case (omniruntime::type::DataTypeId::OMNI_DECIMAL64): {
-                auto vec = new omniruntime::vec::Vector<long>(rowCount, omniruntime::type::DataTypeId::OMNI_DECIMAL64);
+                auto vec =
+                    new omniruntime::vec::Vector<int64_t>(rowCount, omniruntime::type::DataTypeId::OMNI_DECIMAL64);
                 vectorBatch->Append(vec);
                 break;
             }
             case (omniruntime::type::DataTypeId::OMNI_DECIMAL128): {
-                auto vec =
-                    new omniruntime::vec::Vector<Decimal128>(rowCount, omniruntime::type::DataTypeId::OMNI_DECIMAL128);
+                auto vec = new omniruntime::vec::Vector<omniruntime::type::Decimal128>(rowCount);
                 vectorBatch->Append(vec);
                 break;
             }
-            default: throw std::runtime_error("Unsupported type: " + dataTypes[i]);
+            default:
+                throw std::runtime_error(
+                    "CreateVectorBatch: unsupported type id " + std::to_string(static_cast<int>(dataTypes[i])));
         }
     }
     return vectorBatch;

@@ -10,6 +10,7 @@
  */
 
 #include "DeserializationFactory.h"
+#include "DebeziumJsonDeserializationSchema.h"
 #include "JsonDeserializationSchema.h"
 #include "JsonRowDataDeserializationSchema.h"
 #include "SimpleStringSchema.h"
@@ -27,6 +28,9 @@ DeserializationSchema* DeserializationFactory::getDeserializationSchema(nlohmann
     }
     if (schemaName == "JsonRowDataDeserializationSchema") {
         return new JsonRowDataDeserializationSchema(opDescriptionJSON);
+    }
+    if (schemaName == "DebeziumJsonDeserializationSchema") {
+        return new DebeziumJsonDeserializationSchema(opDescriptionJSON);
     }
 
     throw std::runtime_error("Unsupported deserialization schema: " + schemaName.dump());

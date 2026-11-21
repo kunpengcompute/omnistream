@@ -125,7 +125,11 @@ private:
 
     std::string assembleNewPartPath()
     {
-        return bucketPath + outputFileConfig->getPartPrefix() + "-" + std::to_string(subtaskIndex) + "-" +
+        std::string path = bucketPath;
+        if (!path.empty() && path.back() != '/') {
+            path += '/';
+        }
+        return path + outputFileConfig->getPartPrefix() + "-" + std::to_string(subtaskIndex) + "-" +
                std::to_string(partCounter++) + outputFileConfig->getPartSuffix();
     }
 
