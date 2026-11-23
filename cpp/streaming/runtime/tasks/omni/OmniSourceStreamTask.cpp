@@ -65,11 +65,25 @@ void OmniSourceStreamTask::runSourceInThread()
         }
         mainOperator->run(lockObject_.get());
 
+        if (sourceCancelRequested_.load()) {
+            INFO_RELEASE(
+                "OmniSourceStreamTask cancel observed before CompleteProcessing; skip normal source completion");
+            return;
+        }
         CompleteProcessing();
 
+        if (sourceCancelRequested_.load()) {
+            INFO_RELEASE(
+                "OmniSourceStreamTask cancel observed after CompleteProcessing; skip source-completion mailbox");
+            return;
+        }
         auto completionMail = std::make_shared<VoidFunctionRunnable>([this]() { mailboxProcessor_->suspend(); });
         mainMailboxExecutor_->execute(completionMail, "Source completion");
     } catch (const std::exception&) {
+        if (sourceCancelRequested_.load()) {
+            INFO_RELEASE("OmniSourceStreamTask cancel observed on exception path; suppress source-error mailbox");
+            return;
+        }
         const auto exception = std::current_exception();
         auto errorMail = std::make_shared<VoidFunctionRunnable>(
             [this, exception]() { mailboxProcessor_->reportThrowable(exception); });
@@ -109,9 +123,10 @@ const std::string OmniSourceStreamTask::getName() const
 
 void OmniSourceStreamTask::cancel()
 {
-    // Cancel the writer first: the source thread may be blocked waiting for output buffers, and
-    // only cancelling the writer releases it. Joining before that would wait on a thread that
-    // cannot exit until this call runs. Null until postConstruct() runs, so guard the deref.
+    if (sourceCancelRequested_.exchange(true)) {
+        return;
+    }
+
     if (recordWriter_) {
         recordWriter_->cancel();
     }
@@ -126,7 +141,10 @@ void OmniSourceStreamTask::cancel()
     if (sourceThread_ && sourceThread_->joinable()) {
         sourceThread_->join();
     }
-    OmniStreamTask::cancel();
+
+    if (mailboxProcessor_) {
+        mailboxProcessor_->suspend();
+    }
 }
 
 OmniSourceStreamTask::~OmniSourceStreamTask()

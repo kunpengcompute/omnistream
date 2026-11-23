@@ -200,6 +200,10 @@ void OmniTask::closeRocksDBSharedResources()
 
 void OmniTask::cancel()
 {
+    if (cancelRequested_.exchange(true)) {
+        return;
+    }
+    INFO_RELEASE("OmniTask::cancel starting, task name: " << taskNameWithSubtask_);
     if (invokable_ != nullptr) {
         invokable_->cancel();
     }
@@ -328,14 +332,17 @@ void OmniTask::doRun(long streamTaskAddress)
     //  finalization of a successful execution
     // ----------------------------------------------------------------
 
-    // finish the produced partitions. if this fails, we consider the execution failed.
-    for (auto& partitionWriter : consumableNotifyingPartitionWriters) {
-        if (partitionWriter) {
-            LOG_INFO_IMP(partitionWriter->toString() << "Finished");
-            partitionWriter->finish();
-        } else {
-            LOG_INFO_IMP("Error: partitionWriter is null");
+    if (!cancelRequested_.load()) {
+        for (auto& partitionWriter : consumableNotifyingPartitionWriters) {
+            if (partitionWriter) {
+                LOG_INFO_IMP(partitionWriter->toString() << "Finished");
+                partitionWriter->finish();
+            } else {
+                LOG_INFO_IMP("Error: partitionWriter is null");
+            }
         }
+    } else {
+        INFO_RELEASE("Skip finishing result partitions for canceled task " << taskNameWithSubtask_);
     }
 
     LOG_INFO_IMP("[TaskState][End]  Task Name : [" << taskNameWithSubtask_ << "]");
@@ -388,14 +395,17 @@ void OmniTask::DoRunInvoke(long streamTaskAddress)
     //  finalization of a successful execution
     // ----------------------------------------------------------------
 
-    // finish the produced partitions. if this fails, we consider the execution failed.
-    for (auto& partitionWriter : consumableNotifyingPartitionWriters) {
-        if (partitionWriter) {
-            LOG_INFO_IMP(partitionWriter->toString() << "Finished");
-            partitionWriter->finish();
-        } else {
-            LOG_INFO_IMP("Error: partitionWriter is null");
+    if (!cancelRequested_.load()) {
+        for (auto& partitionWriter : consumableNotifyingPartitionWriters) {
+            if (partitionWriter) {
+                LOG_INFO_IMP(partitionWriter->toString() << "Finished");
+                partitionWriter->finish();
+            } else {
+                LOG_INFO_IMP("Error: partitionWriter is null");
+            }
         }
+    } else {
+        INFO_RELEASE("Skip finishing result partitions for canceled task " << taskNameWithSubtask_);
     }
     INFO_RELEASE("OmniTask::DoRunInvoke ending, task name: " << taskNameWithSubtask_);
 }
