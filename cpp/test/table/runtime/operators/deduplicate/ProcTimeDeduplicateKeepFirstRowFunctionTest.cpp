@@ -21,6 +21,17 @@ using namespace omnistream;
 using json = nlohmann::json;
 
 namespace {
+class CountingBatchOutput : public BatchOutputTest {
+public:
+    int collects = 0;
+
+    void collect(void* record) override
+    {
+        ++collects;
+        BatchOutputTest::collect(record);
+    }
+};
+
 const std::string kKeyedProcessUniqueName = "org.apache.flink.streaming.api.operators.KeyedProcessOperator";
 
 const std::string kProcTimeKeepFirstDesc = R"DELIM({
@@ -150,7 +161,7 @@ KeyedProcessOperator<RowData*, omnistream::VectorBatch*, omnistream::VectorBatch
 
 TEST(ProcTimeDeduplicateKeepFirstRowTest, KeepFirstRowInBatchAndAcrossBatches)
 {
-    auto* output = new BatchOutputTest();
+    auto* output = new CountingBatchOutput();
     auto* keyedOp = CreateOperator(output);
 
     // Same key appears twice in one batch: only the first arrival is kept.
@@ -170,12 +181,22 @@ TEST(ProcTimeDeduplicateKeepFirstRowTest, KeepFirstRowInBatchAndAcrossBatches)
     expect2->setRowKind(0, RowKind::INSERT);
     EXPECT_TRUE(BatchesEqual(expect2, actual2));
 
-    // All keys already seen: empty output, no retract.
+    // All keys already seen: no output batch at all.
+    const int collectsBefore = output->collects;
     auto* input3 = MakeBatch({0, 1}, {1000, 2000}, {7, 6}, {"x", "y"}, {300, 301});
     keyedOp->processBatch(new StreamRecord(input3));
-    auto* actual3 = reinterpret_cast<omnistream::VectorBatch*>(output->getVectorBatch());
-    EXPECT_EQ(0, actual3->GetRowCount());
+    EXPECT_EQ(collectsBefore, output->collects);
 
     delete expect1;
     delete expect2;
+}
+
+TEST(ProcTimeDeduplicateKeepFirstRowTest, RejectsNonInsertInput)
+{
+    auto* output = new CountingBatchOutput();
+    auto* keyedOp = CreateOperator(output);
+    auto* input = MakeBatch({0}, {1000}, {1}, {"tombstone"}, {100});
+    input->setRowKind(0, RowKind::DELETE);
+    EXPECT_THROW(keyedOp->processBatch(new StreamRecord(input)), std::logic_error);
+    EXPECT_EQ(0, output->collects);
 }

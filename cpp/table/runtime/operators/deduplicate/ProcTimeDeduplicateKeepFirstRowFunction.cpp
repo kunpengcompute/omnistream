@@ -78,6 +78,13 @@ void ProcTimeDeduplicateKeepFirstRowFunction::processBatch(
 {
     auto inputVBGuard = std::unique_ptr<omnistream::VectorBatch>(inputVB);
     const int rowCount = inputVBGuard->GetRowCount();
+    for (int i = 0; i < rowCount; ++i) {
+        // Flink checkInsertOnly: proc-time keep-first only accepts INSERT.
+        if (inputVBGuard->getRowKind(i) != RowKind::INSERT) {
+            THROW_LOGIC_EXCEPTION(
+                "ProcTimeDeduplicateKeepFirstRowFunction requires INSERT-only input");
+        }
+    }
 
     // Content equality, not pointer identity: KeySelector allocates a new BinaryRowData per row.
     std::unordered_map<BinaryRowData*, int32_t> firstRowByKey;
@@ -112,22 +119,20 @@ void ProcTimeDeduplicateKeepFirstRowFunction::processBatch(
     }
 
     if (!firstSeenKeys.empty()) {
-        UpdateSeenState(firstSeenKeys, ctx);
+        UpdateSeenState(std::move(firstSeenKeys), ctx);
     }
 
-    omnistream::VectorBatch* outputVB = nullptr;
+    // buildNewVectorBatchByRowIds 对 0 行会去拷贝空的 rowKind 数组。没有新 key 时不下发，
+    // 避免下游按列下标读到 0 列批。
     if (outputRowIds.empty()) {
-        outputVB = new omnistream::VectorBatch(0);
-    } else {
-        outputVB = VectorBatchUtil::buildNewVectorBatchByRowIds(inputVBGuard.get(), outputRowIds);
-        for (int i = 0; i < outputVB->GetRowCount(); ++i) {
-            outputVB->setRowKind(i, RowKind::INSERT);
-        }
+        return;
     }
+    omnistream::VectorBatch* outputVB =
+        VectorBatchUtil::buildNewVectorBatchByRowIds(inputVBGuard.get(), outputRowIds);
     out.collect(outputVB);
 }
 
-void ProcTimeDeduplicateKeepFirstRowFunction::UpdateSeenState(const std::vector<RowData*>& firstSeenKeys, Context& ctx)
+void ProcTimeDeduplicateKeepFirstRowFunction::UpdateSeenState(std::vector<RowData*> firstSeenKeys, Context& ctx)
 {
     if (stateType_ == omnistream::StateType::HEAP) {
         for (auto* key : firstSeenKeys) {

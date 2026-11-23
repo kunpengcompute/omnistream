@@ -28,8 +28,10 @@
  *
  * Aligns with Flink's ProcTimeDeduplicateKeepFirstRowFunction:
  * - state is a seen-flag (true once a key has been emitted);
+ * - input must be INSERT-only; a non-INSERT row fails the batch;
  * - the first INSERT of a key is forwarded as INSERT;
- * - later rows of the same key are dropped (no retract / update messages).
+ * - later rows of the same key are dropped (no retract / update messages);
+ * - a batch with no new keys produces no output batch.
  */
 class ProcTimeDeduplicateKeepFirstRowFunction
     : public KeyedProcessFunction<RowData*, omnistream::VectorBatch*, omnistream::VectorBatch*> {
@@ -58,7 +60,8 @@ public:
 private:
     static std::vector<int32_t> getKeyedTypes(
         const std::vector<int32_t>& keyedIndex, const std::vector<std::string>& inputTypes);
-    void UpdateSeenState(const std::vector<RowData*>& firstSeenKeys, Context& ctx);
+    // Takes ownership of every pointer and deletes them before returning.
+    void UpdateSeenState(std::vector<RowData*> firstSeenKeys, Context& ctx);
 
     std::vector<std::string> inputTypes_;
     std::vector<int32_t> keyIndex_;
