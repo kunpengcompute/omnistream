@@ -247,6 +247,32 @@ omnistream::VectorBatch* MakeInputBatch(
     return batch;
 }
 
+// Builds a VectorBatch with columns f0 TIME_WITHOUT_TIME_ZONE, f1 TIMESTAMP_WITH_LOCAL_TIME_ZONE,
+// f2 rowtime(TIMESTAMP). These int64-backed time types exercise the pass-through copy path.
+omnistream::VectorBatch* MakeTypedTimeInputBatch(const std::vector<int64_t>& times,
+    const std::vector<int64_t>& localTimestamps, const std::vector<int64_t>& rowTimes)
+{
+    const int32_t n = static_cast<int32_t>(times.size());
+    auto* batch = new omnistream::VectorBatch(n);
+    auto* timeVec = new omniruntime::vec::Vector<int64_t>(
+        n, omniruntime::type::OMNI_TIME_WITHOUT_TIME_ZONE);
+    auto* ltzVec = new omniruntime::vec::Vector<int64_t>(
+        n, omniruntime::type::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE);
+    auto* rowTimeVec = new omniruntime::vec::Vector<int64_t>(n, omniruntime::type::OMNI_TIMESTAMP);
+    for (int32_t i = 0; i < n; ++i) {
+        timeVec->SetValue(i, times[i]);
+        ltzVec->SetValue(i, localTimestamps[i]);
+        rowTimeVec->SetValue(i, rowTimes[i]);
+    }
+    batch->Append(timeVec);
+    batch->Append(ltzVec);
+    batch->Append(rowTimeVec);
+    for (int32_t i = 0; i < n; ++i) {
+        batch->setRowKind(i, RowKind::INSERT);
+    }
+    return batch;
+}
+
 std::string GetVarchar(omnistream::VectorBatch* batch, int32_t col, int32_t row)
 {
     auto* vec = reinterpret_cast<omniruntime::vec::Vector<
@@ -609,6 +635,48 @@ TEST_P(WindowTableFunctionOperatorTest, RowKindIsPreservedInOutput)
             << "RowKind not preserved at index " << i;
         EXPECT_EQ(allRows[i].rowTime, static_cast<int64_t>(20L + i));
     }
+
+    for (auto* out : handle.output->outputs) {
+        delete out;
+    }
+    DestroyTestOperator(handle);
+}
+
+TEST_P(WindowTableFunctionOperatorTest, TimeAndLtzColumnsPreservedWhenCopied)
+{
+    std::vector<std::string> inputTypes = {"TIME_WITHOUT_TIME_ZONE(0)",
+        "TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)",
+        "TIMESTAMP_WITHOUT_TIME_ZONE(3)"};
+    std::vector<std::string> outputTypes = inputTypes;
+    outputTypes.push_back("TIMESTAMP_WITHOUT_TIME_ZONE(3)");
+    outputTypes.push_back("TIMESTAMP_WITHOUT_TIME_ZONE(3)");
+    outputTypes.push_back("TIMESTAMP_WITHOUT_TIME_ZONE(3)");
+    auto desc = MakeDescription("TUMBLE(size=[3 s], offset=[0 s])",
+        {{"windowSize", 3000}, {"windowOffset", 0}},
+        "event",
+        2,
+        shiftTimeZone(),
+        inputTypes,
+        outputTypes);
+    TestOperator handle = CreateTestOperator(desc);
+    ASSERT_NE(handle.op, nullptr);
+
+    handle.op->processBatch(
+        new StreamRecord(MakeTypedTimeInputBatch({3600000L}, {123456789L}, {20L})));
+
+    ASSERT_EQ(handle.output->outputs.size(), 1u);
+    auto* outBatch = handle.output->outputs.front();
+    ASSERT_EQ(outBatch->GetRowCount(), 1);
+    ASSERT_EQ(outBatch->GetVectorCount(), 6);
+    EXPECT_EQ(outBatch->Get(0)->GetTypeId(), omniruntime::type::OMNI_TIME_WITHOUT_TIME_ZONE);
+    EXPECT_EQ(outBatch->Get(1)->GetTypeId(), omniruntime::type::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE);
+    EXPECT_EQ(outBatch->Get(2)->GetTypeId(), omniruntime::type::OMNI_TIMESTAMP);
+    EXPECT_EQ(outBatch->GetValueAt<int64_t>(0, 0), 3600000L);
+    EXPECT_EQ(outBatch->GetValueAt<int64_t>(1, 0), 123456789L);
+    EXPECT_EQ(outBatch->GetValueAt<int64_t>(2, 0), 20L);
+    EXPECT_EQ(outBatch->GetValueAt<int64_t>(3, 0), LocalMills(0L));
+    EXPECT_EQ(outBatch->GetValueAt<int64_t>(4, 0), LocalMills(3000L));
+    EXPECT_EQ(outBatch->GetValueAt<int64_t>(5, 0), 2999L);
 
     for (auto* out : handle.output->outputs) {
         delete out;
