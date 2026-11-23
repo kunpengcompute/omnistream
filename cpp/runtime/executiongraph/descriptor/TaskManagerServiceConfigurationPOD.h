@@ -52,7 +52,7 @@ public:
           localCommunicationOnly(other.localCommunicationOnly),
           networkbuffersPerChannel(other.networkbuffersPerChannel),
           partitionRequestMaxBackoff(other.partitionRequestMaxBackoff),
-          partitionRequestInitialBackoff(0),
+          partitionRequestInitialBackoff(other.partitionRequestInitialBackoff),
           floatingNetworkbuffersPerGate(other.floatingNetworkbuffersPerGate),
           segmentSize(other.segmentSize),
           numberofSegmentsGlobal(other.numberofSegmentsGlobal),
@@ -134,7 +134,7 @@ public:
 
     int getPartitionRequestInitialBackoff() const
     {
-        return partitionRequestMaxBackoff;
+        return partitionRequestInitialBackoff;
     }
 
     int getPartitionRequestMaxBackoff() const
