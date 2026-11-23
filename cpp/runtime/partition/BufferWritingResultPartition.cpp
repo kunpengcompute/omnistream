@@ -196,7 +196,9 @@ void BufferWritingResultPartition::emitRecord(void* record, int targetSubpartiti
         if (element->getTag() == StreamElementTag::TAG_REC_WITH_TIMESTAMP ||
             element->getTag() == StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP) {
             auto* sqlRecord = static_cast<StreamRecord*>(element);
-            auto* batch = static_cast<VectorBatch*>(sqlRecord->getValue());
+            auto* batch = sqlRecord->getValueType() == RecordValueType::VECTOR_BATCH
+                              ? static_cast<VectorBatch*>(sqlRecord->getValue())
+                              : nullptr;
             if (batch != nullptr && batch->getSizeInBytes() > MAX_SQL_BATCH_BYTES) {
                 const int rowCount = batch->GetRowCount();
                 if (rowCount <= 1) {
