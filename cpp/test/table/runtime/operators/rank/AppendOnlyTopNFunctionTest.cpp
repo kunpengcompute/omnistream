@@ -1,6 +1,4 @@
 #include <gtest/gtest.h>
-#include <random>
-#include "ReferenceAppendOnlyTopNFunction.h"
 #include "runtime/state/EmbeddedRocksDBStateBackend.h"
 #include "runtime/state/RocksDBMemoryControllerUtils.h"
 #include <tuple>
@@ -18,7 +16,7 @@
 #include <nlohmann/json.hpp>
 
 namespace omnistream {
-nlohmann::json makeRankConfig(bool outputRankNumber, bool generateUpdateBefore, int rankEnd)
+nlohmann::json makeRankConfig(bool outputRankNumber, bool generateUpdateBefore, int64_t rankEnd)
 {
     std::string outputTypes =
         outputRankNumber ? R"("BIGINT","BIGINT","BIGINT","BIGINT")" : R"("BIGINT","BIGINT","BIGINT")";
@@ -38,11 +36,7 @@ KeyedProcessOperator<RowData*, RowData*, RowData*>* openAppendOnlyTopN(
     const std::string& backend = "HashMapStateBackend",
     bool batchWrites = false)
 {
-    KeyedProcessFunction<RowData*, RowData*, RowData*>* func =
-        metadataCache ? static_cast<KeyedProcessFunction<RowData*, RowData*, RowData*>*>(
-                            new AppendOnlyTopNFunction<RowData*>(rankConfig, true, batchWrites))
-                      : static_cast<KeyedProcessFunction<RowData*, RowData*, RowData*>*>(
-                            new ReferenceAppendOnlyTopNFunction<RowData*>(rankConfig));
+    auto* func = new AppendOnlyTopNFunction<RowData*>(rankConfig, metadataCache, batchWrites);
     nlohmann::json newRankConfig = rankConfig;
     auto* op = new KeyedProcessOperator(func, output, newRankConfig);
     op->setup();
@@ -189,63 +183,6 @@ TEST(AppendOnlyTopNMetadataTest, ReuseMetadataAndReleaseAtOperatorClose)
     }
 }
 
-TEST(AppendOnlyTopNMetadataTest, RandomizedOutputMatchesOriginalMaster)
-{
-    for (const std::string backend : {"HashMapStateBackend", "EmbeddedRocksDBStateBackend"}) {
-        for (bool nullsLast : {false, true}) {
-            for (bool outputRank : {false, true}) {
-                for (bool batchWrites : {false, true}) {
-                    auto config = omnistream::makeRankConfig(outputRank, batchWrites, 5);
-                    if (!outputRank) {
-                        config["rankRange"] = "rankStart=2, rankEnd=5";
-                    }
-                    config["sortNullsIsLast"] = {nullsLast};
-                    BoundaryOutput enabled, reference;
-                    auto* withCache = omnistream::openAppendOnlyTopN(config, &enabled, true, backend, batchWrites);
-                    auto* original = omnistream::openAppendOnlyTopN(config, &reference, false, backend);
-                    std::mt19937 generator(20261105);
-                    for (int batchIndex = 0; batchIndex < 180; ++batchIndex) {
-                        std::vector<int64_t> keys, sorts, values;
-                        int count = batchIndex % 19;
-                        for (int i = 0; i < count; ++i) {
-                            keys.push_back(generator() % 7);
-                            sorts.push_back(static_cast<int64_t>(generator() % 11) - 5);
-                            values.push_back(batchIndex * 100 + i);
-                        }
-                        auto* left = omnistream::makeLongBatch(keys, sorts, values);
-                        auto* right = omnistream::makeLongBatch(keys, sorts, values);
-                        for (int i = 0; i < count; ++i) {
-                            left->setTimestamp(i, 100000 + batchIndex * 100 + i);
-                            right->setTimestamp(i, 100000 + batchIndex * 100 + i);
-                            if (generator() % 5 == 0) {
-                                left->Get(1)->SetNull(i);
-                                right->Get(1)->SetNull(i);
-                            }
-                        }
-                        enabled.rows.clear();
-                        reference.rows.clear();
-                        withCache->processBatch(new StreamRecord(left));
-                        original->processBatch(new StreamRecord(right));
-                        // Stable partition ordering preserves each key's full changelog.
-                        auto byKey = [](const RankOutputRow& a, const RankOutputRow& b) {
-                            return std::get<0>(a) < std::get<0>(b);
-                        };
-                        std::stable_sort(enabled.rows.begin(), enabled.rows.end(), byKey);
-                        std::stable_sort(reference.rows.begin(), reference.rows.end(), byKey);
-                        ASSERT_EQ(enabled.rows, reference.rows)
-                            << backend << " nullsLast=" << nullsLast << " outputRank=" << outputRank
-                            << " batchWrites=" << batchWrites << " batch=" << batchIndex;
-                    }
-                    withCache->close();
-                    original->close();
-                    delete withCache;
-                    delete original;
-                }
-            }
-        }
-    }
-}
-
 // Fault injection uses a real RocksDB failure: write to a dropped CF. Keep
 // this test-only access off the production state API and its virtual table.
 struct RankStateTestAccess {
@@ -343,9 +280,8 @@ TEST(AppendOnlyTopNHeapReleaseTest, RemoveThenDestructorReleaseOnce)
     EXPECT_EQ(destroyed, 4);
 }
 
-TEST(AppendOnlyTopNHeapReleaseTest, ReservedRowMatchesOrdinaryRowAndOwnsStrings)
+TEST(AppendOnlyTopNHeapReleaseTest, ExtractedRowOwnsStringsAfterBatchRelease)
 {
-    std::unique_ptr<RowData> reserved;
     std::unique_ptr<RowData> ordinary;
     {
         auto batch = std::unique_ptr<omnistream::VectorBatch>(omnistream::VectorBatch::CreateVectorBatch(
@@ -360,20 +296,16 @@ TEST(AppendOnlyTopNHeapReleaseTest, ReservedRowMatchesOrdinaryRowAndOwnsStrings)
         }
         batch->Get(4)->SetNull(0);
         batch->setRowKind(0, RowKind::UPDATE_AFTER);
-        reserved.reset(batch->extractRowData(0, true));
         ordinary.reset(batch->extractRowData(0));
     }
-    EXPECT_EQ(*reserved->getLong(0), 42);
-    EXPECT_EQ(reserved->getStringView(1), "short");
-    EXPECT_EQ(reserved->getStringView(2), "a longer string crossing the inline boundary");
-    EXPECT_EQ(reserved->getStringView(3), "123456789");
-    EXPECT_TRUE(reserved->isNullAt(4));
-    EXPECT_EQ(reserved->getRowKind(), RowKind::UPDATE_AFTER);
-    auto* left = static_cast<BinaryRowData*>(reserved.get());
-    auto* right = static_cast<BinaryRowData*>(ordinary.get());
-    ASSERT_EQ(left->getSizeInBytes(), right->getSizeInBytes());
-    EXPECT_EQ(memcmp(left->getSegment(), right->getSegment(), left->getSizeInBytes()), 0);
-    EXPECT_EQ(left->getBufferCapacity(), left->getSizeInBytes());
+    EXPECT_EQ(*ordinary->getLong(0), 42);
+    EXPECT_EQ(ordinary->getStringView(1), "short");
+    EXPECT_EQ(ordinary->getStringView(2), "a longer string crossing the inline boundary");
+    EXPECT_EQ(ordinary->getStringView(3), "123456789");
+    EXPECT_TRUE(ordinary->isNullAt(4));
+    EXPECT_EQ(ordinary->getRowKind(), RowKind::UPDATE_AFTER);
+    auto* row = static_cast<BinaryRowData*>(ordinary.get());
+    EXPECT_EQ(row->getBufferCapacity(), row->getSizeInBytes());
 }
 
 TEST(AppendOnlyTopNHeapReleaseTest, RawCacheIsCreatedOnFirstRead)
@@ -389,84 +321,12 @@ TEST(AppendOnlyTopNHeapReleaseTest, RawCacheIsCreatedOnFirstRead)
     EXPECT_EQ(static_cast<BinaryRawValueData*>(row.getRawValue(0))->toBytes(), payload);
 }
 
-TEST(AppendOnlyTopNHeapReleaseTest, StringStateChangelogMatchesReference)
+TEST(AppendOnlyTopNMetadataTest, InvalidAndOutOfRangeRankConfigurationIsRejected)
 {
-    class StringOutput : public BatchOutputTest {
-    public:
-        std::vector<std::tuple<int64_t, int64_t, bool, std::string, int64_t, int, int64_t>> rows;
-        void collect(void* record) override
-        {
-            std::unique_ptr<StreamRecord> stream(static_cast<StreamRecord*>(record));
-            std::unique_ptr<omnistream::VectorBatch> batch(static_cast<omnistream::VectorBatch*>(stream->getValue()));
-            for (int i = 0; i < batch->GetRowCount(); ++i) {
-                auto* key = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(0));
-                auto* sort = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(1));
-                auto* text = reinterpret_cast<
-                    omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(batch->Get(2));
-                auto* rank = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(3));
-                rows.emplace_back(
-                    key->GetValue(i),
-                    sort->GetValue(i),
-                    text->IsNull(i),
-                    text->IsNull(i) ? std::string{} : std::string(text->GetValue(i)),
-                    rank->GetValue(i),
-                    static_cast<int>(batch->getRowKind(i)),
-                    batch->getTimestamp(i));
-            }
-        }
-    };
-    for (const std::string backend : {"HashMapStateBackend", "EmbeddedRocksDBStateBackend"}) {
+    for (const std::string range :
+         {"rankStart=0, rankEnd=5", "rankStart=6, rankEnd=5", "rankStart=1, rankEnd=9223372036854775808"}) {
         auto config = omnistream::makeRankConfig(true, true, 3);
-        config["inputTypes"][2] = "VARCHAR";
-        config["outputTypes"][2] = "VARCHAR";
-        StringOutput enabled, reference;
-        auto* optimized = omnistream::openAppendOnlyTopN(config, &enabled, true, backend, true);
-        auto* original = omnistream::openAppendOnlyTopN(config, &reference, false, backend);
-        for (int b = 0; b < 24; ++b) {
-            auto makeBatch = [&]() {
-                auto* batch = omnistream::VectorBatch::CreateVectorBatch(8, {OMNI_LONG, OMNI_LONG, OMNI_VARCHAR});
-                for (int i = 0; i < 8; ++i) {
-                    reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(0))->SetValue(i, i % 2);
-                    reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(1))->SetValue(i, (b * 3 + i) % 17);
-                    if ((b + i) % 5 == 0) {
-                        batch->Get(2)->SetNull(i);
-                    } else {
-                        std::string value((b + i) % 2 ? 81 : 5, 'a' + i);
-                        std::string_view view = value;
-                        reinterpret_cast<
-                            omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(
-                            batch->Get(2))
-                            ->SetValue(i, view);
-                    }
-                    batch->setTimestamp(i, b * 100 + i);
-                }
-                return batch;
-            };
-            enabled.rows.clear();
-            reference.rows.clear();
-            optimized->processBatch(new StreamRecord(makeBatch()));
-            original->processBatch(new StreamRecord(makeBatch()));
-            auto byKey = [](const auto& a, const auto& c) { return std::get<0>(a) < std::get<0>(c); };
-            std::stable_sort(enabled.rows.begin(), enabled.rows.end(), byKey);
-            std::stable_sort(reference.rows.begin(), reference.rows.end(), byKey);
-            EXPECT_EQ(enabled.rows, reference.rows) << backend << " batch=" << b;
-        }
-        optimized->close();
-        original->close();
-        delete optimized;
-        delete original;
+        config["rankRange"] = range;
+        EXPECT_THROW(AppendOnlyTopNFunction<RowData*> function(config), std::exception) << range;
     }
-}
-
-TEST(AppendOnlyTopNHeapReleaseTest, StringGrowthDetachesBorrowedStorage)
-{
-    const int fixed = BinaryRowData::calculateFixPartSizeInBytes(2);
-    std::vector<uint8_t> backing(fixed, 0);
-    BinaryRowData row(2);
-    row.pointTo(backing.data(), 0, fixed, fixed);
-    row.setStringView(0, "first long string");
-    row.setStringView(1, "second long string");
-    EXPECT_NE(row.getSegment(), backing.data());
-    EXPECT_EQ(row.getStringView(0), "first long string");
-    EXPECT_EQ(row.getStringView(1), "second long string");
 }

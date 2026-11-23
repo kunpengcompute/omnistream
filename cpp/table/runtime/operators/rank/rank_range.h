@@ -12,6 +12,8 @@
 #ifndef FLINK_TNEL_RANK_RANGE_H
 #define FLINK_TNEL_RANK_RANGE_H
 
+#include <cstdint>
+
 // Base class for RankRange.
 class RankRange {
 public:
@@ -23,15 +25,15 @@ public:
 /// ---------------------------------------------------------------------
 class ConstantRankRange : public RankRange {
 public:
-    ConstantRankRange(long rankStart, long rankEnd);
+    ConstantRankRange(int64_t rankStart, int64_t rankEnd);
 
     // Getters for the constant rank range values.
-    long getRankStart() const;
-    long getRankEnd() const;
+    int64_t getRankStart() const;
+    int64_t getRankEnd() const;
 
 private:
-    long rankStart_;
-    long rankEnd_;
+    int64_t rankStart_;
+    int64_t rankEnd_;
 };
 
 /// ---------------------------------------------------------------------

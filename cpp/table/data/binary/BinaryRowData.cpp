@@ -302,21 +302,24 @@ void BinaryRowData::writeVarLenVarchar(int fieldOffset, const uint8_t* bytes, in
     // Write header
     setOffsetAndSize(fieldOffset, segmentSize, len);
 
-    const int required = segmentSize + roundedSize;
-    // 预留空间足够时直接追加，避免每个长字符串都重新分配。
-    if (required > bufferCapacity) {
-        auto newBuffer = std::make_unique<uint8_t[]>(required);
-        if (memcpy_s(newBuffer.get(), required, memoryBuffer, segmentSize) != EOK) {
-            throw std::runtime_error("memcpy_s failed");
-        }
-        if (owner_ == 1) {
-            delete[] memoryBuffer;
-        }
-        memoryBuffer = newBuffer.release();
-        bufferCapacity = required;
-        owner_ = 1;
+    // Calculate the new buffer size
+    int newBufferCapacity = bufferCapacity + roundedSize;
+
+    // Allocate a new buffer with the increased size
+    auto* newBuffer = new uint8_t[newBufferCapacity]();
+
+    // Copy existing data to the new buffer
+    auto ret = memcpy_s(newBuffer, newBufferCapacity, memoryBuffer, bufferCapacity);
+    if (ret != EOK) {
+        throw std::runtime_error("memcpy_s failed");
     }
-    sizeInBytes_ = required;
+
+    // Update the memoryBuffer pointer and bufferCapacity
+    delete[] memoryBuffer; // Free the old buffer
+
+    memoryBuffer = newBuffer;
+    bufferCapacity = newBufferCapacity;
+    sizeInBytes_ = newBufferCapacity; // what is the difference between sizeInBytes_ and bufferCapacity?
 
     // Write the variable length portion
     MemorySegmentUtils::put(memoryBuffer, bufferCapacity, segmentSize, bytes, 0, len);

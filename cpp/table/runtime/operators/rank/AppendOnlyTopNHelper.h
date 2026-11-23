@@ -31,7 +31,7 @@ struct AppendOnlyTopNHelper {
 
     struct GroupMeta {
         int64_t sortValue = 0;
-        int32_t rowCount = 0;
+        int64_t rowCount = 0;
         bool sortNull = false;
     };
 
@@ -44,10 +44,10 @@ struct AppendOnlyTopNHelper {
         int64_t sortValue = 0;
         bool fromBatch = false;
         int32_t batchRow = -1;
-        int groupIndex = -1;
-        int indexInGroup = -1;
+        int64_t groupIndex = -1;
+        int64_t indexInGroup = -1;
         RowData* stateRow = nullptr;
-        int oldRank = 0;
+        int64_t oldRank = 0;
         int64_t timestamp = 0;
     };
 
@@ -69,7 +69,7 @@ struct AppendOnlyTopNHelper {
         int64_t sortValue = 0;
         RowData* sortKey = nullptr;
         RowList* rows = nullptr;
-        int rowCount = 0;
+        int64_t rowCount = 0;
         bool kept = false;
         bool changed = false;
         bool fetchedForOutput = false;
@@ -87,25 +87,11 @@ struct AppendOnlyTopNHelper {
         std::vector<GroupMeta> pending;
     };
 
-    struct BatchCleanup {
-        std::unordered_map<int64_t, RowData*> retainedKeys;
-        std::vector<RowData*> rows;
-        ~BatchCleanup()
-        {
-            for (auto* row : rows) {
-                delete row;
-            }
-            for (const auto& entry : retainedKeys) {
-                delete entry.second;
-            }
-        }
-    };
-
     struct PartitionKeyHash {
         size_t operator()(const K& key) const
         {
             if constexpr (std::is_same<K, RowData*>::value) {
-                return key == nullptr ? 0 : std::hash<int64_t>{}(*key->getLong(0));
+                return key == nullptr ? 0 : static_cast<size_t>(key->hashCodeFast());
             } else {
                 return std::hash<K>{}(key);
             }
@@ -116,6 +102,22 @@ struct AppendOnlyTopNHelper {
         bool operator()(const K& left, const K& right) const
         {
             return samePartition(left, right);
+        }
+    };
+
+    struct BatchCleanup {
+        std::unordered_map<K, K, PartitionKeyHash, PartitionKeyEq> retainedKeys;
+        std::vector<RowData*> rows;
+        ~BatchCleanup()
+        {
+            for (auto* row : rows) {
+                delete row;
+            }
+            if constexpr (std::is_same<K, RowData*>::value) {
+                for (const auto& entry : retainedKeys) {
+                    delete entry.second;
+                }
+            }
         }
     };
 
@@ -139,16 +141,18 @@ struct AppendOnlyTopNHelper {
     }
 
     // 保留 batch 内唯一的 RowData 分区 key 并释放重复副本。
-    static K retainKey(K key, std::unordered_map<int64_t, RowData*>& retainedKeys)
+    static K retainKey(K key, std::unordered_map<K, K, PartitionKeyHash, PartitionKeyEq>& retainedKeys)
     {
         if constexpr (std::is_same<K, RowData*>::value) {
-            int64_t id = *key->getLong(0);
-            auto found = retainedKeys.find(id);
+            if (key == nullptr) {
+                throw std::invalid_argument("TopN partition key row is missing");
+            }
+            auto found = retainedKeys.find(key);
             if (found != retainedKeys.end()) {
                 delete key;
                 return found->second;
             }
-            retainedKeys.emplace(id, key);
+            retainedKeys.emplace(key, key);
         }
         return key;
     }
@@ -213,11 +217,21 @@ struct AppendOnlyTopNHelper {
     // 根据已加载的排序组展开 TopN 候选行引用。
     static void fillFromGroups(PartitionWork& active, int64_t rankEnd)
     {
-        int rank = 1;
-        active.rows.reserve(static_cast<size_t>(rankEnd));
-        for (int g = 0; g < static_cast<int>(active.loadedGroups.size()); ++g) {
+        size_t count = 0;
+        for (const auto& group : active.loadedGroups) {
+            if (group.rowCount < 0 || static_cast<uint64_t>(group.rowCount) > active.rows.max_size() - count) {
+                throw std::length_error("TopN state exceeds supported row count");
+            }
+            count += static_cast<size_t>(group.rowCount);
+        }
+        const size_t limit = static_cast<size_t>(rankEnd);
+        // Reserve room for new rows without multiplying an unbounded rankEnd.
+        const size_t reserveCount = count >= limit || count > limit - count ? limit : count * 2;
+        active.rows.reserve(reserveCount);
+        int64_t rank = 1;
+        for (int64_t g = 0; g < static_cast<int64_t>(active.loadedGroups.size()); ++g) {
             const auto& group = active.loadedGroups[g];
-            for (int i = 0; i < group.rowCount; ++i) {
+            for (int64_t i = 0; i < group.rowCount; ++i) {
                 active.rows.push_back({group.sortNull, group.sortValue, false, -1, g, i, nullptr, rank++, 0});
             }
         }
@@ -315,7 +329,7 @@ private:
     static bool samePartition(const K& left, const K& right)
     {
         if constexpr (std::is_same<K, RowData*>::value) {
-            return left != nullptr && right != nullptr && *left->getLong(0) == *right->getLong(0);
+            return left == right || (left != nullptr && right != nullptr && *left == *right);
         }
         return left == right;
     }
@@ -381,7 +395,7 @@ public:
         std::vector<AppendOnlyTopNOutputRow>& outputs,
         omnistream::VectorBatch* batch,
         const WorkItem& item,
-        int rank,
+        int64_t rank,
         RowKind kind)
     {
         AppendOnlyTopNOutputRow row;

@@ -104,8 +104,6 @@ public:
     }
 
     RowData* extractRowData(int rowIndex);
-    // Heap 常驻行可一次预留字符串空间，减少分配和复制。
-    RowData* extractRowData(int rowIndex, bool reserveVariableWidth);
 
     [[nodiscard]] std::vector<XXH128_hash_t> getXXH128s();
     bool isEmpty(int64_t currentTimestamp) const
