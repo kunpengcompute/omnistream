@@ -20,6 +20,18 @@
 using json = nlohmann::json;
 using omniruntime::type::DataTypeId;
 
+namespace {
+// VectorHelper::CopyPositionsVector only dispatches OMNI_TIMESTAMP among the int64-backed time
+// types. TIME/TIMESTAMP variants carry the same int64 payload and must be copied positionally too,
+// otherwise the default branch throws "no such data type" when such a column is passed through.
+bool IsInt64BackedTimeType(DataTypeId typeId)
+{
+    return typeId == omniruntime::type::OMNI_TIME_WITHOUT_TIME_ZONE ||
+           typeId == omniruntime::type::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE ||
+           typeId == omniruntime::type::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE;
+}
+} // namespace
+
 WindowTableFunctionOperator::WindowTableFunctionOperator(const nlohmann::json& config, Output* output)
     : AbstractStreamOperator(output),
       description_(config)
@@ -165,8 +177,17 @@ omnistream::VectorBatch* WindowTableFunctionOperator::buildOutputBatch(
     auto* outputBatch = new omnistream::VectorBatch(totalRows);
     const int32_t inputColCount = inputBatch->GetVectorCount();
     for (int32_t col = 0; col < inputColCount; ++col) {
-        auto* outVec =
-            omniruntime::vec::VectorHelper::CopyPositionsVector(inputBatch->Get(col), positions.data(), 0, totalRows);
+        auto* inputVec = inputBatch->Get(col);
+        omniruntime::vec::BaseVector* outVec = nullptr;
+        if (inputVec->GetEncoding() == omniruntime::vec::OMNI_FLAT && IsInt64BackedTimeType(inputVec->GetTypeId())) {
+            // Vector::CopyPositions preserves the source type id, so TIME/TIMESTAMP variants keep
+            // their logical type instead of degrading to OMNI_LONG.
+            outVec = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(inputVec)
+                         ->CopyPositions(positions.data(), 0, totalRows);
+        } else {
+            outVec = omniruntime::vec::VectorHelper::CopyPositionsVector(
+                inputVec, positions.data(), 0, totalRows);
+        }
         outputBatch->Append(outVec);
     }
 
