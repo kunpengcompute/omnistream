@@ -1016,8 +1016,8 @@ TEST(StreamCalcBatchTest, BinaryRowProjectionPreservesNullsTypesAndTimestamp)
     auto record = std::unique_ptr<StreamRecord>(output.getStreamRecord());
     ASSERT_EQ(result->GetRowCount(), 1);
     EXPECT_TRUE(result->Get(0)->IsNull(0));
-    EXPECT_EQ(static_cast<vec::Vector<int32_t>*>(result->Get(1))->GetValue(0), 7);
-    EXPECT_TRUE(static_cast<vec::Vector<bool>*>(result->Get(2))->GetValue(0));
+    EXPECT_EQ(static_cast<omniruntime::vec::Vector<int32_t>*>(result->Get(1))->GetValue(0), 7);
+    EXPECT_TRUE(static_cast<omniruntime::vec::Vector<bool>*>(result->Get(2))->GetValue(0));
     EXPECT_TRUE(result->Get(3)->IsNull(0));
     EXPECT_EQ(result->getRowKind(0), RowKind::UPDATE_AFTER);
     EXPECT_EQ(result->getTimestamp(0), 1234L);
