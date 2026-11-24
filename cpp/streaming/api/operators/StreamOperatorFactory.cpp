@@ -52,6 +52,7 @@
 #include "table/runtime/operators/overaggregate/ProcTimeUnboundedPrecedingFunction.h"
 #include "table/runtime/operators/window/processor/AbstractWindowAggProcessor.h"
 #include "table/runtime/operators/rank/FastTop1Function.h"
+#include "table/runtime/operators/rank/UpdatableTopNFunction.h"
 #include "table/runtime/operators/join/window/InnerJoinOperator.h"
 #include "table/runtime/operators/join/window/LeftOuterJoinOperator.h"
 #include "table/runtime/operators/join/window/RightOuterJoinOperator.h"
@@ -618,6 +619,23 @@ StreamOperator* StreamOperatorFactory::CreateKeyedProcessOp(
         op->setFlinkSavepointUnsupported(
             "OverAggregate (ProcTimeUnboundedPreceding) native state is not convertible by any "
             "existing savepoint adaptor");
+        op->setDescription(opDescriptionJSON);
+        LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
+        return static_cast<OneInputStreamOperator*>(op);
+    } else if (
+        opDescriptionJSON.contains("processFunction") &&
+        opDescriptionJSON["processFunction"] == "UpdatableTopNFunction") {
+        // Streaming Rank under the UpdateFastStrategy (append-only input, unique key
+        // contains the partition key, sort monotonicity holds).
+        LOG("UpdatableTopNFunction description: " << opConfig.getDescription());
+        AbstractTopNFunction<RowData*>* func = new UpdatableTopNFunction<RowData*>(opDescriptionJSON);
+        auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
+        op->setup(std::move(task));
+        // SP-INTEROP: no savepoint adaptor converts the "data-state-with-update" MapState
+        // yet; the native wire format matches Flink's Tuple2<RowData,Integer> serializer
+        // but the savepoint conversion path is unaudited.
+        op->setFlinkSavepointUnsupported(
+            "UpdatableTopN state is not convertible by any existing savepoint adaptor");
         op->setDescription(opDescriptionJSON);
         LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);

@@ -23,6 +23,7 @@
 #include <memory>
 #include <iostream>
 #include <regex>
+#include <sstream>
 
 #include "rank_range.h"
 #include "streaming/api/operators/TimestampedCollector.h"
@@ -145,6 +146,12 @@ protected:
     void collectDelete(RowData* inputRow);
     void collectUpdateBefore(RowData* inputRow, long rank, int64_t timestamp);
     void collectUpdateAfter(RowData* inputRow, long rank, int64_t timestamp);
+    // Without-row-number update variants: mirrors Flink's collectUpdateBefore(out, row)
+    // (emitted only when generateUpdateBefore) and collectUpdateAfter(out, row)
+    // (unconditional). rank stays 0 (the rank column is only appended when
+    // outputRankNumber, which never holds on this path).
+    void collectUpdateBefore(RowData* inputRow, int64_t timestamp);
+    void collectUpdateAfter(RowData* inputRow, int64_t timestamp);
     void collectOutputBatch(TimestampedCollector out, omnistream::VectorBatch* outputBatch);
     bool isInRankRange(long rank) const;
     inline bool isInRankEnd(long rank) const
@@ -217,6 +224,70 @@ protected:
     bool hasOutputRows() const
     {
         return !collectedRows.empty();
+    }
+    std::string debugRow(RowData* row, const std::vector<omniruntime::type::DataTypeId>& typeIds) const
+    {
+        if (row == nullptr) {
+            return "null";
+        }
+        std::ostringstream out;
+        out << ::to_string(row->getRowKind()) << "(";
+        for (size_t i = 0; i < typeIds.size(); ++i) {
+            if (i > 0) {
+                out << ",";
+            }
+            const int pos = static_cast<int>(i);
+            if (row->isNullAt(pos)) {
+                out << "null";
+                continue;
+            }
+            switch (typeIds[i]) {
+                case omniruntime::type::DataTypeId::OMNI_INT:
+                case omniruntime::type::DataTypeId::OMNI_DATE32:
+                    out << *row->getInt(pos);
+                    break;
+                case omniruntime::type::DataTypeId::OMNI_LONG:
+                case omniruntime::type::DataTypeId::OMNI_DATE64:
+                case omniruntime::type::DataTypeId::OMNI_DECIMAL64:
+                case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
+                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_TIME_ZONE:
+                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
+                    out << *row->getLong(pos);
+                    break;
+                case omniruntime::type::DataTypeId::OMNI_DOUBLE:
+                    out << *row->getDouble(pos);
+                    break;
+                case omniruntime::type::DataTypeId::OMNI_BOOLEAN:
+                    out << (*row->getBool(pos) ? "true" : "false");
+                    break;
+                case omniruntime::type::DataTypeId::OMNI_CHAR:
+                case omniruntime::type::DataTypeId::OMNI_VARCHAR:
+                    out << std::string(row->getStringView(pos));
+                    break;
+                case omniruntime::type::DataTypeId::OMNI_DECIMAL128: {
+                    const omniruntime::type::Decimal128* value = row->getDecimal128(pos);
+                    out << "<decimal128:" << value->LowBits() << "," << value->HighBits() << ">";
+                    delete value;
+                    break;
+                }
+                default:
+                    out << "<type:" << static_cast<int>(typeIds[i]) << ">";
+                    break;
+            }
+        }
+        out << ")";
+        return out.str();
+    }
+    std::string debugRow(RowData* row, const std::vector<int>& typeIds) const
+    {
+        std::vector<omniruntime::type::DataTypeId> converted;
+        converted.reserve(typeIds.size());
+        for (int typeId : typeIds) {
+            converted.push_back(static_cast<omniruntime::type::DataTypeId>(typeId));
+        }
+        return debugRow(row, converted);
     }
     bool checkSortKeyInBufferRange(RowData* sortKey, TopNBuffer buffer)
     {
@@ -404,6 +475,30 @@ void AbstractTopNFunction<KeyType>::collectUpdateAfter(RowData* inputRow, long r
         collectedTimestamps.push_back(timestamp);
         collectedRowKinds.push_back(RowKind::UPDATE_AFTER);
     }
+}
+
+// Without-row-number update-before: mirrors Flink's collectUpdateBefore(out, inputRow)
+// which emits only when generateUpdateBefore. rank stays 0.
+template <typename KeyType>
+void AbstractTopNFunction<KeyType>::collectUpdateBefore(RowData* inputRow, int64_t timestamp)
+{
+    if (generateUpdateBefore) {
+        collectedRows.push_back(inputRow);
+        collectedRanks.push_back(0);
+        collectedTimestamps.push_back(timestamp);
+        collectedRowKinds.push_back(RowKind::UPDATE_BEFORE);
+    }
+}
+
+// Without-row-number update-after: mirrors Flink's collectUpdateAfter(out, inputRow)
+// which emits unconditionally. rank stays 0.
+template <typename KeyType>
+void AbstractTopNFunction<KeyType>::collectUpdateAfter(RowData* inputRow, int64_t timestamp)
+{
+    collectedRows.push_back(inputRow);
+    collectedRanks.push_back(0);
+    collectedTimestamps.push_back(timestamp);
+    collectedRowKinds.push_back(RowKind::UPDATE_AFTER);
 }
 
 template <typename KeyType>
