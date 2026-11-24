@@ -296,6 +296,16 @@ void ProcTimeUnboundedPrecedingFunction::processRowForKey(RowData* input, RowDat
     collectedRows.push_back(input);
     collectedAggValues.push_back(reuseAggValue->copy());
     collectedRowKinds.push_back(RowKind::INSERT);
+
+    // RocksDB: the accumulator row is a caller-owned copy - value() hands out
+    // a fresh deserialised row and update() only serialises it back (the
+    // contract GroupAggFunction follows: it deletes its pending accumulator
+    // copies after updateByBatch). Heap: value() returns the backend-owned
+    // stored row and update() stores the same pointer back in place, so the
+    // row must stay alive here.
+    if (backend == 2) {
+        delete accumulators;
+    }
 }
 
 void ProcTimeUnboundedPrecedingFunction::materialiseAggValue()

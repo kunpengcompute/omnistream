@@ -386,6 +386,21 @@ void ProcTimeRowsBoundedPrecedingFunction::processRowForKey(RowData* input, RowD
                 }
                 delete bucket;
             }
+            if (backend == 2) {
+                // RocksdbMapStateTable::entries() serves a per-key cache and
+                // remove()/put() only touch RocksDB itself - the table's own
+                // WARNING states fresh data requires clearEntriesCache(). A
+                // stale hit would make the rescan below still see the
+                // just-removed bucket (and miss buckets buffered since the
+                // last scan), corrupting newSmallestTs. Java iterates the
+                // backend directly (keys().iterator()), so clearing keeps us
+                // byte-identical with it.
+                auto* rocksInputState = dynamic_cast<
+                    RocksdbMapState<RowData*, VoidNamespace, RowData*, std::vector<RowData*>*>*>(inputState);
+                if (rocksInputState != nullptr) {
+                    rocksInputState->clearEntriesCache();
+                }
+            }
             // Min-finding seed, exactly Java's newSmallestTs = Long.MAX_VALUE.
             // Real bucket keys are epoch millis, always smaller than this.
             int64_t newSmallestTs = INT64_MAX;
@@ -468,6 +483,16 @@ void ProcTimeRowsBoundedPrecedingFunction::processRowForKey(RowData* input, RowD
     collectedRows.push_back(input);
     collectedAggValues.push_back(reuseAggValue->copy());
     collectedRowKinds.push_back(RowKind::INSERT);
+
+    // RocksDB: the accumulator row is a caller-owned copy - value() hands out
+    // a fresh deserialised row and update() only serialises it back (the
+    // contract GroupAggFunction follows: it deletes its pending accumulator
+    // copies after updateByBatch). Heap: value() returns the backend-owned
+    // stored row and update() stores the same pointer back in place, so the
+    // row must stay alive here.
+    if (backend == 2) {
+        delete accumulators;
+    }
 }
 
 void ProcTimeRowsBoundedPrecedingFunction::materialiseAggValue()

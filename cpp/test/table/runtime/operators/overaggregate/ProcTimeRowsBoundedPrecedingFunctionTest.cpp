@@ -500,6 +500,11 @@ TEST(ProcTimeRowsBoundedPrecedingFunctionTest, RetractInputStillAccumulates)
 
 // Same data as WindowSizeTwoFillsThenSlides on the RocksDB backend: the
 // MapState bucket iteration / per-row write-backs must behave identically.
+// The 5th row is the drain-scan cache regression: feed 4 empties bucket ts2,
+// and RocksdbMapStateTable::entries() serves a stale cached snapshot (remove()
+// only touches RocksDB) unless the operator clears it. With a stale scan,
+// smallestTs keeps pointing at the removed ts2, feed 5's eviction misses and
+// outputs 120 instead of 90.
 TEST(ProcTimeRowsBoundedPrecedingFunctionTest, DualBackendConsistencyRocksDB)
 {
     RowsBoundedOverTestHarness h(
@@ -508,10 +513,11 @@ TEST(ProcTimeRowsBoundedPrecedingFunctionTest, DualBackendConsistencyRocksDB)
     h.feed({7, 20});
     h.feed({7, 30});
     h.feed({7, 40});
+    h.feed({7, 50});
 
-    ASSERT_EQ(h.batchCount(), 4);
-    const int64_t expected[] = {10, 30, 50, 70};
-    for (int i = 0; i < 4; ++i) {
+    ASSERT_EQ(h.batchCount(), 5);
+    const int64_t expected[] = {10, 30, 50, 70, 90};
+    for (int i = 0; i < 5; ++i) {
         EXPECT_EQ(h.longAt(i, 2, 0), expected[i]);
     }
 }
