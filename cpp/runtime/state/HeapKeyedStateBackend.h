@@ -47,6 +47,7 @@
 #include "runtime/state/InternalKeyContextImpl.h"
 #include "runtime/state/VoidNamespaceSerializer.h"
 #include "table/typeutils/VectorBatchSerializer.h"
+#include "table/typeutils/RowDataIntPairSerializer.h"
 #include "core/typeutils/LongSerializer.h"
 #include "core/typeutils/MapSerializer.h"
 #include "core/typeutils/ListSerializer.h"
@@ -159,6 +160,11 @@ public:
                 } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_LIST_BK) {
                     auto stateTable = reinterpret_cast<
                         CopyOnWriteStateTable<K, VoidNamespace, emhash7::HashMap<RowData*, std::vector<RowData*>*>*>*>(
+                        stateTablePtr);
+                    delete stateTable;
+                } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_INT_PAIR_BK) {
+                    auto stateTable = reinterpret_cast<
+                        CopyOnWriteStateTable<K, VoidNamespace, emhash7::HashMap<RowData*, RowDataIntPair*>*>*>(
                         stateTablePtr);
                     delete stateTable;
                 } else if (keyId == BackendDataType::XXHASH128_BK && valueId == BackendDataType::TUPLE_INT32_INT64) {
@@ -526,6 +532,10 @@ uintptr_t HeapKeyedStateBackend<K>::createOrUpdateInternalState(
                 namespaceSerializer, stateDesc);
         } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_LIST_BK) {
             return (uintptr_t)createOrUpdateInternalMapState<VoidNamespace, RowData*, std::vector<RowData*>*>(
+                namespaceSerializer, stateDesc);
+        } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_INT_PAIR_BK) {
+            // UpdatableTopNFunction's "data-state-with-update": MapState<rowKey, RowDataIntPair>.
+            return (uintptr_t)createOrUpdateInternalMapState<VoidNamespace, RowData*, RowDataIntPair*>(
                 namespaceSerializer, stateDesc);
         } else if (keyId == BackendDataType::XXHASH128_BK && valueId == BackendDataType::TUPLE_INT32_INT64) {
             return (uintptr_t)
