@@ -524,6 +524,14 @@ uintptr_t RocksdbKeyedStateBackend<K>::GetMapState(TypeSerializer* namespaceSeri
 
     // Currently only StreamingJoinOperator with BinaryRow uses MapState. It's namespace is VoidNamespace
     if (namespaceSerializer->getBackendId() != BackendDataType::VOID_NAMESPACE_BK) {
+        // Window rank: MapState<RowData sortKey, List<RowData>> partitioned by the
+        // window-end namespace (LongSerializer), mirroring Flink's
+        // WindowMapState<Long, List<RowData>> in WindowRankProcessor.
+        if (namespaceSerializer->getBackendId() == BackendDataType::BIGINT_BK &&
+            keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_LIST_BK) {
+            return (uintptr_t)createOrUpdateInternalMapState<int64_t, RowData*, std::vector<RowData*>*>(
+                namespaceSerializer, stateDesc);
+        }
         NOT_IMPL_EXCEPTION;
     }
     // <N, UK, UV>

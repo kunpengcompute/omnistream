@@ -525,16 +525,31 @@ private:
                 table->put(*static_cast<K*>(rawKey), keyGroupId, *static_cast<VoidNamespace*>(rawNs), map);
             } else if (mapKeyId == BackendDataType::ROW_BK && mapValId == BackendDataType::ROW_LIST_BK) {
                 auto* map = deserializeEmhashMap<RowData*, std::vector<RowData*>*>(mapKeySer, mapValSer, valInput);
-                auto* table = reinterpret_cast<
-                    CopyOnWriteStateTable<K, VoidNamespace, emhash7::HashMap<RowData*, std::vector<RowData*>*>*>*>(
-                    stateTablePtr);
-                table->put(*static_cast<K*>(rawKey), keyGroupId, *static_cast<VoidNamespace*>(rawNs), map);
+                if (nsBackendId == BackendDataType::BIGINT_BK) {
+                    // Window rank "window_rank": MapState<RowData, List<RowData>>
+                    // partitioned by the window-end namespace.
+                    auto* table = reinterpret_cast<CopyOnWriteStateTable<
+                        K, int64_t, emhash7::HashMap<RowData*, std::vector<RowData*>*>*>*>(stateTablePtr);
+                    table->put(*static_cast<K*>(rawKey), keyGroupId, *static_cast<int64_t*>(rawNs), map);
+                } else {
+                    auto* table = reinterpret_cast<
+                        CopyOnWriteStateTable<K, VoidNamespace, emhash7::HashMap<RowData*, std::vector<RowData*>*>*>*>(
+                        stateTablePtr);
+                    table->put(*static_cast<K*>(rawKey), keyGroupId, *static_cast<VoidNamespace*>(rawNs), map);
+                }
             } else {
                 ERROR_RELEASE(
                     "HeapRestoreOperation: unsupported MAP restore type key=" << mapKeyId << " value=" << mapValId);
             }
             delete static_cast<K*>(rawKey);
-            delete static_cast<VoidNamespace*>(rawNs);
+            if (nsBackendId == BackendDataType::BIGINT_BK && mapKeyId == BackendDataType::ROW_BK &&
+                mapValId == BackendDataType::ROW_LIST_BK) {
+                // The window-rank map state is the only BIGINT-namespace map; its
+                // namespace was deserialized as int64_t, not VoidNamespace.
+                delete static_cast<int64_t*>(rawNs);
+            } else {
+                delete static_cast<VoidNamespace*>(rawNs);
+            }
         } else {
             ERROR_RELEASE("HeapRestoreOperation: unsupported state type for restore, skipping");
             delete static_cast<K*>(rawKey);
