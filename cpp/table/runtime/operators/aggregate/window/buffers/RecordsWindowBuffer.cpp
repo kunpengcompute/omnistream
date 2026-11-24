@@ -11,6 +11,7 @@
  */
 
 #include "RecordsWindowBuffer.h"
+#include <algorithm>
 #include "runtime/generated/function/CountDistinctFunction.h"
 #include "runtime/dataview/PerKeyStateDataViewStore.h"
 #include "../../../../generated/NamespaceAggsBasicFunctionFactory.h"
@@ -435,6 +436,12 @@ void RecordsWindowBuffer::winAggProcess(const WindowKey& currentWindowKey, std::
 void RecordsWindowBuffer::globalWinAggProcess(
     const WindowKey& currentWindowKey, std::vector<std::unique_ptr<RowData>>& sliceResultArr)
 {
+    // Retractions alone must not create empty aggregate state or register a timer.
+    if (std::none_of(sliceResultArr.begin(), sliceResultArr.end(), [](const auto& row) {
+            return RowDataUtil::isAccumulateMsg(row->getRowKind());
+        })) {
+        return;
+    }
     RowData* accumulators = localAggregator->createAccumulators();
     localAggregator->setAccumulators(currentWindowKey.getWindow(), accumulators);
 

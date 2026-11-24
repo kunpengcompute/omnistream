@@ -70,11 +70,8 @@ public:
             delete streamRecord;
             return result;
         } else if (streamRecord->getValueType() == RecordValueType::JOINED_ROW_DATA) {
-            // do we need to handle joined Rowdata?
-            auto row = static_cast<JoinedRowData*>(streamRecord->getValue());
-            auto channel = selectRowChannel(row);
-            result[channel] = streamRecord;
-            return result;
+            // Network serializers require a self-contained binary row or a vector batch.
+            throw std::invalid_argument("JOINED_ROW_DATA must be materialized before network partitioning");
         } else if (streamRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {
             auto row = static_cast<BinaryRowData*>(streamRecord->getValue());
             auto channel = selectRowChannel(row);

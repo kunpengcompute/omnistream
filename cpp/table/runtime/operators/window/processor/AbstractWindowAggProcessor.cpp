@@ -22,8 +22,6 @@ AbstractWindowAggProcessor::AbstractWindowAggProcessor(const nlohmann::json desc
     sliceAssigner = AssignerAtt::createSliceAssigner(description);
     isEventTime = sliceAssigner->isEventTime();
     windowInterval = sliceAssigner->getSliceEndInterval();
-    WindowedSliceAssigner* windowedSliceAssigner = dynamic_cast<WindowedSliceAssigner*>(sliceAssigner);
-    SliceAssigner* assigner = windowedSliceAssigner->GetInnerAssigner();
     // jojo check description
     outputRowData = description.contains("OutputRecordType") &&
                     (description["OutputRecordType"].get<std::string>() == "BINARY_ROW_DATA");

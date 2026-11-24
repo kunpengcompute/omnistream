@@ -62,6 +62,8 @@ void StreamCalcBatch::processBatch(StreamRecord* input)
     int32_t newRowCnt = 0;
     if (input->getValueType() == RecordValueType::BINARY_ROW_DATA) {
         LOG("input is binary_rowData");
+        auto recordGuard = std::unique_ptr<StreamRecord>(input);
+        auto row = std::unique_ptr<BinaryRowData>(static_cast<BinaryRowData*>(input->getValue()));
         if (isSimpleProjection_ && (!hasFilter)) {
             if (outputTypeIds_.empty()) {
                 LOG("outputTypeIds_ is empty");
@@ -71,23 +73,33 @@ void StreamCalcBatch::processBatch(StreamRecord* input)
                 }
             }
 
-            auto row = static_cast<BinaryRowData*>(input->getValue());
-            auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(1, outputTypeIds_);
+            auto outputBatch =
+                std::unique_ptr<omnistream::VectorBatch>(omnistream::VectorBatch::CreateVectorBatch(1, outputTypeIds_));
             for (size_t i = 0; i < outputIndexes_.size(); i++) {
+                if (outputIndexes_[i] < 0 || outputIndexes_[i] >= row->getArity()) {
+                    throw std::invalid_argument("RowData projection field index out of range");
+                }
+                if (row->isNullAt(outputIndexes_[i])) {
+                    outputBatch->Get(i)->SetNull(0);
+                    continue;
+                }
                 switch (outputTypeIds_[i]) {
                     case DataTypeId::OMNI_LONG:
                     case DataTypeId::OMNI_TIMESTAMP:
                     case DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
-                    case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
-                    case DataTypeId::OMNI_DOUBLE: {
+                    case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE: {
                         auto vector = static_cast<omniruntime::vec::Vector<int64_t>*>(outputBatch->Get(i));
                         vector->SetValue(0, *row->getLong(outputIndexes_[i]));
                         break;
                     }
-                    case DataTypeId::OMNI_INT:
-                    case DataTypeId::OMNI_BOOLEAN: {
-                        auto vector = static_cast<omniruntime::vec::Vector<int64_t>*>(outputBatch->Get(i));
+                    case DataTypeId::OMNI_INT: {
+                        auto vector = static_cast<omniruntime::vec::Vector<int32_t>*>(outputBatch->Get(i));
                         vector->SetValue(0, *row->getInt(outputIndexes_[i]));
+                        break;
+                    }
+                    case DataTypeId::OMNI_BOOLEAN: {
+                        auto vector = static_cast<omniruntime::vec::Vector<bool>*>(outputBatch->Get(i));
+                        vector->SetValue(0, *row->getBool(outputIndexes_[i]));
                         break;
                     }
                     case DataTypeId::OMNI_VARCHAR: {
@@ -104,9 +116,9 @@ void StreamCalcBatch::processBatch(StreamRecord* input)
                 }
             }
             outputBatch->setRowKind(0, row->getRowKind());
-            delete input;
-            delete static_cast<BinaryRowData*>(row);
-            timestampedCollector_->collect(outputBatch);
+            outputBatch->setTimestamp(0, input->getTimestamp());
+            timestampedCollector_->setTimestamp(input);
+            timestampedCollector_->collect(outputBatch.release());
             return;
         } else {
             NOT_IMPL_EXCEPTION;

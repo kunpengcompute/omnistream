@@ -10,6 +10,7 @@
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  */
 
+#include "core/utils/exception/ScopeGuard.h"
 #include "runtime/watermark/WatermarkStatus.h"
 #include "RemoteInputChannel.h"
 #include "table/utils/VectorBatchDeserializationUtils.h"
@@ -122,10 +123,17 @@ void RemoteInputChannel::notifyRemoteDataAvailableForVectorBatch(
         }
     } else {
         uint8_t* buffer = reinterpret_cast<uint8_t*>(bufferAddress);
-        int32_t vertorBatchNum = 0;
-        memcpy_s(&vertorBatchNum, sizeof(int32_t), buffer, sizeof(int32_t));
-        // do data deserialization
-        std::shared_ptr<ObjectSegment> objectSegment = this->DoDataDeserializationResult(buffer);
+        // Parse against the actual received payload, not the backing allocation capacity.
+        std::shared_ptr<ObjectSegment> objectSegment;
+        try {
+            objectSegment = this->DoDataDeserializationResult(buffer, bufferLength);
+        } catch (...) {
+            if (originalNetworkBufferRecycle != nullptr) {
+                originalNetworkBufferRecycle->recycle(bufferAddress);
+            }
+            throw;
+        }
+        int32_t vertorBatchNum = static_cast<int32_t>(objectSegment->getSize());
         objectSegment->setData(reinterpret_cast<uint8_t*>(bufferAddress), static_cast<size_t>(bufferLength));
         auto vectorBatchBuffer = new VectorBatchBuffer(objectSegment, originalNetworkBufferRecycle);
         auto readOnlyVectorBatchBuffer = new ReadOnlySlicedVectorBatchBuffer(vectorBatchBuffer, 0, vertorBatchNum);
@@ -211,15 +219,42 @@ bool RemoteInputChannel::IsNeedPersistence()
     return startSize_ == 0 || outsize < startSize_;
 }
 
-std::shared_ptr<ObjectSegment> RemoteInputChannel::DoDataDeserializationResult(uint8_t*& buffer)
+std::shared_ptr<ObjectSegment> RemoteInputChannel::DoDataDeserializationResult(uint8_t*& buffer, int bufferLength)
 {
     LOG("----DoDataDeserializationResult start 1:: " << buffer);
+    if (buffer == nullptr || bufferLength < static_cast<int>(sizeof(int32_t))) {
+        throw std::invalid_argument("Truncated SQL network buffer");
+    }
+    auto* end = buffer + bufferLength;
     int32_t elementNum;
-    memcpy_s(&elementNum, sizeof(int32_t), buffer, sizeof(int32_t));
+    if (memcpy_s(&elementNum, sizeof(elementNum), buffer, sizeof(elementNum)) != EOK || elementNum < 0 ||
+        elementNum > bufferLength - static_cast<int>(sizeof(elementNum))) {
+        throw std::invalid_argument("Invalid SQL network element count");
+    }
     buffer += sizeof(int32_t);
     std::shared_ptr<ObjectSegment> objectSegment = std::make_shared<ObjectSegment>(elementNum);
+    bool parsed = false;
+    ScopeGuard cleanup([&]() {
+        if (parsed) {
+            return;
+        }
+        for (int32_t index = 0; index < elementNum; ++index) {
+            auto* element = objectSegment->getObject(index);
+            if (auto* record = dynamic_cast<StreamRecord*>(element)) {
+                if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+                    delete static_cast<BinaryRowData*>(record->getValue());
+                } else {
+                    delete static_cast<VectorBatch*>(record->getValue());
+                }
+            }
+            delete element;
+        }
+    });
     LOG("----DoDataDeserializationResult start 2:: " << buffer);
     for (int32_t i = 0; i < elementNum; i++) {
+        if (buffer >= end) {
+            throw std::invalid_argument("Truncated SQL network element tag");
+        }
         int8_t dataType;
         memcpy_s(&dataType, sizeof(int8_t), buffer, sizeof(int8_t));
         buffer += sizeof(int8_t);
@@ -227,6 +262,9 @@ std::shared_ptr<ObjectSegment> RemoteInputChannel::DoDataDeserializationResult(u
         StreamElementTag tagType = static_cast<StreamElementTag>(dataType);
         switch (tagType) {
             case StreamElementTag::TAG_STREAM_STATUS: {
+                if (end - buffer < static_cast<ptrdiff_t>(sizeof(int32_t))) {
+                    throw std::invalid_argument("Truncated SQL stream status");
+                }
                 int32_t status;
                 memcpy_s(&status, sizeof(status), buffer, sizeof(status));
                 buffer += sizeof(status);
@@ -234,6 +272,9 @@ std::shared_ptr<ObjectSegment> RemoteInputChannel::DoDataDeserializationResult(u
                 break;
             }
             case StreamElementTag::TAG_WATERMARK: {
+                if (end - buffer < static_cast<ptrdiff_t>(sizeof(long))) {
+                    throw std::invalid_argument("Truncated SQL watermark");
+                }
                 long timestamp = VectorBatchDeserializationUtils::derializeWatermark(buffer);
                 LOG("RemoteInputChannel::DoDataDeserializationResult:: deserialize watermark :: " << timestamp);
                 Watermark* watermark = new Watermark(timestamp);
@@ -249,20 +290,20 @@ std::shared_ptr<ObjectSegment> RemoteInputChannel::DoDataDeserializationResult(u
             }
             case StreamElementTag::BINARY_ROW_DATA: {
                 LOG("RemoteInputChannel::DoDataDeserializationResult:: deserialize BinaryRowData ");
-                BinaryRowData* row = BinaryRowDataSerializationUtils::deserializeBinaryRowData(buffer);
+                BinaryRowData* row = BinaryRowDataSerializationUtils::deserializeBinaryRowData(
+                    buffer, static_cast<size_t>(end - buffer));
                 StreamRecord* streamRecord = new StreamRecord(row);
                 streamRecord->setValueType(RecordValueType::BINARY_ROW_DATA);
                 objectSegment->putObject(i, streamRecord);
                 break;
             }
             default: {
-                LOG("Warning: cannt deserialize the records");
-                break;
+                throw std::invalid_argument("Unsupported SQL network element tag");
             }
         }
     }
+    parsed = true;
     return objectSegment;
-    // no need to implement
 }
 
 void RemoteInputChannel::notifyRemoteDataAvailableForNetworkBuffer(

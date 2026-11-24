@@ -214,6 +214,10 @@ private:
                 copiedRecord->setTag(tag);
                 return copiedRecord;
             }
+            if (auto* record = dynamic_cast<StreamRecord*>(source);
+                record != nullptr && record->getValueType() == RecordValueType::JOINED_ROW_DATA) {
+                throw std::invalid_argument("CloneObject requires JOINED_ROW_DATA to be materialized");
+            }
             auto* vectorBatch = static_cast<VectorBatch*>(source->getValue());
             if (vectorBatch == nullptr) {
                 INFO_RELEASE("Warn: CloneObject getValue is not VectorBatch.");

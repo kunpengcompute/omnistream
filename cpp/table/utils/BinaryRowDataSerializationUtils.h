@@ -1,7 +1,20 @@
+/*
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+ * You can use this software according to the terms and conditions of the Mulan PSL v2.
+ * You may obtain a copy of the Mulan PSL v2 at:
+ *          http://license.coscl.org.cn/MulanPSL2
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+ * See the Mulan PSL v2 for more details.
+ */
+
 #pragma once
 
 #include <cstring>
 #include <cstdint>
+#include <memory>
+#include <stdexcept>
 
 #include "OmniOperatorJIT/core/src/type/data_type.h"
 #include "streaming/runtime/streamrecord/StreamElement.h"
@@ -21,10 +34,17 @@ public:
     static void serializeBinaryRowData(BinaryRowData* rowData, int32_t bufferCapacity, uint8_t*& buffer)
     {
         LOG("serializeBinaryRowData");
+        if (rowData == nullptr || buffer == nullptr) {
+            throw std::invalid_argument("Null BinaryRowData serialization input");
+        }
         errno_t ret;
-        uint8_t* original = buffer;
         int32_t arity = rowData->getArity();
         int32_t length = rowData->getSizeInBytes(); // equivalent to source.readInt() in your reference
+
+        if (length < 0 || bufferCapacity < 0 ||
+            static_cast<int64_t>(length) + sizeof(int8_t) + 2 * sizeof(int32_t) > bufferCapacity) {
+            throw std::invalid_argument("Insufficient buffer for BinaryRowData");
+        }
 
         // 1. Write DataType Tag (1 byte)
         int8_t dataType = static_cast<int>(StreamElementTag::BINARY_ROW_DATA);
@@ -54,29 +74,34 @@ public:
         return;
     }
 
-    static BinaryRowData* deserializeBinaryRowData(uint8_t*& buffer)
+    static BinaryRowData* deserializeBinaryRowData(uint8_t*& buffer, size_t remaining)
     {
-        LOG("----deserializeBinaryRowData start:: " << reinterpret_cast<long>(buffer));
-
+        constexpr size_t headerSize = 2 * sizeof(int32_t);
+        constexpr int32_t maxRowBytes = 64 * 1024 * 1024;
+        if (buffer == nullptr || remaining < headerSize) {
+            throw std::invalid_argument("Truncated BinaryRowData header");
+        }
+        auto* cursor = buffer;
         int32_t arity = 0;
-        memcpy_s(&arity, sizeof(arity), buffer, sizeof(arity));
-
-        buffer += sizeof(arity);
         int32_t length = 0;
-        memcpy_s(&length, sizeof(length), buffer, sizeof(length));
-
-        buffer += sizeof(length);
-        BinaryRowData* row = new BinaryRowData(arity, length);
-        uint8_t* destBytes = row->getSegment() + row->getOffset();
-        memcpy_s(destBytes, length, buffer, length);
-
+        if (memcpy_s(&arity, sizeof(arity), cursor, sizeof(arity)) != EOK ||
+            memcpy_s(&length, sizeof(length), cursor + sizeof(arity), sizeof(length)) != EOK) {
+            throw std::runtime_error("Cannot read BinaryRowData header");
+        }
+        // Use wide arithmetic before invoking the int-based BinaryRowData size helpers.
+        int64_t fixedBytes = ((static_cast<int64_t>(arity) + 63 + BinaryRowData::HEADER_SIZE_IN_BITS) / 64) * 8 +
+                             static_cast<int64_t>(arity) * 8;
+        if (arity < 0 || length < fixedBytes || length > maxRowBytes ||
+            static_cast<size_t>(length) > remaining - headerSize) {
+            throw std::invalid_argument("Invalid BinaryRowData arity or payload length");
+        }
+        auto row = std::make_unique<BinaryRowData>(arity, length);
+        if (memcpy_s(row->getSegment() + row->getOffset(), length, cursor + headerSize, length) != EOK) {
+            throw std::runtime_error("Cannot copy BinaryRowData payload");
+        }
         row->setSizeInBytes(length);
-
-        buffer += length;
-
-        LOG("----deserializeBinaryRowData END:: " << reinterpret_cast<long>(buffer));
-
-        return row;
+        buffer = cursor + headerSize + length;
+        return row.release();
     }
 };
 } // namespace omnistream

@@ -131,3 +131,16 @@ TEST(KeySelectorTest, DeserializeToVB)
     EXPECT_TRUE(vb.GetValueAt<int32_t>(2, 0) == key2);
     EXPECT_TRUE(vb.GetValueAt<int64_t>(3, 0) == key3);
 }
+
+TEST(KeySelectorTest, BinaryRowStringRefMatchesVectorBatchEncoding)
+{
+    const std::vector<omniruntime::type::DataTypeId> types = {OMNI_LONG, OMNI_VARCHAR, OMNI_INT};
+    auto batch = std::unique_ptr<omnistream::VectorBatch>(omnistream::VectorBatch::CreateVectorBatch(1, types));
+    static_cast<vec::Vector<int64_t>*>(batch->Get(0))->SetValue(0, 42);
+    static_cast<vec::Vector<vec::LargeStringContainer<std::string_view>>*>(batch->Get(1))->SetValue(0, "key");
+    batch->Get(2)->SetNull(0);
+    auto row = std::unique_ptr<RowData>(batch->extractRowData(0));
+    KeySelector<StringRef> vectorSelector({OMNI_LONG, OMNI_VARCHAR, OMNI_INT}, {0, 1, 2});
+    KeySelector<StringRef> rowSelector({OMNI_LONG, OMNI_VARCHAR, OMNI_INT}, {0, 1, 2});
+    EXPECT_TRUE(vectorSelector.getKey(batch.get(), 0) == rowSelector.getKey(row.get()));
+}

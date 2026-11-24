@@ -46,7 +46,7 @@ public:
         int sequenceNumber,
         const std::shared_ptr<OriginalNetworkBufferRecycler>& originalNetworkBufferRecycle);
     std::optional<BufferAndAvailability> getNextBuffer() override;
-    std::shared_ptr<ObjectSegment> DoDataDeserializationResult(uint8_t*& buffer);
+    std::shared_ptr<ObjectSegment> DoDataDeserializationResult(uint8_t*& buffer, int bufferLength);
     void notifyRemoteDataAvailableForNetworkBuffer(
         long bufferAddress,
         int bufferLength,

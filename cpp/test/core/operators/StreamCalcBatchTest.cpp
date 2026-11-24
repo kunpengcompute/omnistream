@@ -991,3 +991,35 @@ TEST(StreamCalcBatchTest, DISABLED_RegexpExtractNullTest)
 
     EXPECT_TRUE(omniruntime::TestUtil::VecBatchMatch(outputRecord, vb_expected));
 }
+
+TEST(StreamCalcBatchTest, BinaryRowProjectionPreservesNullsTypesAndTimestamp)
+{
+    auto description = json::parse(R"({"inputTypes":["BIGINT","INT","BOOLEAN","VARCHAR"],
+        "outputTypes":["VARCHAR","INT","BOOLEAN","BIGINT"],"InputRecordType":"BINARY_ROW_DATA",
+        "indices":[{"exprType":"FIELD_REFERENCE","dataType":15,"colVal":3},
+        {"exprType":"FIELD_REFERENCE","dataType":1,"colVal":1},
+        {"exprType":"FIELD_REFERENCE","dataType":4,"colVal":2},
+        {"exprType":"FIELD_REFERENCE","dataType":2,"colVal":0}],"condition":null})");
+    BatchOutputTest output;
+    StreamCalcBatch op(description, &output);
+    op.open();
+    auto* row = BinaryRowData::createBinaryRowDataWithMem(4);
+    row->setNullAt(0);
+    row->setInt(1, 7);
+    row->setBool(2, true);
+    row->setNullAt(3);
+    row->setRowKind(RowKind::UPDATE_AFTER);
+    auto* input = new StreamRecord(row, 1234L);
+    input->setValueType(RecordValueType::BINARY_ROW_DATA);
+    op.processBatch(input);
+    auto result = std::unique_ptr<omnistream::VectorBatch>(output.getVectorBatch());
+    auto record = std::unique_ptr<StreamRecord>(output.getStreamRecord());
+    ASSERT_EQ(result->GetRowCount(), 1);
+    EXPECT_TRUE(result->Get(0)->IsNull(0));
+    EXPECT_EQ(static_cast<vec::Vector<int32_t>*>(result->Get(1))->GetValue(0), 7);
+    EXPECT_TRUE(static_cast<vec::Vector<bool>*>(result->Get(2))->GetValue(0));
+    EXPECT_TRUE(result->Get(3)->IsNull(0));
+    EXPECT_EQ(result->getRowKind(0), RowKind::UPDATE_AFTER);
+    EXPECT_EQ(result->getTimestamp(0), 1234L);
+    EXPECT_EQ(record->getTimestamp(), 1234L);
+}

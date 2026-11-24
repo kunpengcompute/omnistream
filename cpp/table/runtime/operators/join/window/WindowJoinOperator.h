@@ -284,10 +284,11 @@ private:
         WindowListState<KeyType, int64_t, RowData*>* recordState,
         bool isLeftSide);
     void processElement(
-        RowData* inputRow,
+        std::unique_ptr<RowData> inputRow,
         int64_t windowEndTime,
         KeySelector<KeyType>* keySelector,
-        WindowListState<KeyType, int64_t, RowData*>* recordState);
+        WindowListState<KeyType, int64_t, RowData*>* recordState,
+        const KeyType* inputKey = nullptr);
 
     ::FilterFunc generateJoinCondition();
     void getAllColRefs(nlohmann::json& config);
@@ -437,15 +438,14 @@ void WindowJoinOperator<KeyType>::processBatch1(StreamRecord* input)
     LOG("processBatch1");
     auto record = std::unique_ptr<StreamRecord>(input);
     if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
-        auto rowData = static_cast<BinaryRowData*>(record->getValue());
-        // The row is owned by the record and is released when the record goes away, so the state
-        // has to get its own copy.
-        auto copiedRowData = std::unique_ptr<RowData>(rowData->copy());
-        int64_t windowEndTime = *copiedRowData->getLong(leftWindowEndIndex);
-        processElement(copiedRowData.get(), windowEndTime, this->keySelectorLeft.get(), leftWindowState);
-        if (stateType_ == omnistream::StateType::HEAP) {
-            copiedRowData.release();
+        // StreamRecord owns only its wrapper. Transfer the row to heap state on acceptance.
+        auto rowData = std::unique_ptr<BinaryRowData>(static_cast<BinaryRowData*>(record->getValue()));
+        if (rowData == nullptr || leftWindowEndIndex < 0 || leftWindowEndIndex >= rowData->getArity() ||
+            rowData->isNullAt(leftWindowEndIndex)) {
+            throw std::invalid_argument("WindowJoin requires a non-null left window end field");
         }
+        int64_t windowEndTime = *rowData->getLong(leftWindowEndIndex);
+        processElement(std::move(rowData), windowEndTime, this->keySelectorLeft.get(), leftWindowState);
         return;
     }
     if (inputRecordType1 != "VECTOR_BATCH") {
@@ -461,15 +461,14 @@ void WindowJoinOperator<KeyType>::processBatch2(StreamRecord* input)
     LOG("processBatch2");
     auto record = std::unique_ptr<StreamRecord>(input);
     if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
-        auto rowData = static_cast<BinaryRowData*>(record->getValue());
-        // The row is owned by the record and is released when the record goes away, so the state
-        // has to get its own copy.
-        auto copiedRowData = std::unique_ptr<RowData>(rowData->copy());
-        int64_t windowEndTime = *copiedRowData->getLong(rightWindowEndIndex);
-        processElement(copiedRowData.get(), windowEndTime, this->keySelectorRight.get(), rightWindowState);
-        if (stateType_ == omnistream::StateType::HEAP) {
-            copiedRowData.release();
+        // StreamRecord owns only its wrapper. Transfer the row to heap state on acceptance.
+        auto rowData = std::unique_ptr<BinaryRowData>(static_cast<BinaryRowData*>(record->getValue()));
+        if (rowData == nullptr || rightWindowEndIndex < 0 || rightWindowEndIndex >= rowData->getArity() ||
+            rowData->isNullAt(rightWindowEndIndex)) {
+            throw std::invalid_argument("WindowJoin requires a non-null right window end field");
         }
+        int64_t windowEndTime = *rowData->getLong(rightWindowEndIndex);
+        processElement(std::move(rowData), windowEndTime, this->keySelectorRight.get(), rightWindowState);
         return;
     }
     if (inputRecordType2 != "VECTOR_BATCH") {
@@ -755,21 +754,25 @@ inline void WindowJoinOperator<KeyType>::buildSemiAnti(
 
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::processElement(
-    RowData* inputRow,
+    std::unique_ptr<RowData> inputRow,
     int64_t windowEndTime,
     KeySelector<KeyType>* keySelector,
-    WindowListState<KeyType, int64_t, RowData*>* recordState)
+    WindowListState<KeyType, int64_t, RowData*>* recordState,
+    const KeyType* inputKey)
 {
     LOG("process element");
     if (TimeWindowUtil::isWindowFired(windowEndTime, internalTimerService->currentWatermark(), shiftTimeZone)) {
         return;
     }
     // reuseWindowEndTimes_[i] = windowEndTime;
-    auto key = keySelector->getKey(inputRow);
+    auto key = inputKey == nullptr ? keySelector->getKey(inputRow.get()) : *inputKey;
 
     this->setCurrentKey(key);
 
-    recordState->add(windowEndTime, inputRow);
+    recordState->add(windowEndTime, inputRow.get());
+    if (stateType_ == omnistream::StateType::HEAP) {
+        inputRow.release();
+    }
 
     internalTimerService->registerEventTimeTimer(
         windowEndTime, TimeWindowUtil::toEpochMillsForTimer(windowEndTime - 1, shiftTimeZone));
@@ -792,9 +795,12 @@ void WindowJoinOperator<KeyType>::processBatch(
         auto inputRow = std::unique_ptr<RowData>(batchGuard->extractRowData(i));
         int64_t windowEndTime =
             reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batchGuard->Get(windowEndIndex))->GetValue(i);
-        processElement(inputRow.get(), windowEndTime, keySelector, recordState);
-        if (stateType_ == omnistream::StateType::HEAP) {
-            inputRow.release();
+        if constexpr (std::is_same_v<KeyType, StringRef>) {
+            // Preserve all existing VectorBatch key encodings on the original batch path.
+            auto key = keySelector->getKey(batchGuard.get(), i);
+            processElement(std::move(inputRow), windowEndTime, keySelector, recordState, &key);
+        } else {
+            processElement(std::move(inputRow), windowEndTime, keySelector, recordState);
         }
     }
 }

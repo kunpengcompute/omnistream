@@ -50,14 +50,14 @@ public:
                         BinaryRowDataSerializer::joinedRowToBinaryRow(reinterpret_cast<JoinedRowData*>(value));
                     auto copyStreamRecord = new StreamRecord(copyRow, timestamp);
                     copyStreamRecord->setTag(streamRecord->getTag());
-                    copyStreamRecord->setValueType(streamRecord->getValueType());
+                    copyStreamRecord->setValueType(RecordValueType::BINARY_ROW_DATA);
                     output->collect(copyStreamRecord);
                 } else if (streamRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {
                     LOG("collect binary row data");
                     auto copyRow = reinterpret_cast<BinaryRowData*>(value)->copy();
                     auto copyStreamRecord = new StreamRecord(copyRow, timestamp);
                     copyStreamRecord->setTag(streamRecord->getTag());
-                    copyStreamRecord->setValueType(streamRecord->getValueType());
+                    copyStreamRecord->setValueType(RecordValueType::BINARY_ROW_DATA);
                     output->collect(copyStreamRecord);
                 } else { // vectorbatch
                     LOG("collect vector batch");
