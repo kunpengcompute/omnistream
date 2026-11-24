@@ -137,8 +137,9 @@ TEST(KeySelectorTest, BinaryRowStringRefMatchesVectorBatchEncoding)
     const std::vector<omniruntime::type::DataTypeId> types = {OMNI_LONG, OMNI_VARCHAR, OMNI_INT};
     auto batch = std::unique_ptr<omnistream::VectorBatch>(omnistream::VectorBatch::CreateVectorBatch(1, types));
     static_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(0))->SetValue(0, 42);
+    std::string_view keyValue = "key";
     static_cast<omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>*>(batch->Get(1))
-        ->SetValue(0, "key");
+        ->SetValue(0, keyValue);
     batch->Get(2)->SetNull(0);
     auto row = std::unique_ptr<RowData>(batch->extractRowData(0));
     KeySelector<omniruntime::type::StringRef> vectorSelector({OMNI_LONG, OMNI_VARCHAR, OMNI_INT}, {0, 1, 2});

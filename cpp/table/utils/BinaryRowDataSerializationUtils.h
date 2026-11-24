@@ -20,7 +20,6 @@
 #include "streaming/runtime/streamrecord/StreamElement.h"
 #include "table/data/binary/BinaryRowData.h"
 using namespace omniruntime::type;
-using namespace omniruntime::vec::unsafe;
 namespace omnistream {
 using namespace std;
 class BinaryRowDataSerializationUtils {
