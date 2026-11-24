@@ -170,6 +170,11 @@ public:
                             stateTablePtr);
                         delete stateTable;
                     }
+                } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_INT_PAIR_BK) {
+                    auto stateTable = reinterpret_cast<
+                        CopyOnWriteStateTable<K, VoidNamespace, emhash7::HashMap<RowData*, RowDataIntPair*>*>*>(
+                        stateTablePtr);
+                    delete stateTable;
                 } else if (keyId == BackendDataType::XXHASH128_BK && valueId == BackendDataType::TUPLE_INT32_INT64) {
                     auto stateTable = reinterpret_cast<CopyOnWriteStateTable<
                         K,
