@@ -12,6 +12,7 @@
 
 #pragma once
 #include <set>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 #include <cstring>
@@ -795,7 +796,7 @@ void WindowJoinOperator<KeyType>::processBatch(
         auto inputRow = std::unique_ptr<RowData>(batchGuard->extractRowData(i));
         int64_t windowEndTime =
             reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batchGuard->Get(windowEndIndex))->GetValue(i);
-        if constexpr (std::is_same_v<KeyType, StringRef>) {
+        if constexpr (std::is_same_v<KeyType, omniruntime::type::StringRef>) {
             // Preserve all existing VectorBatch key encodings on the original batch path.
             auto key = keySelector->getKey(batchGuard.get(), i);
             processElement(std::move(inputRow), windowEndTime, keySelector, recordState, &key);
