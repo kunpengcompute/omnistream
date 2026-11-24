@@ -114,10 +114,12 @@ std::unique_ptr<omnistream::VectorBatch> JsonRowDataDeserializationSchema::deser
         if (messages[index] == nullptr) {
             continue;
         }
-        auto record = nlohmann::json::parse(
-            std::string_view(reinterpret_cast<const char*>(messages[index]), lengths[index]),
-            nullptr,
-            !ignoreParseErrors);
+        const std::string_view message(reinterpret_cast<const char*>(messages[index]), lengths[index]);
+        // Flink's readTree treats empty input and JSON whitespace as a missing node.
+        if (message.find_first_not_of(" \t\r\n") == std::string_view::npos) {
+            continue;
+        }
+        auto record = nlohmann::json::parse(message, nullptr, !ignoreParseErrors);
         if (record.is_null()) {
             continue;
         }
