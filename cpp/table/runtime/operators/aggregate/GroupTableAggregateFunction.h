@@ -7,8 +7,32 @@
  * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PSL v2 for more details.
- *
- * Description: GroupBy (without window) TABLE aggregate operator, the native counterpart of
+ */
+
+#ifndef FLINK_TNEL_GROUPTABLEAGGREGATEFUNCTION_H
+#define FLINK_TNEL_GROUPTABLEAGGREGATEFUNCTION_H
+
+#include <nlohmann/json.hpp>
+#include <string>
+#include <vector>
+
+#include "table/runtime/generated/TableAggsHandleFunction.h"
+#include "table/runtime/generated/function/RowNumberFunction.h"
+#include "table/data/RowData.h"
+#include "table/data/binary/BinaryRowData.h"
+#include "table/data/util/RowDataUtil.h"
+#include "table/types/logical/LogicalType.h"
+#include "table/runtime/keyselector/KeySelector.h"
+#include "core/api/common/state/ValueState.h"
+#include "core/api/common/state/ValueStateDescriptor.h"
+#include "functions/OpenContext.h"
+#include "functions/RuntimeContext.h"
+#include "streaming/api/functions/KeyedProcessFunction.h"
+#include "streaming/api/operators/StreamingRuntimeContext.h"
+#include "streaming/api/operators/TimestampedCollector.h"
+
+/**
+ * GroupBy (without window) TABLE aggregate operator, the native counterpart of
  * Flink's org.apache.flink.table.runtime.operators.aggregate.GroupTableAggFunction.
  *
  * Skeleton is copied from GroupAggFunction ("same input, same flow"), only the emission
@@ -40,29 +64,6 @@
  * v1 scope: single ROW_NUMBER aggregate call. Multiple table aggregate calls extend the
  * creation section into an if-chain/factory, mirroring GroupAggFunction::InitAggFunctions.
  */
-
-#ifndef FLINK_TNEL_GROUPTABLEAGGREGATEFUNCTION_H
-#define FLINK_TNEL_GROUPTABLEAGGREGATEFUNCTION_H
-
-#include <nlohmann/json.hpp>
-#include <string>
-#include <vector>
-
-#include "table/runtime/generated/TableAggsHandleFunction.h"
-#include "table/runtime/generated/function/RowNumberFunction.h"
-#include "table/data/RowData.h"
-#include "table/data/binary/BinaryRowData.h"
-#include "table/data/util/RowDataUtil.h"
-#include "table/types/logical/LogicalType.h"
-#include "table/runtime/keyselector/KeySelector.h"
-#include "core/api/common/state/ValueState.h"
-#include "core/api/common/state/ValueStateDescriptor.h"
-#include "functions/OpenContext.h"
-#include "functions/RuntimeContext.h"
-#include "streaming/api/functions/KeyedProcessFunction.h"
-#include "streaming/api/operators/StreamingRuntimeContext.h"
-#include "streaming/api/operators/TimestampedCollector.h"
-
 class GroupTableAggregateFunction : public KeyedProcessFunction<RowData*, RowData*, RowData*> {
 public:
     GroupTableAggregateFunction(long stateRetentionTime, const nlohmann::json& config);

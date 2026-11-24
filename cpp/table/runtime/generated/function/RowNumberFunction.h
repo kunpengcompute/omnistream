@@ -7,8 +7,20 @@
  * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PSL v2 for more details.
- *
- * Description: Native handler for the ROW_NUMBER table aggregate (Top-N of values).
+ */
+
+#ifndef FLINK_TNEL_ROWNUMBERFUNCTION_H
+#define FLINK_TNEL_ROWNUMBERFUNCTION_H
+
+#include <string>
+#include <vector>
+#include "../TableAggsHandleFunction.h"
+#include "../table/runtime/dataview/StateDataViewStore.h"
+#include "../runtime/state/VoidNamespace.h"
+#include "table/types/logical/LogicalType.h"
+
+/**
+ * Native handler for the ROW_NUMBER table aggregate (Top-N of values).
  *
  * Accumulator model = Scheme A (BinaryRowData slots, Flink state-shape parity):
  *   - ALL persistent state lives in the operator's ValueState<RowData> accState as a
@@ -43,17 +55,6 @@
  *                          WHETHER the old board is emitted, not its kind]
  *       isRetract=false -> always INSERT (+I)   [not firstRow-dependent]
  */
-
-#ifndef FLINK_TNEL_ROWNUMBERFUNCTION_H
-#define FLINK_TNEL_ROWNUMBERFUNCTION_H
-
-#include <string>
-#include <vector>
-#include "../TableAggsHandleFunction.h"
-#include "../table/runtime/dataview/StateDataViewStore.h"
-#include "../runtime/state/VoidNamespace.h"
-#include "table/types/logical/LogicalType.h"
-
 class RowNumberFunction : public TableAggsHandleFunction {
 public:
     RowNumberFunction(
