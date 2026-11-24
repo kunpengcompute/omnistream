@@ -47,6 +47,12 @@
 //  10 NoUniqueKeyMatchesFlinkTop2     (keyless acceptance shape, 12-row changelog)
 //  11 NoUniqueKeyDuplicateValueRanksTwice (same price twice ranks twice: plain
 //                                      Flink Top2 TableAggregateFunction semantics)
+//  12 RocksDbFalconCacheConsistency (rocksdb-ownership review: falcon cache ON
+//                                      flips accState ownership to the cache --
+//                                      value()/update() route through
+//                                      stateCache->get/put -- so the operator's
+//                                      caller-owned free must stay OFF; output
+//                                      still byte-identical to the heap run)
 
 #include "table/runtime/operators/aggregate/GroupTableAggregateFunction.h"
 #include <nlohmann/json.hpp>
@@ -59,6 +65,7 @@
 #include "runtime/taskmanager/OmniRuntimeEnvironment.h"
 #include "runtime/state/EmbeddedRocksDBStateBackend.h"
 #include "core/api/common/TaskInfoImpl.h"
+#include "functions/Configuration.h"
 #include "table/typeutils/RowDataSerializer.h"
 #include "streaming/api/operators/KeyedProcessOperator.h"
 #include <filesystem>
@@ -413,6 +420,55 @@ TEST(GroupTableAggregateFunctionTest, DualBackendConsistency)
 
     ASSERT_EQ(heapOut, golden);  // not vacuous: pin the HashMap run to the golden sequence
     ASSERT_EQ(rocksOut, heapOut); // then require RocksDB to match exactly
+}
+
+// ---------------------------------------------------------------------------
+// Case 12 (rocksdb-ownership review follow-up): RocksDB with the falcon state
+// cache ENABLED (use-state-cache=true, sizeLimit=1) must stay byte-identical to
+// the heap output. Falcon mode flips accState ownership: value()/update() route
+// through stateCache->get/put, which OWN the RowData objects -- the operator's
+// caller-owned free path must stay OFF here (stateValueCallerOwned_ == false);
+// freeing a cache-owned object would leave the LRU entry dangling. The dual
+// backstop is DualBackendConsistency above: falcon DISABLED (sizeLimit 0) is the
+// caller-owned mode where the operator frees what value() returned (leak fix).
+// ---------------------------------------------------------------------------
+TEST(GroupTableAggregateFunctionTest, RocksDbFalconCacheConsistency)
+{
+    struct FalconConfigGuard {
+        FalconConfigGuard()
+        {
+            Configuration::TM_CONFIG->setConfiguration(
+                {{"state.backend.rocksdb.falcon.use-state-cache", "true"},
+                 {"state.backend.rocksdb.falcon.state-cache-sizeLimit", "1"}});
+        }
+        ~FalconConfigGuard()
+        {
+            Configuration::TM_CONFIG->setConfiguration(
+                {{"state.backend.rocksdb.falcon.use-state-cache", "false"},
+                 {"state.backend.rocksdb.falcon.state-cache-sizeLimit", "3000"}});
+        }
+    } falconConfigGuard;
+
+    const std::vector<std::string> golden = {
+        "+I|1|5000|1",
+        "-D|1|5000|1", "+I|1|8000|1", "+I|1|5000|2",
+        "-D|1|8000|1", "-D|1|5000|2", "+I|1|8000|1", "+I|1|6500|2"};
+
+    auto runScenario = [](const std::string& backend) {
+        auto rig = makeRig(true, backend);
+        rig.feed(1, 1, 5000);
+        rig.feed(1, 2, 8000);
+        rig.feed(1, 3, 6500);
+        return rig.capturedStrings();
+    };
+
+    // Heap ignores the falcon options entirely; run it inside the guard so both
+    // sides see the same global configuration.
+    auto heapOut = runScenario("HashMapStateBackend");
+    auto falconOut = runScenario("EmbeddedRocksDBStateBackend");
+
+    ASSERT_EQ(heapOut, golden);     // not vacuous: pin the heap run to the golden sequence
+    ASSERT_EQ(falconOut, heapOut);   // falcon-enabled RocksDB must match exactly
 }
 
 // ---------------------------------------------------------------------------

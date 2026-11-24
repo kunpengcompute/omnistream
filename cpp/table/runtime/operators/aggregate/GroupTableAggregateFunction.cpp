@@ -15,6 +15,8 @@
 
 #include "core/include/common.h"
 #include "runtime/dataview/PerKeyStateDataViewStore.h"
+#include "runtime/state/VoidNamespace.h"
+#include "runtime/state/rocksdb/RocksdbValueState.h"
 #include "table/types/logical/RowType.h"
 #include "table/typeutils/InternalTypeInfo.h"
 
@@ -129,6 +131,15 @@ void GroupTableAggregateFunction::open(const Configuration& parameters)
     accDesc->SetStateSerializer(accRowTypeInfo->getTypeSerializer());
     accState =
         static_cast<StreamingRuntimeContext<RowData*>*>(getRuntimeContext())->getState<RowData*>(accDesc);
+    // Per-backend ownership of accState values (see member comment in the header):
+    // under RocksDB with the falcon cache disabled (state-cache-sizeLimit == 0,
+    // the default), value() returns a caller-owned heap copy on every call and
+    // update() only serializes it -- the caller frees the object after the final
+    // update (same contract as GroupAggFunction backend==2 pendingUpdates+delete).
+    // Heap backend / falcon-enabled RocksDB keep ownership themselves.
+    if (auto* rocksdbState = dynamic_cast<RocksdbValueState<RowData*, VoidNamespace, RowData*>*>(accState)) {
+        stateValueCallerOwned_ = rocksdbState->stateCache->getSizeLimit() == 0;
+    }
     accumulatorArity = static_cast<int>(rankEnd);
 
     // v1: single ROW_NUMBER aggregate call; multiple calls extend this into the
@@ -195,6 +206,9 @@ void GroupTableAggregateFunction::processElement(RowData* input, Context* ctx, T
     //    happens before the new board is emitted).
     function->getAccumulators(reinterpret_cast<BinaryRowData*>(accumulators));
     accState->update(accumulators);
+    if (stateValueCallerOwned_) {
+        delete accumulators; // falcon-disabled RocksDB: update() only serialized it
+    }
 
     // 5. Emit the NEW board: INSERT on first row, UPDATE_AFTER afterwards. The Top2
     //    accumulator only grows, so the group never dies and accState is kept.
@@ -312,6 +326,9 @@ void GroupTableAggregateFunction::processElementToRows(
     //    happens before the new board is emitted).
     function->getAccumulators(reinterpret_cast<BinaryRowData*>(accumulators));
     accState->update(accumulators);
+    if (stateValueCallerOwned_) {
+        delete accumulators; // falcon-disabled RocksDB: update() only serialized it
+    }
 
     // 5. Emit the NEW board: INSERT on first row, UPDATE_AFTER afterwards. The Top2
     //    accumulator only grows, so the group never dies and accState is kept.

@@ -152,6 +152,14 @@ private:
 
     // ---- runtime state ----
     ValueState<RowData*>* accState = nullptr;
+    // RocksDB + falcon cache DISABLED (state-cache-sizeLimit == 0, the default):
+    // RocksdbValueState::value() hands back a fresh heap copy on every call and
+    // update() only serializes it, so the CALLER owns the object and frees it
+    // after the final update (GroupAggFunction backend==2 pendingUpdates-delete
+    // contract) -- otherwise it leaks once per input row. Heap backend and
+    // falcon-ENABLED RocksDB own the object themselves (backend store /
+    // stateCache->put), so it must NOT be freed in those modes.
+    bool stateValueCallerOwned_ = false;
     TableAggsHandleFunction* function = nullptr; // v1: single ROW_NUMBER call
     // Concrete-type view of `function` for the batch path: emitValueToRows is a
     // RowNumberFunction extension, not part of the TableAggsHandleFunction contract.
