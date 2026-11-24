@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <list>
 #include <memory>
+#include <functional>
 
 template <typename K, typename V>
 class SortedKVCache {
@@ -30,6 +31,23 @@ public:
                 delete item.first;
             }
         }
+        // When the cache owns the stored V pointers, release them here. No
+        // removal listener is invoked on destruction (the caller already had a
+        // chance to flush dirty state while the entries were alive).
+        if (ownsValues) {
+            for (auto& item : cacheList) {
+                if constexpr (std::is_pointer<V>::value) {
+                    delete item.second;
+                }
+            }
+            // Replaced entries that were parked in oldValues and never cleared.
+            for (auto& value : oldValues) {
+                if constexpr (std::is_pointer<V>::value) {
+                    delete value;
+                }
+            }
+        }
+        oldValues.clear();
     }
 
     // Tell the cache whether it is the sole owner of stored V pointers.
@@ -38,6 +56,19 @@ public:
     void setOwnsValues(bool owns)
     {
         ownsValues = owns;
+    }
+
+    // Called with (key, value) just before an entry is dropped from the cache
+    // because a new entry exceeded the capacity. The value is still alive here;
+    // after the listener returns the cache frees it (when ownsValues).
+    void setRemovalListener(std::function<void(const K&, V)> listener)
+    {
+        removalListener = std::move(listener);
+    }
+
+    void setCapacity(size_t cap)
+    {
+        capacity = cap;
     }
 
     V get(const K& key)
@@ -72,6 +103,9 @@ public:
                 V lruVal = cacheList.back().second;
                 cacheMap.erase(lruKey);
                 cacheList.pop_back();
+                if (removalListener) {
+                    removalListener(lruKey, lruVal);
+                }
                 if constexpr (std::is_pointer_v<K>) {
                     delete lruKey;
                 }
@@ -102,6 +136,7 @@ public:
 private:
     size_t capacity = 1024;
     bool ownsValues = false;              // if true, cache is sole owner of V pointers and frees them on eviction
+    std::function<void(const K&, V)> removalListener; // invoked before an entry is evicted by size overflow
     std::list<std::pair<K, V>> cacheList; // Stores key-value pairs
     std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> cacheMap;
     std::vector<V> oldValues;

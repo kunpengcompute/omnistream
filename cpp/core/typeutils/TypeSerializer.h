@@ -32,6 +32,7 @@ enum class BackendDataType {
     LONG_BK,
     ROW_LIST_BK,
     SORTED_MAP_BK,
+    ROW_INT_PAIR_BK,  // RowDataIntPair* (row + inner rank) for UpdatableTopNFunction's value
     INVALID_BK,
     POJO_BK,
     SET_LONG,
@@ -59,6 +60,7 @@ inline std::ostream& operator<<(std::ostream& os, const BackendDataType& type)
         case BackendDataType::LONG_BK: return os << "LONG_BK";
         case BackendDataType::ROW_LIST_BK: return os << "ROW_LIST_BK";
         case BackendDataType::SORTED_MAP_BK: return os << "SORTED_MAP_BK";
+        case BackendDataType::ROW_INT_PAIR_BK: return os << "ROW_INT_PAIR_BK";
         case BackendDataType::INVALID_BK: return os << "INVALID_BK";
         case BackendDataType::POJO_BK: return os << "POJO_BK";
         case BackendDataType::SET_LONG: return os << "SET_LONG";
