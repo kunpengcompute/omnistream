@@ -1,13 +1,15 @@
 /*
- * Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
- * You can use this software according to the terms and conditions of the Mulan PSL v2.
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * omnistream is licensed under Mulan PSL v2.
+ * You can use this software according to the terms and conditions of the Mulan
+ * PSL v2.
  * You may obtain a copy of Mulan PSL v2 at:
- *          http://license.coscl.org.cn/MulanPSL2
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
- * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ *         http://license.coscl.org.cn/MulanPSL2
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY
+ * KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
- * See the Mulan PSL v2 for more details.
  */
+
 #ifndef TZ_H
 #define TZ_H
 
@@ -244,7 +246,7 @@ nonexistent_local_time::make_msg(local_time<Duration> tp, const local_info& i)
 {
     if (i.result != local_info::nonexistent) {
         throw std::runtime_error("time util corrupted!");
-    }   
+    }
     std::ostringstream os;
     os << tp << " is in a gap between\n"
        << local_seconds{i.first.end.time_since_epoch()} + i.first.offset << ' '
@@ -285,7 +287,7 @@ ambiguous_local_time::make_msg(local_time<Duration> tp, const local_info& i)
     if (i.result != local_info::ambiguous) {
         throw std::runtime_error("time util corrupted!");
     }
-    
+
     std::ostringstream os;
     os << tp << " is ambiguous.  It could be\n"
        << tp << ' ' << i.first.abbrev << " == "
