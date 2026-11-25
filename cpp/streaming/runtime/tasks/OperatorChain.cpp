@@ -935,14 +935,19 @@ void OperatorChainV2::operatorDependenciesDeal()
         return;
     }
     if (opMap.find(OPERATOR_NAME_COMMIT_OPERATOR) != opMap.end()) {
-        if (opMap.find(OPERATOR_NAME_SINK_WRITER) == opMap.end()) {
-            GErrorLog("OperatorDependenciesDeal CommiterOperator dependy SinkWriterOperator");
-            return;
-        }
         CommitterOperator<>* committerOperator =
             dynamic_cast<CommitterOperator<>*>(opMap[OPERATOR_NAME_COMMIT_OPERATOR]);
         if (committerOperator == nullptr) {
             GErrorLog("OperatorDependenciesDeal CommiterOperator not CommitterOperator");
+            return;
+        }
+        if (committerOperator->hasCommitter()) {
+            // An independently scheduled Kafka committer initializes from its
+            // descriptor and does not need a writer in the same operator chain.
+            return;
+        }
+        if (opMap.find(OPERATOR_NAME_SINK_WRITER) == opMap.end()) {
+            GErrorLog("OperatorDependenciesDeal CommiterOperator dependy SinkWriterOperator");
             return;
         }
         SinkWriterOperator* sinkWriterOperator = dynamic_cast<SinkWriterOperator*>(opMap[OPERATOR_NAME_SINK_WRITER]);

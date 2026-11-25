@@ -39,6 +39,7 @@
 #include "streaming/api/operators/util/SimpleVersionedListState.h"
 #include "connector/kafka/sink/KafkaCommittable.h"
 #include "connector/kafka/sink/KafkaCommittableSerializer.h"
+#include "connector/kafka/sink/KafkaCommitter.h"
 
 static std::string committerRawStatesName = "streaming_committer_raw_states";
 
@@ -249,6 +250,16 @@ public:
         emitDownstream = false;
     }
 
+    void initFromKafkaConfig(std::unique_ptr<RdKafka::Conf> producerConfig)
+    {
+        kafkaProducerConfig_ = std::move(producerConfig);
+        committableSerializer = std::make_shared<KafkaCommittableSerializer>();
+        committer = std::make_shared<KafkaCommitter>(kafkaProducerConfig_.get());
+        emitDownstream = false;
+    }
+
+    bool hasCommitter() const { return committer != nullptr; }
+
 private:
     void commitAndEmitCheckpoints()
     {
@@ -294,6 +305,9 @@ private:
     }
 
     bool isDataStream;
+    // KafkaCommitter keeps a non-owning pointer to this config. Declare it before
+    // committer so the committer is destroyed first.
+    std::unique_ptr<RdKafka::Conf> kafkaProducerConfig_;
     std::shared_ptr<SimpleVersionedSerializer<CommT>> committableSerializer;
     std::shared_ptr<Committer<CommT>> committer;
     bool emitDownstream;

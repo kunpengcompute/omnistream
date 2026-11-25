@@ -913,6 +913,28 @@ StreamOperator* StreamOperatorFactory::CreateCommitOp(
 
     auto* op = new CommitterOperator(processingTimeService, isBatch, true);
     op->setup(std::move(task));
+    if (opDescriptionJSON.contains("kafkaProducerConfig")) {
+        std::unique_ptr<RdKafka::Conf> producerConfig(RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL));
+        for (const auto& element : opDescriptionJSON["kafkaProducerConfig"].items()) {
+            const auto iter = ProducerConfig.find(element.key());
+            if (iter != ProducerConfig.end() && !iter->second.empty()) {
+                std::string errorString;
+                if (producerConfig->set(iter->second, element.value().get<std::string>(), errorString)
+                    != RdKafka::Conf::CONF_OK) {
+                    throw std::runtime_error("Kafka committer config " + element.key() + ": " + errorString);
+                }
+            }
+        }
+        for (const auto& pair : ConfigLoader::GetKafkaProducerConfig()) {
+            if (pair.first != "max.push.records") {
+                std::string errorString;
+                if (producerConfig->set(pair.first, pair.second, errorString) != RdKafka::Conf::CONF_OK) {
+                    throw std::runtime_error("Kafka committer override " + pair.first + ": " + errorString);
+                }
+            }
+        }
+        op->initFromKafkaConfig(std::move(producerConfig));
+    }
     // SP-INTEROP: Committer 使用 operator state（committable list），无需 keyed state 格式转换，Omni 原生格式即为Flink
     // 兼容。
     op->setFlinkSavepointAdaptor(FlinkSavepointAdaptorType::OmniIsCompatible);

@@ -12,6 +12,7 @@
 #include "OmniOneInputStreamTask.h"
 
 #include <typeinfo/TypeInfoFactory.h>
+#include "core/typeutils/CommittableMessageSerializer.h"
 
 #include "streaming/runtime/io/StreamTaskNetworkInputFactory.h"
 #include "streaming/runtime/io/StreamOneInputProcessor.h"
@@ -62,8 +63,16 @@ OmniStreamTaskInput* OmniOneInputStreamTask::CreateTaskInput(std::shared_ptr<Che
         std::string description =
             this->taskConfiguration_.getStreamConfigPOD().getOperatorDescription().getDescription();
         auto descriptionJson = nlohmann::json::parse(description);
-        if (!descriptionJson.contains("inputTypes")) {
-            auto inputTypes = this->taskConfiguration_.getStreamConfigPOD().getOperatorDescription().getInputs();
+        // getInputs() returns a reference into OperatorPOD. Copy it because
+        // getStreamConfigPOD()/getOperatorDescription() may return temporaries.
+        auto inputs = this->taskConfiguration_.getStreamConfigPOD().getOperatorDescription().getInputs();
+        TypeSerializer* inputSerializer;
+        if (!inputs.empty() && inputs[0].kind == "CommittableMessage") {
+            // A standalone Committer receives CommittableMessage, whose type
+            // descriptor is "Void" rather than a JSON array of Row fields.
+            inputSerializer = new CommittableMessageSerializer();
+        } else if (!descriptionJson.contains("inputTypes")) {
+            auto inputTypes = inputs;
             TypeDescriptionPOD inputType;
             inputType = inputTypes[0];
             auto types = inputType.getType();
@@ -71,14 +80,16 @@ OmniStreamTaskInput* OmniOneInputStreamTask::CreateTaskInput(std::shared_ptr<Che
             for (const auto& obj : typeArray) {
                 typeList.push_back(obj.at("type").get<std::string>());
             }
+            inputSerializer = new BinaryRowDataSerializer(typeList.size(), typeList);
         } else {
             typeList = descriptionJson["inputTypes"].get<std::vector<std::string>>();
+            inputSerializer = new BinaryRowDataSerializer(typeList.size(), typeList);
         }
         return OmniStreamTaskNetworkInputFactory::create(
             0,
             inputGate,
             taskType,
-            new BinaryRowDataSerializer(typeList.size(), typeList),
+            inputSerializer,
             channelInfoIndex,
             inputRescalingDescriptor,
             getPartitionerFunction,
