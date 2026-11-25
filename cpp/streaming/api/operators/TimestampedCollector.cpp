@@ -13,13 +13,13 @@
 #include "TimestampedCollector.h"
 #include "basictypes/Object.h"
 
-TimestampedCollector::TimestampedCollector(Output* output, bool isDataStream)
+TimestampedCollector::TimestampedCollector(Output* output, bool isDataStream, RecordValueType valueType)
     : output_(output),
-      isDataStream(isDataStream)
+      isDataStream(isDataStream),
+      valueType_(valueType)
 {
     reuse = new StreamRecord();
     tag_ = StreamElementTag::TAG_REC_WITH_TIMESTAMP;
-    hasTimestamp_ = true;
     timestamp_ = 0L;
 }
 
@@ -42,6 +42,7 @@ void TimestampedCollector::collect(void* value)
     } else {
         auto* record = new StreamRecord(value);
         record->setTimestamp(timestamp_);
+        record->setValueType(valueType_);
         output_->collect(record);
     }
 }
@@ -87,6 +88,5 @@ void TimestampedCollector::setAbsoluteTimestamp(int64_t timestamp)
 
 void TimestampedCollector::eraseTimestamp()
 {
-    hasTimestamp_ = false;
     tag_ = StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP;
 }

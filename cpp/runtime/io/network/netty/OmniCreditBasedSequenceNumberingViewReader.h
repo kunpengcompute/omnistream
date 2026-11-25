@@ -25,6 +25,7 @@
 #include "partition/ResultPartitionManager.h"
 #include "runtime/executiongraph/descriptor/ResultPartitionIDPOD.h"
 #include "table/utils/VectorBatchSerializationUtils.h"
+#include "table/utils/BinaryRowDataSerializationUtils.h"
 #include <buffer/NetworkBuffer.h>
 namespace ds = ::datastream;
 namespace omnistream {
@@ -69,6 +70,8 @@ public:
     std::shared_ptr<NettyMemorySegment> RequestNettyBuffer(int size);
     bool SerializeVectorBatch(VectorBatch* vectorBatch, std::shared_ptr<NettyBufferInfo>& bufferInfo);
     void DoSerializeVectorBatch(VectorBatch* vectorBatch, int vectorSize, std::shared_ptr<NettyBufferInfo>& bufferInfo);
+    bool SerializeBinaryRowData(BinaryRowData* element, std::shared_ptr<NettyBufferInfo>& bufferInfo);
+    void DoSerializeBinaryRowData(BinaryRowData* element, int rowSize, std::shared_ptr<NettyBufferInfo>& bufferInfo);
     void AddNettyBufferInfoToQueue(std::shared_ptr<NettyBufferInfo>& bufferInfo);
     bool DoSerializeWaterMark(long timestamp, std::shared_ptr<NettyBufferInfo> bufferInfo, bool isStatus = false);
     void SerializeBufferAndBacklog(VectorBatchBuffer* vectorBatchBuffer);

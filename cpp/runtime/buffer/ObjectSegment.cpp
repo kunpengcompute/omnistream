@@ -17,6 +17,7 @@
 
 #include "core/include/common.h"
 #include "streaming/runtime/streamrecord/StreamRecord.h"
+#include "streaming/runtime/streamrecord/StreamRecordHelper.h"
 #include "table/data/vectorbatch/VectorBatch.h"
 
 namespace omnistream {
@@ -80,10 +81,13 @@ int64_t ObjectSegment::calculateStoredObjectSizeInBytes(const StreamElement* rec
     if (record->getTag() == StreamElementTag::TAG_WATERMARK) {
         return static_cast<int64_t>(sizeof(int64_t));
     }
-    // ObjectSegment is used by the vector-batch transport path, so only StreamRecord payloads
-    // contribute bytes here and they are expected to be VectorBatch instances.
-    auto* vectorBatch = static_cast<const VectorBatch*>(record->getValue());
-    return vectorBatch == nullptr ? 0 : vectorBatch->getSizeInBytes();
+    // ObjectSegment is used by the vector-batch transport path, but records may also carry
+    // binary row data. The size has to be derived from the record value type, otherwise the
+    // accounting is based on unrelated memory.
+    if (auto* streamRecord = dynamic_cast<const StreamRecord*>(record)) {
+        return static_cast<int64_t>(StreamRecordHelper::getRecordSizeInBytes(streamRecord));
+    }
+    return 0;
 }
 
 void ObjectSegment::setCapacity(int64_t capacity)

@@ -12,9 +12,12 @@
 
 #pragma once
 #include <set>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 #include <cstring>
+#include <cstring>
+#include <memory>
 #include <arm_sve.h>
 
 #include "table/runtime/operators/join/stream/AbstractStreamingJoinOperator.h"
@@ -246,6 +249,8 @@ private:
     std::vector<KeyType> reuseKeys_{};
     std::vector<ComboId> reuseComboIds_{};
     std::vector<int64_t> reuseWindowEndTimes_{};
+    std::string inputRecordType1 = "VECTOR_BATCH";
+    std::string inputRecordType2 = "VECTOR_BATCH";
 
     template <typename TYPE>
     void insertLeft(
@@ -279,6 +284,13 @@ private:
         int windowEndIndex,
         WindowListState<KeyType, int64_t, RowData*>* recordState,
         bool isLeftSide);
+    void processElement(
+        std::unique_ptr<RowData> inputRow,
+        int64_t windowEndTime,
+        KeySelector<KeyType>* keySelector,
+        WindowListState<KeyType, int64_t, RowData*>* recordState,
+        const KeyType* inputKey = nullptr);
+
     ::FilterFunc generateJoinCondition();
     void getAllColRefs(nlohmann::json& config);
     void BuildInnerLeft(
@@ -328,6 +340,13 @@ WindowJoinOperator<KeyType>::WindowJoinOperator(
     if (rightSerializer == nullptr) {
         INFO_RELEASE("rightSerializer is null");
         this->rightSerializer = new RowDataSerializer(new omnistream::RowType(true, rightTypeStr));
+    }
+    if (description.contains("InputRecordType1")) {
+        inputRecordType1 = description["InputRecordType1"].get<std::string>();
+    }
+
+    if (description.contains("InputRecordType2")) {
+        inputRecordType2 = description["InputRecordType2"].get<std::string>();
     }
 }
 
@@ -417,7 +436,22 @@ void WindowJoinOperator<KeyType>::close()
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::processBatch1(StreamRecord* input)
 {
+    LOG("processBatch1");
     auto record = std::unique_ptr<StreamRecord>(input);
+    if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+        // StreamRecord owns only its wrapper. Transfer the row to heap state on acceptance.
+        auto rowData = std::unique_ptr<BinaryRowData>(static_cast<BinaryRowData*>(record->getValue()));
+        if (rowData == nullptr || leftWindowEndIndex < 0 || leftWindowEndIndex >= rowData->getArity() ||
+            rowData->isNullAt(leftWindowEndIndex)) {
+            throw std::invalid_argument("WindowJoin requires a non-null left window end field");
+        }
+        int64_t windowEndTime = *rowData->getLong(leftWindowEndIndex);
+        processElement(std::move(rowData), windowEndTime, this->keySelectorLeft.get(), leftWindowState);
+        return;
+    }
+    if (inputRecordType1 != "VECTOR_BATCH") {
+        LOG("Warning: The record type in the description does not match the input record type(1)!!");
+    }
     auto batch = reinterpret_cast<omnistream::VectorBatch*>(record->getValue());
     processBatch(batch, leftWindowEndIndex, leftWindowState, true);
 }
@@ -425,7 +459,22 @@ void WindowJoinOperator<KeyType>::processBatch1(StreamRecord* input)
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::processBatch2(StreamRecord* input)
 {
+    LOG("processBatch2");
     auto record = std::unique_ptr<StreamRecord>(input);
+    if (record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+        // StreamRecord owns only its wrapper. Transfer the row to heap state on acceptance.
+        auto rowData = std::unique_ptr<BinaryRowData>(static_cast<BinaryRowData*>(record->getValue()));
+        if (rowData == nullptr || rightWindowEndIndex < 0 || rightWindowEndIndex >= rowData->getArity() ||
+            rowData->isNullAt(rightWindowEndIndex)) {
+            throw std::invalid_argument("WindowJoin requires a non-null right window end field");
+        }
+        int64_t windowEndTime = *rowData->getLong(rightWindowEndIndex);
+        processElement(std::move(rowData), windowEndTime, this->keySelectorRight.get(), rightWindowState);
+        return;
+    }
+    if (inputRecordType2 != "VECTOR_BATCH") {
+        LOG("Warning: The record type in the description does not match the input record type(2)!!");
+    }
     auto batch = reinterpret_cast<omnistream::VectorBatch*>(record->getValue());
     processBatch(batch, rightWindowEndIndex, rightWindowState, false);
 }
@@ -445,6 +494,7 @@ inline void WindowJoinOperator<KeyType>::initializeState(
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::onEventTime(TimerHeapInternalTimer<KeyType, int64_t>* timer)
 {
+    LOG("OnEventTime");
     int64_t window = timer->getNamespace();
     this->setCurrentKey(timer->getKey());
 
@@ -704,6 +754,32 @@ inline void WindowJoinOperator<KeyType>::buildSemiAnti(
 }
 
 template <typename KeyType>
+void WindowJoinOperator<KeyType>::processElement(
+    std::unique_ptr<RowData> inputRow,
+    int64_t windowEndTime,
+    KeySelector<KeyType>* keySelector,
+    WindowListState<KeyType, int64_t, RowData*>* recordState,
+    const KeyType* inputKey)
+{
+    LOG("process element");
+    if (TimeWindowUtil::isWindowFired(windowEndTime, internalTimerService->currentWatermark(), shiftTimeZone)) {
+        return;
+    }
+    // reuseWindowEndTimes_[i] = windowEndTime;
+    auto key = inputKey == nullptr ? keySelector->getKey(inputRow.get()) : *inputKey;
+
+    this->setCurrentKey(key);
+
+    recordState->add(windowEndTime, inputRow.get());
+    if (stateType_ == omnistream::StateType::HEAP) {
+        inputRow.release();
+    }
+
+    internalTimerService->registerEventTimeTimer(
+        windowEndTime, TimeWindowUtil::toEpochMillsForTimer(windowEndTime - 1, shiftTimeZone));
+}
+
+template <typename KeyType>
 void WindowJoinOperator<KeyType>::processBatch(
     omnistream::VectorBatch* batch,
     int windowEndIndex,
@@ -717,23 +793,16 @@ void WindowJoinOperator<KeyType>::processBatch(
     auto rowCount = batchGuard->GetRowCount();
 
     for (int i = 0; i < rowCount; i++) {
-        // processElement();
+        auto inputRow = std::unique_ptr<RowData>(batchGuard->extractRowData(i));
         int64_t windowEndTime =
             reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batchGuard->Get(windowEndIndex))->GetValue(i);
-        if (TimeWindowUtil::isWindowFired(windowEndTime, internalTimerService->currentWatermark(), shiftTimeZone)) {
-            continue;
+        if constexpr (std::is_same_v<KeyType, omniruntime::type::StringRef>) {
+            // Preserve all existing VectorBatch key encodings on the original batch path.
+            auto key = keySelector->getKey(batchGuard.get(), i);
+            processElement(std::move(inputRow), windowEndTime, keySelector, recordState, &key);
+        } else {
+            processElement(std::move(inputRow), windowEndTime, keySelector, recordState);
         }
-        // reuseWindowEndTimes_[i] = windowEndTime;
-        auto key = keySelector->getKey(batchGuard.get(), i);
-
-        this->setCurrentKey(key);
-        auto inputRow = std::unique_ptr<RowData>(batchGuard->extractRowData(i));
-        recordState->add(windowEndTime, inputRow.get());
-        if (stateType_ == omnistream::StateType::HEAP) {
-            inputRow.release();
-        }
-        internalTimerService->registerEventTimeTimer(
-            windowEndTime, TimeWindowUtil::toEpochMillsForTimer(windowEndTime - 1, shiftTimeZone));
     }
 }
 

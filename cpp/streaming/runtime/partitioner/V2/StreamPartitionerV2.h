@@ -20,6 +20,8 @@
 #include "table/data/vectorbatch/VectorBatch.h"
 #include "table/data/Row.h"
 #include "table/data/util/VectorBatchUtil.h"
+#include "table/data/JoinedRowData.h"
+#include "table/data/binary/BinaryRowData.h"
 
 namespace omnistream {
 template <typename T>
@@ -48,6 +50,7 @@ public:
 
     std::unordered_map<int, T*> selectChannel(T* record) override
     {
+        LOG("StreamPartitionerV2 selectChannel >>>>>>>>");
         std::unordered_map<int, T*> result;
         std::unordered_map<int, std::vector<int32_t>> intermediateResult;
         auto streamRecord = reinterpret_cast<StreamRecord*>(record);
@@ -65,6 +68,15 @@ public:
             delete row->getInternalRow();
             delete row;
             delete streamRecord;
+            return result;
+        } else if (streamRecord->getValueType() == RecordValueType::JOINED_ROW_DATA) {
+            // Network serializers require a self-contained binary row or a vector batch.
+            throw std::invalid_argument("JOINED_ROW_DATA must be materialized before network partitioning");
+        } else if (streamRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+            auto row = static_cast<BinaryRowData*>(streamRecord->getValue());
+            auto channel = selectRowChannel(row);
+            result[channel] = streamRecord; // TODO: copy the row using buildNewStreamRecordBasedOnOffsets().
+
             return result;
         }
         auto vectorBatch = static_cast<VectorBatch*>(streamRecord->getValue());
@@ -103,7 +115,14 @@ public:
     {
         auto vectorBatch = reinterpret_cast<VectorBatch*>(originStreamRecord->getValue());
         auto copyedVectorBatch = VectorBatchUtil::buildNewVectorBatchByRowIds(vectorBatch, offsets);
-        return new StreamRecord(copyedVectorBatch, timestamp);
+        auto copyedRecord = new StreamRecord(copyedVectorBatch, timestamp);
+        copyedRecord->setValueType(originStreamRecord->getValueType());
+        if (originStreamRecord->hasTimestamp()) {
+            copyedRecord->setTag(StreamElementTag::TAG_REC_WITH_TIMESTAMP);
+        } else {
+            copyedRecord->setTag(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP);
+        }
+        return copyedRecord;
     }
 
     StreamRecord* buildNewStreamRecordBasedOnOffsets(StreamRecord* originStreamRecord, long timestamp)
@@ -111,7 +130,14 @@ public:
         auto row = reinterpret_cast<Row*>(originStreamRecord->getValue());
         auto copyRow =
             new Row(row->getKind(), row->getFieldByPosition(), row->getFieldByName(), row->getPositionByName());
-        return new StreamRecord(copyRow, timestamp);
+        auto newRecord = new StreamRecord(copyRow, timestamp);
+        newRecord->setValueType(originStreamRecord->getValueType());
+        if (originStreamRecord->hasTimestamp()) {
+            newRecord->setTag(StreamElementTag::TAG_REC_WITH_TIMESTAMP);
+        } else {
+            newRecord->setTag(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP);
+        }
+        return newRecord;
     }
 
 protected:

@@ -22,7 +22,14 @@ AbstractWindowAggProcessor::AbstractWindowAggProcessor(const nlohmann::json desc
     sliceAssigner = AssignerAtt::createSliceAssigner(description);
     isEventTime = sliceAssigner->isEventTime();
     windowInterval = sliceAssigner->getSliceEndInterval();
-    collector = std::make_unique<TimestampedCollector>(this->output);
+    // jojo check description
+    outputRowData = description.contains("OutputRecordType") &&
+                    (description["OutputRecordType"].get<std::string>() == "BINARY_ROW_DATA");
+    if (outputRowData) {
+        collector = std::make_unique<TimestampedCollector>(this->output, false, RecordValueType::BINARY_ROW_DATA);
+    } else {
+        collector = std::make_unique<TimestampedCollector>(this->output);
+    }
 
     outputTypes = description["outputTypes"].get<std::vector<std::string>>();
     for (const auto& typeStr : outputTypes) {
@@ -145,6 +152,7 @@ void AbstractWindowAggProcessor::prepareCheckpoint()
 
 void AbstractWindowAggProcessor::fireWindow(int64_t windowEnd)
 {
+    LOG("AbstractWindowAggProcessor " << this << " fireWindow:" << windowEnd);
     if (!sliceAssigner->hasSliceEndIndex && !sliceAssigner->hasWindowEndIndex) {
         LOG("get value in the firewindow");
         std::unique_ptr<RowData> result(GetNonHopResult(windowEnd));
@@ -186,9 +194,13 @@ void AbstractWindowAggProcessor::ProcessHopResult(RowData* result)
     if (static_cast<size_t>(resultRow->getArity()) == outputTypes.size()) {
         if (!isWindowEmpty()) {
             LOG("window not empty");
-            auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(1, outputTypeIds);
-            SetOutputBatch(outputBatch, resultRow.get());
-            collector->collect(outputBatch);
+            if (outputRowData) {
+                collector->collect(BinaryRowDataSerializer::joinedRowToBinaryRow(resultRow.get(), outputTypeIds));
+            } else {
+                auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(1, outputTypeIds);
+                SetOutputBatch(outputBatch, resultRow.get());
+                collector->collect(outputBatch);
+            }
         } else {
             LOG("window is empty");
         }
@@ -201,9 +213,13 @@ void AbstractWindowAggProcessor::ProcessNonHopResult(RowData* result)
 {
     resultRow->replace(stateBackend->getCurrentKey().get(), result);
     if (resultRow->getArity() == static_cast<int>(outputTypes.size())) {
-        auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(1, outputTypeIds);
-        SetOutputBatch(outputBatch, resultRow.get());
-        collector->collect(outputBatch);
+        if (outputRowData) {
+            collector->collect(BinaryRowDataSerializer::joinedRowToBinaryRow(resultRow.get(), outputTypeIds));
+        } else {
+            auto outputBatch = omnistream::VectorBatch::CreateVectorBatch(1, outputTypeIds);
+            SetOutputBatch(outputBatch, resultRow.get());
+            collector->collect(outputBatch);
+        }
     } else {
         THROW_LOGIC_EXCEPTION("Unexpected fireWindow result! ResultRow and outputTypes columns not equal!!");
     }

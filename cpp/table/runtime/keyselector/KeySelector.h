@@ -176,15 +176,65 @@ template <typename K>
 K KeySelector<K>::getKey(RowData* input)
 {
     if constexpr (std::is_same_v<StringRef, K>) {
-        NOT_IMPL_EXCEPTION;
+        auto* binaryRow = dynamic_cast<BinaryRowData*>(input);
+        if (binaryRow == nullptr) {
+            THROW_LOGIC_EXCEPTION("StringRef keys require BinaryRowData input");
+        }
+        std::vector<omniruntime::type::DataTypeId> types;
+        for (auto type : keyColTypeIds) {
+            if (type == OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE || type == OMNI_TIMESTAMP_WITHOUT_TIME_ZONE) {
+                type = OMNI_LONG;
+            }
+            types.push_back(static_cast<omniruntime::type::DataTypeId>(type));
+        }
+        auto keyBatch = std::unique_ptr<omnistream::VectorBatch>(omnistream::VectorBatch::CreateVectorBatch(1, types));
+        StringRef key;
+        for (size_t i = 0; i < keyColIndices.size(); ++i) {
+            int column = keyColIndices[i];
+            if (column < 0 || column >= input->getArity() ||
+                static_cast<size_t>(types[i]) >= rowDeserializerCenter.size() ||
+                rowDeserializerCenter[types[i]] == nullptr) {
+                THROW_LOGIC_EXCEPTION("Unsupported StringRef key field");
+            }
+            rowDeserializerCenter[types[i]](keyBatch->Get(i), 0, binaryRow, column);
+            // Reuse the VectorBatch encoding, including null and composite-key markers.
+            serializers[i](keyBatch->Get(i), 0, arenaAllocator, key);
+        }
+        return key;
     } else if constexpr (isRowKey_) {
         BinaryRowData* key = BinaryRowData::createBinaryRowDataWithMem(keyColTypeIds.size());
         for (size_t i = 0; i < keyColIndices.size(); ++i) {
+            if (input->isNullAt(keyColIndices[i])) {
+                key->setNullAt(i);
+                continue;
+            }
             switch (keyColTypeIds[i]) {
                 case OMNI_LONG:
                 case OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 case OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
                 case OMNI_TIMESTAMP: key->setLong(i, input->getLong(keyColIndices[i])); break;
+                case OMNI_VARCHAR: {
+                    std::string_view sv = input->getStringView(keyColIndices[i]);
+                    key->setStringView(i, sv);
+                    break;
+                }
+                case OMNI_INT: key->setInt(i, *input->getInt(keyColIndices[i])); break;
+                default: THROW_LOGIC_EXCEPTION("Key type not supported, typeId: " << keyColTypeIds[i]);
+            }
+        }
+        return key;
+    } else if constexpr (isSharedRowKey_) {
+        auto key = std::shared_ptr<BinaryRowData>(BinaryRowData::createBinaryRowDataWithMem(keyColTypeIds.size()));
+        for (size_t i = 0; i < keyColIndices.size(); ++i) {
+            if (input->isNullAt(keyColIndices[i])) {
+                key->setNullAt(i);
+                continue;
+            }
+            switch (keyColTypeIds[i]) {
+                case OMNI_LONG:
+                case OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+                case OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+                case OMNI_TIMESTAMP: key->setLong(i, *input->getLong(keyColIndices[i])); break;
                 case OMNI_VARCHAR: {
                     std::string_view sv = input->getStringView(keyColIndices[i]);
                     key->setStringView(i, sv);

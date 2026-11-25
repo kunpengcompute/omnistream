@@ -15,6 +15,9 @@
 #include "metrics/groups/TaskMetricGroup.h"
 #include "streaming/api/operators/AbstractStreamOperator.h"
 #include "table/utils/VectorBatchSerializationUtils.h"
+#include "streaming/runtime/streamrecord/StreamRecord.h"
+#include "streaming/runtime/streamrecord/StreamRecordHelper.h"
+#include "table/data/vectorbatch/VectorBatch.h"
 
 ChainingOutput::ChainingOutput(Input* op) : operator_(op), announcedStatus(WatermarkStatus::activeStatus)
 {
@@ -44,16 +47,23 @@ void ChainingOutput::collect(void* record)
     LOG("operator address " + std::to_string(reinterpret_cast<long>(operator_)));
     LOG("pass to operator: " + std::string(operator_->getName()));
     LOG("stream record address  " + std::to_string(reinterpret_cast<long>(record)));
+    auto* streamRecord = reinterpret_cast<StreamRecord*>(record);
     if (numRecordsIn != nullptr) {
-        long numRecordsInCount =
-            reinterpret_cast<omnistream::VectorBatch*>(reinterpret_cast<StreamRecord*>(record)->getValue())
-                ->GetRowCount();
-        numRecordsIn->Inc(numRecordsInCount);
+        if (streamRecord->getValueType() == RecordValueType::VECTOR_BATCH) {
+            numRecordsIn->Inc(reinterpret_cast<omnistream::VectorBatch*>(streamRecord->getValue())->GetRowCount());
+        } else {
+            // A binary row or a joined row carries exactly one record.
+            numRecordsIn->Inc(1);
+        }
     }
     if (numBytesIn != nullptr) {
-        long numBytesInCount = omnistream::VectorBatchSerializationUtils::calculateVectorBatchSerializableSize(
-            reinterpret_cast<omnistream::VectorBatch*>(reinterpret_cast<StreamRecord*>(record)->getValue()));
-        numBytesIn->Inc(numBytesInCount);
+        if (streamRecord->getValueType() == RecordValueType::VECTOR_BATCH) {
+            long numBytesInCount = omnistream::VectorBatchSerializationUtils::calculateVectorBatchSerializableSize(
+                reinterpret_cast<omnistream::VectorBatch*>(streamRecord->getValue()));
+            numBytesIn->Inc(numBytesInCount);
+        } else {
+            numBytesIn->Inc(static_cast<long>(StreamRecordHelper::getRecordSizeInBytes(streamRecord)));
+        }
     }
     operator_->processBatch(reinterpret_cast<StreamRecord*>(record));
 }

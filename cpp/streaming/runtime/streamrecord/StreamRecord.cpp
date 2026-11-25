@@ -13,32 +13,25 @@
 #include <limits>
 #include "StreamRecord.h"
 
-StreamRecord::StreamRecord()
-    : StreamElement(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP),
-      timestamp_(0),
-      hasTimestamp_(false)
+StreamRecord::StreamRecord() : StreamElement(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP), timestamp_(0)
 {
 }
 
-StreamRecord::StreamRecord(void* value)
-    : StreamElement(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP),
-      timestamp_(0),
-      hasTimestamp_(false)
+StreamRecord::StreamRecord(void* value) : StreamElement(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP), timestamp_(0)
 {
     setValue(value);
 }
 
 StreamRecord::StreamRecord(void* value, long timestamp)
     : StreamElement(StreamElementTag::TAG_REC_WITH_TIMESTAMP),
-      timestamp_(timestamp),
-      hasTimestamp_(true)
+      timestamp_(timestamp)
 {
     setValue(value);
 }
 
 long StreamRecord::getTimestamp() const
 {
-    if (hasTimestamp_) {
+    if (getTag() == StreamElementTag::TAG_REC_WITH_TIMESTAMP) {
         return timestamp_;
     } else {
         return std::numeric_limits<int64_t>::min();
@@ -48,20 +41,18 @@ long StreamRecord::getTimestamp() const
 void StreamRecord::setTimestamp(long timestamp)
 {
     timestamp_ = timestamp;
-    hasTimestamp_ = true;
     setTag(StreamElementTag::TAG_REC_WITH_TIMESTAMP);
 }
 
 bool StreamRecord::hasTimestamp() const
 {
-    return hasTimestamp_;
+    return getTag() == StreamElementTag::TAG_REC_WITH_TIMESTAMP;
 }
 
 StreamRecord* StreamRecord::replace(void* value, long timestamp)
 {
     this->value_ = value;
     this->timestamp_ = timestamp;
-    this->hasTimestamp_ = true;
     setTag(StreamElementTag::TAG_REC_WITH_TIMESTAMP);
     return this;
 }
@@ -74,6 +65,5 @@ StreamRecord* StreamRecord::replace(void* value)
 
 void StreamRecord::eraseTimestamp()
 {
-    hasTimestamp_ = false;
     setTag(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP);
 }

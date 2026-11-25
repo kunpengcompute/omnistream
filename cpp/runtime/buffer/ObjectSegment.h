@@ -27,6 +27,9 @@
 #include <vector/vector.h>
 
 #include "table/data/vectorbatch/VectorBatch.h"
+#include "table/data/binary/BinaryRowData.h"
+#include "table/data/JoinedRowData.h"
+#include "basictypes/Object.h"
 #include "basictypes/SizeAwareObject.h"
 #include "core/memory/Segment.h"
 
@@ -198,6 +201,23 @@ private:
                 INFO_RELEASE("Warn: CloneObject StreamRecord hasExternalRow, which is not supported.");
                 throw std::invalid_argument("CloneObject StreamRecord hasExternalRow, which is not supported.");
             }
+            if (auto* record = dynamic_cast<StreamRecord*>(source);
+                record != nullptr && record->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+                // A binary row record must not be treated as a vector batch, its payload is a row.
+                auto* row = static_cast<BinaryRowData*>(record->getValue());
+                auto* copiedRow = row->copy();
+                StreamRecord* copiedRecord = record->hasTimestamp()
+                                                 ? new StreamRecord(copiedRow, record->getTimestamp())
+                                                 : new StreamRecord(copiedRow);
+                copiedRecord->setValueType(record->getValueType());
+                copiedRecord->setExternalRow(record->hasExternalRow());
+                copiedRecord->setTag(tag);
+                return copiedRecord;
+            }
+            if (auto* record = dynamic_cast<StreamRecord*>(source);
+                record != nullptr && record->getValueType() == RecordValueType::JOINED_ROW_DATA) {
+                throw std::invalid_argument("CloneObject requires JOINED_ROW_DATA to be materialized");
+            }
             auto* vectorBatch = static_cast<VectorBatch*>(source->getValue());
             if (vectorBatch == nullptr) {
                 INFO_RELEASE("Warn: CloneObject getValue is not VectorBatch.");
@@ -226,6 +246,28 @@ private:
             "CloneObject encountered unsupported StreamElement tag " + std::to_string(static_cast<int>(tag)));
     }
 
+    /**
+     * Deletes the payload of a record with the type it actually has. Deleting a binary row as a
+     * vector batch (or the other way round) corrupts the heap.
+     */
+    static void ReleaseRecordValue(StreamRecord* record)
+    {
+        if (record == nullptr) {
+            return;
+        }
+        void* value = record->getValue();
+        if (value == nullptr) {
+            return;
+        }
+        switch (record->getValueType()) {
+            case RecordValueType::BINARY_ROW_DATA: delete static_cast<BinaryRowData*>(value); break;
+            case RecordValueType::JOINED_ROW_DATA: delete static_cast<JoinedRowData*>(value); break;
+            case RecordValueType::VECTOR_BATCH: delete static_cast<VectorBatch*>(value); break;
+            case RecordValueType::OBJECT: delete static_cast<Object*>(value); break;
+            default: break;
+        }
+    }
+
     static void ReleaseObject(StreamElement* object)
     {
         if (object == nullptr) {
@@ -237,7 +279,7 @@ private:
             tag == StreamElementTag::VECTOR_BATCH) {
             if (auto* record = dynamic_cast<StreamRecord*>(object)) {
                 if (!record->hasExternalRow()) {
-                    delete static_cast<VectorBatch*>(record->getValue());
+                    ReleaseRecordValue(record);
                 }
                 delete record;
                 return;

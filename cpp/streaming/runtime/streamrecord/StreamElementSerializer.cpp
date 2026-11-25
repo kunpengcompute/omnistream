@@ -46,6 +46,7 @@ void* StreamElementSerializer::deserialize(DataInputView& source)
             reUsableRecord_->setValue(binaryRowData);
             reUsableRecord_->setTag(StreamElementTag::TAG_REC_WITH_TIMESTAMP);
             reUsableRecord_->setTimestamp(timestamp);
+            reUsableRecord_->setValueType(RecordValueType::BINARY_ROW_DATA);
         } else {
             Object* buffer = typeSerializer_->GetBuffer();
             typeSerializer_->deserialize(buffer, source);
@@ -53,6 +54,7 @@ void* StreamElementSerializer::deserialize(DataInputView& source)
 
             reUsableRecord_->setTag(StreamElementTag::TAG_REC_WITH_TIMESTAMP);
             reUsableRecord_->setTimestamp(timestamp);
+            reUsableRecord_->setValueType(RecordValueType::VECTOR_BATCH);
         }
 
         return reUsableRecord_;
@@ -63,10 +65,12 @@ void* StreamElementSerializer::deserialize(DataInputView& source)
         if (!isDatastream) {
             auto binaryRowData = typeSerializer_->deserialize(source);
             reUsableRecord_->setValue(binaryRowData);
+            reUsableRecord_->setValueType(RecordValueType::BINARY_ROW_DATA);
         } else {
             Object* buffer = typeSerializer_->GetBuffer();
             typeSerializer_->deserialize(buffer, source);
             reUsableRecord_->setValue(buffer);
+            reUsableRecord_->setValueType(RecordValueType::VECTOR_BATCH);
         }
         return reUsableRecord_;
     } else if (tag == static_cast<int>(StreamElementTag::TAG_WATERMARK)) {

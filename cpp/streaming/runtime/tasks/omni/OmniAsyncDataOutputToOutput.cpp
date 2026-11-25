@@ -26,6 +26,12 @@ void OmniAsyncDataOutputToOutput::emitRecord(StreamRecord* streamRecord)
         output->collect(streamRecord);
     } else {
         auto newRecord = new StreamRecord(streamRecord->getValue(), streamRecord->getTimestamp());
+        newRecord->setValueType(streamRecord->getValueType());
+        if (streamRecord->hasTimestamp()) {
+            newRecord->setTag(StreamElementTag::TAG_REC_WITH_TIMESTAMP);
+        } else {
+            newRecord->setTag(StreamElementTag::TAG_REC_WITHOUT_TIMESTAMP);
+        }
         output->collect(newRecord);
     }
 }

@@ -225,9 +225,20 @@ public:
                     if (filteredRecord == nullptr) {
                         continue;
                     }
-                    auto vectorBatch = static_cast<VectorBatch*>(filteredRecord->getValue());
-                    size_t row_cnt = vectorBatch->GetRowCount();
-                    numberOfRow += row_cnt;
+                    if (filteredRecord->getValueType() == RecordValueType::VECTOR_BATCH) {
+                        auto vectorBatch = static_cast<VectorBatch*>(filteredRecord->getValue());
+                        size_t row_cnt = vectorBatch->GetRowCount();
+                        numberOfRow += row_cnt;
+                    } else if (filteredRecord->getValueType() == RecordValueType::BINARY_ROW_DATA) {
+                        auto rowData = static_cast<BinaryRowData*>(filteredRecord->getValue());
+                        if (rowData == nullptr) {
+                            THROW_LOGIC_EXCEPTION("recevied RowData is null");
+                        }
+                        numberOfRow++;
+                    } else {
+                        LOG("Warning: cannt not casting the record");
+                        numberOfRow++;
+                    }
 
                     output->emitRecord(filteredRecord);
                 } else if (object->getTag() == StreamElementTag::TAG_WATERMARK) {
