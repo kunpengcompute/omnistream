@@ -19,17 +19,16 @@ ConsumerRecords* ConsumerRecords::EMPTY = new ConsumerRecords();
 
 namespace {
 constexpr const char* OMNI_KAFKA_MAX_POLL_RECORDS_CONFIG = "omni.kafka.consumer.max.poll.records";
-constexpr int DEFAULT_MAX_POLL_RECORDS = 100;
 
 int capMaxPollRecords(int currentValue)
 {
     if (currentValue <= 0) {
-        return DEFAULT_MAX_POLL_RECORDS;
+        return RdKafkaConsumer::DEFAULT_MAX_POLL_RECORDS;
     }
-    if (currentValue > DEFAULT_MAX_POLL_RECORDS) {
+    if (currentValue > RdKafkaConsumer::DEFAULT_MAX_POLL_RECORDS) {
         INFO_RELEASE("RdKafkaConsumer max.poll.records capped by engine default, original="
-            << currentValue << ", capped=" << DEFAULT_MAX_POLL_RECORDS);
-        return DEFAULT_MAX_POLL_RECORDS;
+            << currentValue << ", capped=" << RdKafkaConsumer::DEFAULT_MAX_POLL_RECORDS);
+        return RdKafkaConsumer::DEFAULT_MAX_POLL_RECORDS;
     }
     return currentValue;
 }
