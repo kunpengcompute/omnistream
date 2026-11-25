@@ -919,8 +919,8 @@ StreamOperator* StreamOperatorFactory::CreateCommitOp(
             const auto iter = ProducerConfig.find(element.key());
             if (iter != ProducerConfig.end() && !iter->second.empty()) {
                 std::string errorString;
-                if (producerConfig->set(iter->second, element.value().get<std::string>(), errorString)
-                    != RdKafka::Conf::CONF_OK) {
+                if (producerConfig->set(iter->second, element.value().get<std::string>(), errorString) !=
+                    RdKafka::Conf::CONF_OK) {
                     throw std::runtime_error("Kafka committer config " + element.key() + ": " + errorString);
                 }
             }

@@ -258,7 +258,10 @@ public:
         emitDownstream = false;
     }
 
-    bool hasCommitter() const { return committer != nullptr; }
+    bool hasCommitter() const
+    {
+        return committer != nullptr;
+    }
 
 private:
     void commitAndEmitCheckpoints()
