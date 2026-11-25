@@ -259,9 +259,9 @@ void OmniLocalChannelReader::setRowDataToPtr(
         reinterpret_cast<uint64_t>(valueOutputSerializer->getData());
     position += 8;
 
-    INFO_RELEASE(
-        " length is " << valueOutputSerializer->length() << " data ptr is "
-                      << reinterpret_cast<uint64_t>(valueOutputSerializer->getData()));
+    // INFO_RELEASE(
+    //     " length is " << valueOutputSerializer->length() << " data ptr is "
+    //                   << reinterpret_cast<uint64_t>(valueOutputSerializer->getData()));
 
     valueOutputBufferStatus->ownership = 0;
     delete valueOutputSerializer;
