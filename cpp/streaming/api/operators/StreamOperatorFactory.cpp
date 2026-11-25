@@ -24,6 +24,7 @@
 #include "StreamFilter.h"
 #include "StreamGroupedReduceOperator.h"
 #include "table/runtime/operators/aggregate/GroupAggFunction.h"
+#include "table/runtime/operators/aggregate/GroupTableAggregateFunction.h"
 #include "table/runtime/operators/deduplicate/RowTimeDeduplicateFunction.h"
 #include "table/runtime/operators/misc/DropUpdateBeforeOperator.h"
 #include "table/runtime/operators/deduplicate/ProcTimeDeduplicateKeepLastRowFunction.h"
@@ -210,6 +211,17 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
             op->setup();
             LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
 
+            return static_cast<OneInputStreamOperator*>(op);
+        } else if (
+            opConfig.getDescription().contains("processFunction") &&
+            opConfig.getDescription()["processFunction"] == "GroupTableAggregateFunction") {
+            GroupTableAggregateFunction* func = new GroupTableAggregateFunction(0l, opConfig.getDescription());
+            auto* op = new KeyedProcessOperator(func, chainOutput, opConfig.getDescription());
+            op->setup();
+            op->setDescription(opConfig.getDescription());
+            op->setFlinkSavepointUnsupported(
+                "GroupTableAggregateFunction v1: savepoint restore from Flink-native format is not supported yet");
+            LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
             return static_cast<OneInputStreamOperator*>(op);
         } else if (
             opConfig.getDescription().contains("processFunction") &&
@@ -574,6 +586,22 @@ StreamOperator* StreamOperatorFactory::CreateKeyedProcessOp(
         op->setup(std::move(task));
         ConfigureRankSavepoint(op, opDescriptionJSON);
         LOG("Operator Rank KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
+        return static_cast<OneInputStreamOperator*>(op);
+    } else if (
+        opDescriptionJSON.contains("processFunction") &&
+        opDescriptionJSON["processFunction"] == "GroupTableAggregateFunction") {
+        // Table aggregate (Top2 whitelist point-name dispatch). Scheme A, Flink state
+        // parity: all persistent state is the operator's accState ValueState<RowData>
+        // [first, second] -- the same shape the Flink codegen Top2 handler persists.
+        // Savepoint adaptor wiring stays marked unsupported pending the team's
+        // savepoint-adaptor review (the state shape itself is engine-compatible).
+        GroupTableAggregateFunction* func = new GroupTableAggregateFunction(0l, opDescriptionJSON);
+        auto* op = new KeyedProcessOperator(func, chainOutput, opDescriptionJSON);
+        op->setup(std::move(task));
+        op->setFlinkSavepointUnsupported(
+            "GroupTableAggregateFunction v1: savepoint restore from Flink-native format is not supported yet");
+        op->setDescription(opDescriptionJSON);
+        LOG("Operator KeyedProcessOperator address  " + std::to_string(reinterpret_cast<long>(op)));
         return static_cast<OneInputStreamOperator*>(op);
     } else if (
         opDescriptionJSON.contains("processFunction") &&

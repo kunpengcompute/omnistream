@@ -208,6 +208,14 @@ public:
     {
         getMapState()->clear();
     };
+    // The RocksDB backend caches entries() results per key, and put()/remove() do not
+    // invalidate that cache (see the WARNING on RocksdbMapStateTable::entries). Callers
+    // that alternate writes and reads MUST clear the cache before reading fresh data;
+    // the heap backend's clearEntriesCache is a no-op.
+    void clearEntriesCache()
+    {
+        getMapState()->clearEntriesCache();
+    };
 
 protected:
     virtual MapState<EK, EV>* getMapState() = 0;
