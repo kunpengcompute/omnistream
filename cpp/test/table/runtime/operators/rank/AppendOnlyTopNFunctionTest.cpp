@@ -340,6 +340,22 @@ TEST(AppendOnlyTopNMetadataTest, RankStartZeroIncludesFirstRank)
     }
 }
 
+TEST(AppendOnlyTopNMetadataTest, NegativeRankBoundsAreRejectedAsInvalidRange)
+{
+    for (const std::string range :
+         {"rankStart=-1, rankEnd=5", "rankStart=0, rankEnd=-6", "rankStart=1, rankEnd=-9223372036854775808"}) {
+        SCOPED_TRACE(range);
+        auto config = omnistream::makeRankConfig(true, true, 3);
+        config["rankRange"] = range;
+        try {
+            AppendOnlyTopNFunction<RowData*> function(config);
+            ADD_FAILURE() << "Expected invalid TopN rank range";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_STREQ(error.what(), "Invalid TopN rank range");
+        }
+    }
+}
+
 TEST(AppendOnlyTopNMetadataTest, InvalidAndOutOfRangeRankConfigurationIsRejected)
 {
     for (const std::string range :

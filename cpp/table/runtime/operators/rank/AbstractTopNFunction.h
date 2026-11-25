@@ -160,12 +160,12 @@ void AbstractTopNFunction<KeyType>::parseDescription(const nlohmann::json& jsonS
 
     // Parse rankRange (uses ConstantRankRange for fixed ranges)
     std::string rankRangeStr = jsonString.at("rankRange").get<std::string>();
-    std::regex pattern(R"(rankStart=(\d+),\s*rankEnd=(\d+))"); // Regex pattern
+    std::regex pattern(R"(rankStart=(-?\d+),\s*rankEnd=(-?\d+))"); // Regex pattern
     std::smatch match;
     if (std::regex_search(rankRangeStr, match, pattern)) {
         rankStart = std::stoll(match[1].str()); // Extract first number
         rankEnd = std::stoll(match[2].str());   // Extract second number
-        if (rankEnd < 1 || rankEnd < rankStart) {
+        if (rankStart < 0 || rankEnd < 1 || rankEnd < rankStart) {
             throw std::invalid_argument("Invalid TopN rank range");
         }
         rankRange = new ConstantRankRange(rankStart, rankEnd);
