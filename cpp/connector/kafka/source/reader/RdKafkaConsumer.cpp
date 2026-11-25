@@ -12,9 +12,59 @@
 
 #include "RdKafkaConsumer.h"
 #include <thread>
+#include <exception>
 #include "core/include/common.h"
+#include "functions/Configuration.h"
 
 ConsumerRecords* ConsumerRecords::EMPTY = new ConsumerRecords();
+
+namespace {
+constexpr const char* OMNI_KAFKA_MAX_POLL_RECORDS_CONFIG = "omni.kafka.consumer.max.poll.records";
+
+int capMaxPollRecords(int currentValue)
+{
+    if (currentValue <= 0) {
+        return RdKafkaConsumer::DEFAULT_MAX_POLL_RECORDS;
+    }
+    if (currentValue > RdKafkaConsumer::DEFAULT_MAX_POLL_RECORDS) {
+        INFO_RELEASE(
+            "RdKafkaConsumer max.poll.records capped by engine default, original="
+            << currentValue << ", capped=" << RdKafkaConsumer::DEFAULT_MAX_POLL_RECORDS);
+        return RdKafkaConsumer::DEFAULT_MAX_POLL_RECORDS;
+    }
+    return currentValue;
+}
+
+int resolveOmniMaxPollRecords(int currentValue)
+{
+    if (Configuration::TM_CONFIG == nullptr || Configuration::TM_CONFIG->getMap() == nullptr) {
+        return currentValue;
+    }
+
+    auto* value =
+        reinterpret_cast<String*>(Configuration::TM_CONFIG->getMap()->get(OMNI_KAFKA_MAX_POLL_RECORDS_CONFIG));
+    if (value == nullptr || value->getSize() == 0) {
+        return currentValue;
+    }
+
+    try {
+        int parsed = std::stoi(std::string(value->getData(), value->getSize()));
+        if (parsed <= 0) {
+            LOG("Invalid " << OMNI_KAFKA_MAX_POLL_RECORDS_CONFIG << "="
+                           << std::string(value->getData(), value->getSize()) << ", use current max.poll.records "
+                           << currentValue);
+            return currentValue;
+        }
+        INFO_RELEASE(
+            "RdKafkaConsumer max.poll.records overridden by " << OMNI_KAFKA_MAX_POLL_RECORDS_CONFIG << "=" << parsed);
+        return parsed;
+    } catch (const std::exception& e) {
+        LOG("Invalid " << OMNI_KAFKA_MAX_POLL_RECORDS_CONFIG << "=" << std::string(value->getData(), value->getSize())
+                       << ", use current max.poll.records " << currentValue << ", error: " << e.what());
+        return currentValue;
+    }
+}
+} // namespace
 
 RdKafkaConsumer::RdKafkaConsumer(const std::unordered_map<std::string, std::string>& config)
 {
@@ -34,6 +84,9 @@ RdKafkaConsumer::RdKafkaConsumer(const std::unordered_map<std::string, std::stri
     }
 
     // 创建消费者实例
+    batch_size_ = resolveOmniMaxPollRecords(capMaxPollRecords(batch_size_));
+    INFO_RELEASE("RdKafkaConsumer max.poll.records effective value=" << batch_size_);
+
     std::string errstr;
     consumer_ = RdKafka::KafkaConsumer::create(conf, errstr);
     if (!consumer_) {

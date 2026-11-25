@@ -201,6 +201,8 @@ private:
 
 class RdKafkaConsumer {
 public:
+    static constexpr int DEFAULT_MAX_POLL_RECORDS = 1000;
+
     explicit RdKafkaConsumer(const std::unordered_map<std::string, std::string>& config);
     ~RdKafkaConsumer();
 
@@ -238,7 +240,7 @@ public:
 private:
     RdKafka::KafkaConsumer* consumer_;
     std::string topic_;
-    int batch_size_ = 100000; // 默认批量大小
+    int batch_size_ = DEFAULT_MAX_POLL_RECORDS;
     bool closed_ = false;
 };
 
