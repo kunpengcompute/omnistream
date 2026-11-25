@@ -273,8 +273,8 @@ private:
             return DEFAULT_BATCH_SIZE;
         }
 
-        auto* value = reinterpret_cast<String*>(
-            Configuration::TM_CONFIG->getMap()->get(SOURCE_READER_BATCH_SIZE_CONFIG));
+        auto* value =
+            reinterpret_cast<String*>(Configuration::TM_CONFIG->getMap()->get(SOURCE_READER_BATCH_SIZE_CONFIG));
         if (value == nullptr || value->getSize() == 0) {
             return DEFAULT_BATCH_SIZE;
         }
@@ -285,12 +285,12 @@ private:
                 LOG("Invalid " << SOURCE_READER_BATCH_SIZE_CONFIG << "=0, use default " << DEFAULT_BATCH_SIZE);
                 return DEFAULT_BATCH_SIZE;
             }
-            INFO_RELEASE("SourceReaderBase batchSize configured by " << SOURCE_READER_BATCH_SIZE_CONFIG << "=" << parsed);
+            INFO_RELEASE(
+                "SourceReaderBase batchSize configured by " << SOURCE_READER_BATCH_SIZE_CONFIG << "=" << parsed);
             return parsed;
         } catch (const std::exception& e) {
-            LOG("Invalid " << SOURCE_READER_BATCH_SIZE_CONFIG << "="
-                << std::string(value->getData(), value->getSize()) << ", use default "
-                << DEFAULT_BATCH_SIZE << ", error: " << e.what());
+            LOG("Invalid " << SOURCE_READER_BATCH_SIZE_CONFIG << "=" << std::string(value->getData(), value->getSize())
+                           << ", use default " << DEFAULT_BATCH_SIZE << ", error: " << e.what());
             return DEFAULT_BATCH_SIZE;
         }
     }
