@@ -321,10 +321,29 @@ TEST(AppendOnlyTopNHeapReleaseTest, RawCacheIsCreatedOnFirstRead)
     EXPECT_EQ(static_cast<BinaryRawValueData*>(row.getRawValue(0))->toBytes(), payload);
 }
 
+TEST(AppendOnlyTopNMetadataTest, RankStartZeroIncludesFirstRank)
+{
+    for (const std::string backend : {"HashMapStateBackend", "EmbeddedRocksDBStateBackend"}) {
+        SCOPED_TRACE(backend);
+        auto config = omnistream::makeRankConfig(true, true, 2);
+        config["rankRange"] = "rankStart=0, rankEnd=2";
+        BoundaryOutput output;
+        auto* op = omnistream::openAppendOnlyTopN(config, &output, true, backend, true);
+        op->processBatch(new StreamRecord(omnistream::makeLongBatch({0, 0, 0}, {20, 30, 10}, {2, 3, 1})));
+        ASSERT_EQ(output.rows.size(), 2u);
+        EXPECT_EQ(std::get<3>(output.rows[0]), 3);
+        EXPECT_EQ(std::get<4>(output.rows[0]), 1);
+        EXPECT_EQ(std::get<3>(output.rows[1]), 2);
+        EXPECT_EQ(std::get<4>(output.rows[1]), 2);
+        op->close();
+        delete op;
+    }
+}
+
 TEST(AppendOnlyTopNMetadataTest, InvalidAndOutOfRangeRankConfigurationIsRejected)
 {
     for (const std::string range :
-         {"rankStart=0, rankEnd=5", "rankStart=6, rankEnd=5", "rankStart=1, rankEnd=9223372036854775808"}) {
+         {"rankStart=0, rankEnd=0", "rankStart=6, rankEnd=5", "rankStart=1, rankEnd=9223372036854775808"}) {
         auto config = omnistream::makeRankConfig(true, true, 3);
         config["rankRange"] = range;
         EXPECT_THROW(AppendOnlyTopNFunction<RowData*> function(config), std::exception) << range;

@@ -165,7 +165,7 @@ void AbstractTopNFunction<KeyType>::parseDescription(const nlohmann::json& jsonS
     if (std::regex_search(rankRangeStr, match, pattern)) {
         rankStart = std::stoll(match[1].str()); // Extract first number
         rankEnd = std::stoll(match[2].str());   // Extract second number
-        if (rankStart < 1 || rankEnd < rankStart) {
+        if (rankEnd < 1 || rankEnd < rankStart) {
             throw std::invalid_argument("Invalid TopN rank range");
         }
         rankRange = new ConstantRankRange(rankStart, rankEnd);
