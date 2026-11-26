@@ -174,6 +174,8 @@ private:
     MapState<RowData*, RowList*>* dataState = nullptr;
     omnistream::StateType stateType_ = omnistream::StateType::UNKNOWN;
     KeySelector<K> partitionKeySelector;
+    // TODO: metadata_ 随任务处理的不同分区累计增长，长时间运行可能造成内存压力。
+    // 后续增加容量限制和淘汰机制，并同步适配 knownEmptyStart_ 的缓存未命中判断；充分测试后再合入。
     std::unordered_map<int64_t, PartitionMeta> metadata_;
     bool cacheRequested_;
     bool batchWrites_;

@@ -23,6 +23,9 @@
 #include "table/data/binary/BinaryRowData.h"
 #include "table/data/vectorbatch/VectorBatch.h"
 
+// 当前计算逻辑仅支持单个 LONG 排序字段降序。
+// 若 AppendOnlyTopN 扩展到多字段或不同类型（包括混合类型）的排序比较，
+// 必须同步适配本 Helper 的排序值表示、比较、分组和状态键读写，否则计算结果会出错。
 template <typename K>
 struct AppendOnlyTopNHelper {
     using RowList = std::vector<RowData*>;
