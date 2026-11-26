@@ -97,7 +97,9 @@ public:
     void close() override
     {
         AbstractStreamOperator<K>::close();
-        // todo: should the udf be closed?
+        if (auto* richFunction = dynamic_cast<RichFunction*>(userFunction)) {
+            richFunction->close();
+        }
     }
 
     void initializeState(StateInitializationContextImpl* context) override

@@ -48,6 +48,14 @@ public:
         return keyedStateStore->getStateType();
     }
 
+    // Only a fresh task with a state manager and no restore may skip the
+    // first backend lookup. Unknown contexts must rebuild derived metadata.
+    bool startsWithEmptyKeyedState() const
+    {
+        auto manager = environment == nullptr ? nullptr : environment->getTaskStateManager();
+        return manager != nullptr && !manager->hasJobManagerTaskRestore();
+    }
+
     // This does not exist in Flink, flink send environment from constructor
     void setEnvironment(omnistream::EnvironmentV2* env)
     {

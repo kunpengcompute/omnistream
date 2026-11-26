@@ -64,6 +64,20 @@ public:
 
     std::optional<UV> get(const UK& userKey) override;
 
+    // Borrow the backend-owned key, so callers replacing/removing pointer
+    // values can preserve its ownership without scanning the map.
+    std::optional<UK> getStoredKey(const UK& userKey)
+    {
+        auto* userMap = stateTable->get(currentNamespace);
+        if (userMap != nullptr) {
+            auto it = userMap->find(userKey);
+            if (it != userMap->end()) {
+                return it->first;
+            }
+        }
+        return std::nullopt;
+    }
+
     // for DataStream used
     Object* Get(Object* userKey) override;
 

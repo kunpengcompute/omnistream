@@ -94,23 +94,23 @@ protected:
 
     long hitCount = 0L;
     long requestCount = 0L;
-    void collectInsert(RowData* inputRow, int rank, int64_t timestamp);
+    void collectInsert(RowData* inputRow, int64_t rank, int64_t timestamp);
     void collectInsert(RowData* inputRow);
-    void collectDelete(RowData* inputRow, int rank, int64_t timestamp);
+    void collectDelete(RowData* inputRow, int64_t rank, int64_t timestamp);
     void collectDelete(RowData* inputRow);
-    void collectUpdateBefore(RowData* inputRow, int rank, int64_t timestamp);
-    void collectUpdateAfter(RowData* inputRow, int rank, int64_t timestamp);
+    void collectUpdateBefore(RowData* inputRow, int64_t rank, int64_t timestamp);
+    void collectUpdateAfter(RowData* inputRow, int64_t rank, int64_t timestamp);
     void collectOutputBatch(TimestampedCollector out, omnistream::VectorBatch* outputBatch);
-    bool isInRankRange(int rank) const;
-    inline bool isInRankEnd(int rank) const
+    bool isInRankRange(int64_t rank) const;
+    inline bool isInRankEnd(int64_t rank) const
     {
         return rank <= rankEnd;
     }
-    long getDefaultTopNSize()
+    int64_t getDefaultTopNSize()
     {
         return isConstantRankEnd ? rankEnd : DEFAULT_TOPN_SIZE;
     }
-    long initRankEnd(RowData* row)
+    int64_t initRankEnd(RowData* row)
     {
         if (isConstantRankEnd) {
             return rankEnd;
@@ -135,9 +135,9 @@ protected:
 protected:
     bool isConstantRankEnd = true;
     int rankEndIndex;
-    long rankStart;
-    long rankEnd;
-    static constexpr long DEFAULT_TOPN_SIZE = 100;
+    int64_t rankStart;
+    int64_t rankEnd;
+    static constexpr int64_t DEFAULT_TOPN_SIZE = 100;
 };
 
 template <typename KeyType>
@@ -162,11 +162,14 @@ void AbstractTopNFunction<KeyType>::parseDescription(const nlohmann::json& jsonS
 
     // Parse rankRange (uses ConstantRankRange for fixed ranges)
     std::string rankRangeStr = jsonString.at("rankRange").get<std::string>();
-    std::regex pattern(R"(rankStart=(\d+),\s*rankEnd=(\d+))"); // Regex pattern
+    std::regex pattern(R"(rankStart=(-?\d+),\s*rankEnd=(-?\d+))"); // Regex pattern
     std::smatch match;
     if (std::regex_search(rankRangeStr, match, pattern)) {
-        rankStart = std::stoi(match[1].str()); // Extract first number
-        rankEnd = std::stoi(match[2].str());   // Extract second number
+        rankStart = std::stoll(match[1].str()); // Extract first number
+        rankEnd = std::stoll(match[2].str());   // Extract second number
+        if (rankStart < 0 || rankEnd < 1 || rankEnd < rankStart) {
+            throw std::invalid_argument("Invalid TopN rank range");
+        }
         rankRange = new ConstantRankRange(rankStart, rankEnd);
     } else {
         throw std::runtime_error("Pattern not found!");
@@ -196,7 +199,7 @@ void AbstractTopNFunction<KeyType>::parseDescription(const nlohmann::json& jsonS
 }
 
 template <typename KeyType>
-void AbstractTopNFunction<KeyType>::collectInsert(RowData* inputRow, int rank, int64_t timestamp)
+void AbstractTopNFunction<KeyType>::collectInsert(RowData* inputRow, int64_t rank, int64_t timestamp)
 {
     collectedRows.push_back(inputRow);
     collectedRanks.push_back(rank);
@@ -213,7 +216,7 @@ void AbstractTopNFunction<KeyType>::collectInsert(RowData* inputRow)
 }
 
 template <typename KeyType>
-void AbstractTopNFunction<KeyType>::collectDelete(RowData* inputRow, int rank, int64_t timestamp)
+void AbstractTopNFunction<KeyType>::collectDelete(RowData* inputRow, int64_t rank, int64_t timestamp)
 {
     // Placeholder for delete logic
     LOG("rank " + std::to_string(rank));
@@ -238,7 +241,7 @@ void AbstractTopNFunction<KeyType>::collectDelete(RowData* inputRow)
 }
 
 template <typename KeyType>
-void AbstractTopNFunction<KeyType>::collectUpdateBefore(RowData* inputRow, int rank, int64_t timestamp)
+void AbstractTopNFunction<KeyType>::collectUpdateBefore(RowData* inputRow, int64_t rank, int64_t timestamp)
 {
     LOG("rank " + std::to_string(rank));
     if (generateUpdateBefore && isInRankRange(rank)) {
@@ -250,7 +253,7 @@ void AbstractTopNFunction<KeyType>::collectUpdateBefore(RowData* inputRow, int r
 }
 
 template <typename KeyType>
-void AbstractTopNFunction<KeyType>::collectUpdateAfter(RowData* inputRow, int rank, int64_t timestamp)
+void AbstractTopNFunction<KeyType>::collectUpdateAfter(RowData* inputRow, int64_t rank, int64_t timestamp)
 {
     LOG("rank " + std::to_string(rank));
     if (isInRankRange(rank)) {
@@ -262,7 +265,7 @@ void AbstractTopNFunction<KeyType>::collectUpdateAfter(RowData* inputRow, int ra
 }
 
 template <typename KeyType>
-bool AbstractTopNFunction<KeyType>::isInRankRange(int rank) const
+bool AbstractTopNFunction<KeyType>::isInRankRange(int64_t rank) const
 {
     return rank >= rankStart && rank <= rankEnd;
 }
