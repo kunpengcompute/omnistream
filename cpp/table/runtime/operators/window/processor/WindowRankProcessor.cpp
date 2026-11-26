@@ -175,9 +175,13 @@ bool WindowRankProcessor::processBatch(omnistream::VectorBatch* vectorbatch)
         pendings.push_back(std::move(pending));
     }
 
-    // Stage 2: group by (key, window) so each group touches the state once.
-    // Grouping is by key content (rows from the same key compare equal by
-    // fields, not by pointer).
+    // Stage 2: group the rows by (key content, window). This stage only
+    // partitions the pending rows; it must not touch the state — on RocksDB the
+    // per-key entries cache is dropped on every load (the cache is keyed by
+    // current key only), so loading a later group would free the cached map a
+    // still-open earlier group is holding. All state access happens in stage 3,
+    // where each group's load → append → flush lifecycle closes before the next
+    // group starts.
     std::unordered_map<std::string, size_t> groupIndex;
     std::vector<WindowGroup> groups;
     for (auto& pending : pendings) {
@@ -198,19 +202,21 @@ bool WindowRankProcessor::processBatch(omnistream::VectorBatch* vectorbatch)
             groupIndex.emplace(groupKey, groups.size() - 1);
             it = groupIndex.find(groupKey);
         }
-        WindowGroup& group = groups[it->second];
-        // The state access below resolves the current key from the state
-        // backend's key context, so switch it before touching the state.
-        stateBackend_->setCurrentKey(group.key);
-        appendRowToGroup(group, pending);
+        groups[it->second].pendings.push_back(std::move(pending));
     }
 
-    // Stage 3: write back and register timers (Flink registers the event-time
-    // window timer from TopNRecordsCombiner.combine; registering it here on the
-    // first touch of the window is equivalent, the timer service dedups).
+    // Stage 3: process each group as a closed unit — the state access below
+    // resolves the current key from the state backend's key context, so switch
+    // it before touching the state, append all rows, flush to RocksDB (which
+    // releases the cached map), then register the window timer. Flink registers
+    // the timer from TopNRecordsCombiner.combine; registering it here on the
+    // first touch of the window is equivalent, the timer service dedups.
     for (auto& group : groups) {
-        flushGroup(group);
         stateBackend_->setCurrentKey(group.key);
+        for (auto& pending : group.pendings) {
+            appendRowToGroup(group, pending);
+        }
+        flushGroup(group);
         internalTimerService_->registerEventTimeTimer(
             group.windowEnd, TimeWindowUtil::toEpochMillsForTimer(group.windowEnd - 1, shiftTimeZone_));
     }
@@ -280,8 +286,12 @@ void WindowRankProcessor::flushGroup(WindowGroup& group)
             windowState_->put(group.windowEnd, entry.first, entry.second);
         }
     }
-    // Rows are serialized into RocksDB; free the in-memory copies. Keys are
-    // owned by the containing map and freed with it (delete or cache clear).
+    // Rows are serialized into RocksDB; free the in-memory copies. The sort
+    // keys (RowData*) are NOT freed here on purpose: both the owned map's
+    // `delete` and the borrowed cache's clearEntriesCache() run the emhash7
+    // HashMap destructor, which deletes every pointer key (emhash7.hpp
+    // ~HashMap: `else if constexpr (std::is_pointer_v<KeyT>) ... delete
+    // it->first`), so freeing them here would double-delete.
     for (auto& entry : *group.map) {
         if (entry.second != nullptr) {
             for (RowData* row : *entry.second) {

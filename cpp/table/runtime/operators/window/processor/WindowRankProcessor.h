@@ -81,13 +81,18 @@ private:
         RowData* row;     // full input row copy (BinaryRowData)
     };
 
-    // Per (key, window) group loaded once per batch.
+    // Per (key, window) group. On RocksDB the map must only be alive while the
+    // group is being processed: loadGroupMap() drops the per-key entries cache
+    // (keyed by current key only), so the next group's load would free this
+    // group's cached map. That is why processBatch appends and flushes each
+    // group as one closed unit instead of loading all groups first.
     struct WindowGroup {
         KeyType key;
         int64_t windowEnd = 0;
         StateMap* map = nullptr; // HEAP: live map owned by the state table;
                                  // ROCKSDB: entries() copy (borrowed) or owned map.
         bool mapOwned = false;   // ROCKSDB only: true when allocated by us (state was empty)
+        std::vector<PendingRow> pendings; // rows of this group, staged before the state access
     };
 
     void loadGroupMap(WindowGroup& group);
