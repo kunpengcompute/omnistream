@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <thread>
 #include <map>
+#include "common.h"
 #include "connector/kafka/source/reader/RecordsWithSplitIds.h"
 #include "connector/kafka/source/reader/synchronization/FutureCompletingBlockingQueue.h"
 #include "core/api/connector/source/SourceSplit.h"
@@ -77,11 +78,21 @@ public:
             lastRecords = splitReader->fetch();
         }
         if (!IsWakenUp()) {
-            if (elementsQueue->put(fetcherIndex, lastRecords)) {
-                if (!lastRecords->finishedSplits().empty()) {
-                    splitFinishedCallback(lastRecords->finishedSplits());
+            // 此处原本会无条件调用 elementsQueue->put, 但是为了防止 lastRecords->finishedSplits
+            // 解引用空指针同时不影响原本语义 , 并且节约一次 finishedSplits 初始化, 此处会判断 lastRecords 是否为
+            // nullptr 再重复调用 elementsQueue->put
+            if (lastRecords == nullptr) {
+                WARN_RELEASE("FetchTask::fetch() : lastRecords is nullptr");
+                elementsQueue->put(fetcherIndex, lastRecords);
+            } else {
+                // copy the finishedSplits
+                const auto finishedSplits = lastRecords->finishedSplits();
+                if (elementsQueue->put(fetcherIndex, lastRecords)) {
+                    lastRecords = nullptr;
+                    if (!finishedSplits.empty()) {
+                        splitFinishedCallback(finishedSplits);
+                    }
                 }
-                lastRecords = nullptr;
             }
         }
     }
