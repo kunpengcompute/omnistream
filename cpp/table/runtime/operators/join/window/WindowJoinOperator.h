@@ -72,7 +72,9 @@ inline double getRowValue<double>(RowData* row, int colIdx)
 template <>
 inline bool getRowValue<bool>(RowData* row, int colIdx)
 {
-    return *row->getInt(colIdx) != 0;
+    // Boolean fields are stored as a single byte (BinaryRowData::getBool). Reading them through
+    // getInt() would read 4 bytes and may consume padding/adjacent data.
+    return *row->getBool(colIdx);
 }
 template <>
 inline omniruntime::type::Decimal128 getRowValue<omniruntime::type::Decimal128>(RowData* row, int colIdx)
@@ -87,11 +89,16 @@ inline void extractRowValueToFilterArray(
     int64_t* vals,
     int32_t* lengths,
     uint8_t* nulls,
-    omniruntime::type::DataTypeId typeId)
+    omniruntime::type::DataTypeId typeId,
+    int64_t nullValueAddress)
 {
     if (row->isNullAt(rowColIdx)) {
+        // The JIT filter unconditionally loads the value stored at the address in `vals`
+        // before applying the null flag, so null columns must still reference readable
+        // memory. Writing a null pointer here would make that load fault; point at a
+        // zeroed scratch slot instead and let the null flag mask the value out.
         nulls[filterColIdx] = 1;
-        vals[filterColIdx] = 0;
+        vals[filterColIdx] = nullValueAddress;
         lengths[filterColIdx] = 0;
         return;
     }
@@ -104,6 +111,7 @@ inline void extractRowValueToFilterArray(
             vals[filterColIdx] = reinterpret_cast<int64_t>(row->getInt(rowColIdx));
             break;
         case omniruntime::type::DataTypeId::OMNI_LONG:
+        case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
         case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
         case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
         case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
@@ -114,7 +122,12 @@ inline void extractRowValueToFilterArray(
             break;
         }
         case omniruntime::type::DataTypeId::OMNI_BOOLEAN:
-            vals[filterColIdx] = reinterpret_cast<int64_t>(row->getInt(rowColIdx));
+            // Boolean fields are stored as a single byte; SimpleFilterCodeGen loads i1 from this
+            // address (GetPtrTypeFromInt(OMNI_BOOLEAN) == i1*), so marshal the bool pointer.
+            // The scalar JIT evaluates BOOLEAN comparisons natively
+            // (ExpressionCodeGen::Visit(const BinaryExpr&), between the OR and OMNI_BYTE
+            // branches), so BOOLEAN non-equi conditions do not fall back to Flink.
+            vals[filterColIdx] = reinterpret_cast<int64_t>(row->getBool(rowColIdx));
             break;
         case omniruntime::type::DataTypeId::OMNI_CHAR:
         case omniruntime::type::DataTypeId::OMNI_VARCHAR: {
@@ -604,6 +617,7 @@ void WindowJoinOperator<KeyType>::BuildInnerLeft(
                 insertLeft<int32_t>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
+            case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
@@ -645,6 +659,7 @@ void WindowJoinOperator<KeyType>::BuildInnerRight(
                 insertRight<int32_t>(colIdx, leftElements, rightElements, outputBatch, true, rightMajor);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
+            case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
@@ -693,6 +708,7 @@ void WindowJoinOperator<KeyType>::buildRightNull(
                 insertLeft<int32_t>(colIdx, leftElements, nullptr, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
+            case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
@@ -738,6 +754,7 @@ void WindowJoinOperator<KeyType>::buildLeftNull(
                 insertRight<int32_t>(colIdx, nullptr, rightElements, outputBatch, false);
                 break;
             case omniruntime::type::DataTypeId::OMNI_LONG:
+            case omniruntime::type::DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
             case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
@@ -1015,8 +1032,21 @@ template <typename KeyType>
     if (isNonEquiCondition) {
         auto filter = description["nonEquiCondition"];
         Expr* jExpr = JSONParser::ParseJSON(filter);
+        if (jExpr == nullptr) {
+            // Validation in OmniAdaptor should have fallen back to Flink before reaching here.
+            // Fail loudly instead of dereferencing a null Expr if the validate/native capability
+            // sets ever drift apart again.
+            THROW_LOGIC_EXCEPTION(
+                "Failed to parse WindowJoin non-equi condition: the expression is not supported "
+                "by the native JIT");
+        }
         SimpleFilterCodeGen* filterCodegen = new SimpleFilterCodeGen("nonEquiCondition", *jExpr, nullptr);
         int64_t fAddr = filterCodegen->GetFunction();
+        if (fAddr == 0) {
+            THROW_LOGIC_EXCEPTION(
+                "Failed to generate WindowJoin non-equi filter: the expression is not supported "
+                "by the native JIT");
+        }
         void* refFunc = &fAddr;
         return *static_cast<::FilterFunc*>(refFunc);
     }
@@ -1026,16 +1056,18 @@ template <typename KeyType>
 template <typename KeyType>
 void WindowJoinOperator<KeyType>::getAllColRefs(nlohmann::json& config)
 {
-    if (config["exprType"] == "FIELD_REFERENCE") {
-        colRefsForNonEquiCondition.emplace(config["colVal"]);
-    }
-
-    if (config.contains("right")) {
-        getAllColRefs(config["right"]);
-    }
-
-    if (config.contains("left")) {
-        getAllColRefs(config["left"]);
+    if (config.is_object()) {
+        if (config.contains("exprType") && config["exprType"] == "FIELD_REFERENCE" &&
+            config.contains("colVal")) {
+            colRefsForNonEquiCondition.emplace(config["colVal"]);
+        }
+        for (auto& item : config.items()) {
+            getAllColRefs(item.value());
+        }
+    } else if (config.is_array()) {
+        for (auto& item : config) {
+            getAllColRefs(item);
+        }
     }
 }
 
@@ -1049,18 +1081,24 @@ bool WindowJoinOperator<KeyType>::filter(RowData* leftRow, RowData* rightRow)
     std::vector<int64_t> vals(totalNumOfCols, 0);
     std::vector<int32_t> lengths(totalNumOfCols, 0);
     std::vector<uint8_t> nulls(totalNumOfCols, 0);
-    bool resultBool = false;
+    bool resultIsNull = false;
+    // Valid readable storage for null operands. 16-byte alignment keeps the JIT's i128 load
+    // for DECIMAL128 safe, and the zero content is discarded by the null flag anyway.
+    alignas(16) uint64_t nullScratch[2] = {0, 0};
+    const int64_t nullValueAddress = reinterpret_cast<int64_t>(nullScratch);
 
     const int leftColsCount = static_cast<int>(leftTypes.size());
 
     // Populate vals, lengths and nulls directly from RowData
     for (int col : colRefsForNonEquiCondition) {
         if (col < leftColsCount) {
-            extractRowValueToFilterArray(leftRow, col, col, vals.data(), lengths.data(), nulls.data(), leftTypes[col]);
+            extractRowValueToFilterArray(
+                leftRow, col, col, vals.data(), lengths.data(), nulls.data(), leftTypes[col], nullValueAddress);
         } else {
             int rightColIdx = col - leftColsCount;
             extractRowValueToFilterArray(
-                rightRow, rightColIdx, col, vals.data(), lengths.data(), nulls.data(), rightTypes[rightColIdx]);
+                rightRow, rightColIdx, col, vals.data(), lengths.data(), nulls.data(), rightTypes[rightColIdx],
+                nullValueAddress);
         }
     }
 
@@ -1069,11 +1107,16 @@ bool WindowJoinOperator<KeyType>::filter(RowData* leftRow, RowData* rightRow)
         vals.data(),
         reinterpret_cast<bool*>(nulls.data()),
         lengths.data(),
-        &resultBool,
+        &resultIsNull,
         nullptr,
         reinterpret_cast<int64_t>(&context));
 
-    return result;
+    // Flink initializes the generated join-condition result to its default value (false for a
+    // boolean) and only evaluates the body when all operands are non-null. A top-level UNKNOWN
+    // therefore never satisfies the ON clause. The JIT helper already folds null into the data
+    // term for comparisons, but NOT over a null operand can produce data=true with the null flag
+    // set, so fold the top-level null flag in here to keep ON semantics aligned with Flink.
+    return result && !resultIsNull;
 }
 
 template <typename KeyType>
