@@ -88,7 +88,7 @@ OmniStream Flink Native化特性支持的算子、表达式、函数如[**表 2*
 
 支持的数据传输对象包括Long、String和Tuple2<String, Long\>。
 
-支持的依赖类及接口如[**表 1** 支持的表达式列表](#支持的表达式列表_1)所示，其余约束请参见[UDF翻译工具用户指南](https://gitcode.com/openeuler/docs/blob/stable-24.03_LTS_SP2/docs/zh/server/development/unt/unt_guide.md)。环境配置不同可能会导致支持的表达式略有变化，如有差异，请联系华为一线工程师确认。
+支持的依赖类及接口如[**表 1** 支持的表达式列表](#支持的表达式列表_1)所示，其余约束请参见[UDF翻译工具用户指南](https://gitcode.com/openeuler/docs/blob/stable-24.03_LTS_SP2/docs/zh/server/development/unt/unt_guide.md)。环境配置不同可能会导致支持的表达式略有变化，如有差异，可通过提交issue反馈问题。
 
 **表 1** 支持的表达式列表<a id="支持的表达式列表_1"></a>
 
