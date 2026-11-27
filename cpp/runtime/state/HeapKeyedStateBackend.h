@@ -158,10 +158,18 @@ public:
                             stateTablePtr);
                     delete stateTable;
                 } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_LIST_BK) {
-                    auto stateTable = reinterpret_cast<
-                        CopyOnWriteStateTable<K, VoidNamespace, emhash7::HashMap<RowData*, std::vector<RowData*>*>*>*>(
-                        stateTablePtr);
-                    delete stateTable;
+                    if (nsId == BackendDataType::BIGINT_BK) {
+                        // Window rank "window_rank": MapState<RowData, List<RowData>>
+                        // partitioned by the window-end namespace.
+                        auto stateTable = reinterpret_cast<CopyOnWriteStateTable<
+                            K, int64_t, emhash7::HashMap<RowData*, std::vector<RowData*>*>*>*>(stateTablePtr);
+                        delete stateTable;
+                    } else {
+                        auto stateTable = reinterpret_cast<
+                            CopyOnWriteStateTable<K, VoidNamespace, emhash7::HashMap<RowData*, std::vector<RowData*>*>*>*>(
+                            stateTablePtr);
+                        delete stateTable;
+                    }
                 } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_INT_PAIR_BK) {
                     auto stateTable = reinterpret_cast<
                         CopyOnWriteStateTable<K, VoidNamespace, emhash7::HashMap<RowData*, RowDataIntPair*>*>*>(
@@ -491,6 +499,14 @@ uintptr_t HeapKeyedStateBackend<K>::createOrUpdateInternalState(
             "stateDescType is StateDescriptor::Type::MAP " << ", keyId " << keyId << " , value id " << valueId);
 
         if (namespaceSerializer->getBackendId() != BackendDataType::VOID_NAMESPACE_BK) {
+            // Window rank: MapState<RowData sortKey, List<RowData>> partitioned by the
+            // window-end namespace (LongSerializer), mirroring Flink's
+            // WindowMapState<Long, List<RowData>> in WindowRankProcessor.
+            if (namespaceSerializer->getBackendId() == BackendDataType::BIGINT_BK &&
+                keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_LIST_BK) {
+                return (uintptr_t)createOrUpdateInternalMapState<int64_t, RowData*, std::vector<RowData*>*>(
+                    namespaceSerializer, stateDesc);
+            }
             NOT_IMPL_EXCEPTION;
         }
         //<N, UK, UV>

@@ -53,6 +53,7 @@
 #include "table/runtime/operators/overaggregate/ProcTimeUnboundedPrecedingFunction.h"
 #include "table/runtime/operators/overaggregate/ProcTimeRowsBoundedPrecedingFunction.h"
 #include "table/runtime/operators/window/processor/AbstractWindowAggProcessor.h"
+#include "table/runtime/operators/window/processor/WindowRankProcessor.h"
 #include "table/runtime/operators/rank/FastTop1Function.h"
 #include "table/runtime/operators/rank/UpdatableTopNFunction.h"
 #include "table/runtime/operators/join/window/InnerJoinOperator.h"
@@ -399,6 +400,19 @@ StreamOperator* StreamOperatorFactory::createOperatorAndCollector(
         return static_cast<OneInputStreamOperator*>(op);
     } else if (uniqueName == OPERATOR_NAME_GLOBAL_WINDOW_AGG) {
         const auto description = opConfig.getDescription();
+        if (description.contains("isWindowRank") && description["isWindowRank"].get<bool>()) {
+            // Window TVF Top-N shares the SlicingWindowOperator TDD id with window
+            // aggregation; the adapter overlay marks it with isWindowRank.
+            auto processor = std::make_unique<WindowRankProcessor>(description, chainOutput);
+            auto* op = new SlicingWindowOperator<std::shared_ptr<RowData>, int64_t>(std::move(processor), description);
+            op->setup();
+            op->setFlinkSavepointUnsupported(
+                "WindowRank native 'window_rank' MapState<RowData, List<RowData>> serialization is not "
+                "byte-compatible with the Flink state layout");
+            LOG("Operator SlicingWindowOperator (window-rank) address  " +
+                std::to_string(reinterpret_cast<long>(op)));
+            return static_cast<OneInputStreamOperator*>(op);
+        }
         auto processor = std::make_unique<AbstractWindowAggProcessor>(description, chainOutput);
         auto* op = new SlicingWindowOperator<std::shared_ptr<RowData>, int64_t>(std::move(processor), description);
         op->setup();
@@ -604,14 +618,27 @@ StreamOperator* StreamOperatorFactory::CreateGlobalWindowAggOp(
 {
     auto description = opConfig.getDescription();
     nlohmann::json opDescriptionJSON = nlohmann::json::parse(description);
+    auto processingTimeService = task->createProcessingTimeService();
+    if (opDescriptionJSON.contains("isWindowRank") && opDescriptionJSON["isWindowRank"].get<bool>()) {
+        // Window TVF Top-N shares the SlicingWindowOperator TDD id with window
+        // aggregation; the adapter overlay marks it with isWindowRank.
+        auto processor = std::make_unique<WindowRankProcessor>(opDescriptionJSON, chainOutput);
+        auto* op = new SlicingWindowOperator<std::shared_ptr<RowData>, int64_t>(std::move(processor), opDescriptionJSON);
+        op->setProcessingTimeService(processingTimeService);
+        op->setup(std::move(task));
+        op->setFlinkSavepointUnsupported(
+            "WindowRank native 'window_rank' MapState<RowData, List<RowData>> serialization is not "
+            "byte-compatible with the Flink state layout");
+        LOG("Operator SlicingWindowOperator (window-rank) address  " + std::to_string(reinterpret_cast<long>(op)));
+        return static_cast<OneInputStreamOperator*>(op);
+    }
     auto processor = std::make_unique<AbstractWindowAggProcessor>(opDescriptionJSON, chainOutput);
     auto* op = new SlicingWindowOperator<std::shared_ptr<RowData>, int64_t>(std::move(processor), opDescriptionJSON);
-    auto processingTimeService = task->createProcessingTimeService();
     op->setProcessingTimeService(processingTimeService);
     op->setup(std::move(task));
     configureSavepoint(
         op, "SlicingWindowAgg", opDescriptionJSON, WindowAggSavepointCompatibility::forSlicing(opDescriptionJSON));
-    LOG("Operator SlicingWindowOperator address " + std::to_string(reinterpret_cast<long>(op)));
+    LOG("Operator SlicingWindowOperator address  " + std::to_string(reinterpret_cast<long>(op)));
     return static_cast<OneInputStreamOperator*>(op);
 }
 

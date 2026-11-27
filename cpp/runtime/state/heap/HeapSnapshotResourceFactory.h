@@ -353,12 +353,23 @@ private:
                             std::make_unique<HeapSingleStateIterator<K, VoidNamespace, S>>(
                                 table, kvStateId, preparedData.keyGroupPrefixBytes));
                     } else if (keyId == BackendDataType::ROW_BK && valueId == BackendDataType::ROW_LIST_BK) {
-                        using S = emhash7::HashMap<RowData*, std::vector<RowData*>*>*;
-                        auto* table = reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, S>*>(stateTablePtr);
-                        preparedData.metaInfoSnapshots.push_back(table->getMetaInfo()->snapshot());
-                        preparedData.stateIterators.push_back(
-                            std::make_unique<HeapSingleStateIterator<K, VoidNamespace, S>>(
-                                table, kvStateId, preparedData.keyGroupPrefixBytes));
+                        if (nsBackendId == BackendDataType::BIGINT_BK) {
+                            // Window rank "window_rank": MapState<RowData, List<RowData>>
+                            // partitioned by the window-end namespace.
+                            using S = emhash7::HashMap<RowData*, std::vector<RowData*>*>*;
+                            auto* table = reinterpret_cast<CopyOnWriteStateTable<K, int64_t, S>*>(stateTablePtr);
+                            preparedData.metaInfoSnapshots.push_back(table->getMetaInfo()->snapshot());
+                            preparedData.stateIterators.push_back(
+                                std::make_unique<HeapSingleStateIterator<K, int64_t, S>>(
+                                    table, kvStateId, preparedData.keyGroupPrefixBytes));
+                        } else {
+                            using S = emhash7::HashMap<RowData*, std::vector<RowData*>*>*;
+                            auto* table = reinterpret_cast<CopyOnWriteStateTable<K, VoidNamespace, S>*>(stateTablePtr);
+                            preparedData.metaInfoSnapshots.push_back(table->getMetaInfo()->snapshot());
+                            preparedData.stateIterators.push_back(
+                                std::make_unique<HeapSingleStateIterator<K, VoidNamespace, S>>(
+                                    table, kvStateId, preparedData.keyGroupPrefixBytes));
+                        }
                     } else if (
                         (keyId == BackendDataType::OBJECT_BK || keyId == BackendDataType::POJO_BK) &&
                         (valueId == BackendDataType::OBJECT_BK || valueId == BackendDataType::POJO_BK)) {
