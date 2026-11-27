@@ -88,7 +88,7 @@ This section describes the scope of support, restrictions, and performance impac
 
 The supported data transfer objects include Long, String, and Tuple2<String, Long\>.
 
-[**Table  1** Supported expressions](#supported-expressions-1) lists the supported dependency classes and interfaces. For details about other constraints, see [UDF Translator User Guide](https://gitcode.com/openeuler/docs/blob/stable-24.03_LTS_SP2/docs/en/server/development/unt/unt_guide.md). The supported expressions may vary depending on the environment configuration. If you have any questions, contact local Huawei technical support.
+[**Table  1** Supported expressions](#supported-expressions-1) lists the supported dependency classes and interfaces. For details about other constraints, see [UDF Translator User Guide](https://gitcode.com/openeuler/docs/blob/stable-24.03_LTS_SP2/docs/en/server/development/unt/unt_guide.md). The supported expressions may vary depending on the environment configuration. If there are differences, you can submit an issue to report the problem.
 
 **Table 1** Supported expressions<a id="supported-expressions-1"></a>
 
