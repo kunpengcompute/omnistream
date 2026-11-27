@@ -58,8 +58,8 @@ WindowRankProcessor::WindowRankProcessor(const nlohmann::json& description, Outp
     }
     if (rankStart_ < 1 || rankEnd_ < 1 || rankEnd_ < rankStart_) {
         THROW_LOGIC_EXCEPTION(
-            "WindowRankProcessor: illegal rank range [" + std::to_string(rankStart_) + ", " +
-            std::to_string(rankEnd_) + "]");
+            "WindowRankProcessor: illegal rank range [" + std::to_string(rankStart_) + ", " + std::to_string(rankEnd_) +
+            "]");
     }
     if (windowEndIndex_ < 0 || windowEndIndex_ >= static_cast<int32_t>(inputTypes_.size())) {
         THROW_LOGIC_EXCEPTION("WindowRankProcessor: illegal windowEndIndex " + std::to_string(windowEndIndex_));
@@ -108,10 +108,10 @@ void WindowRankProcessor::open(
     omnistream::RowType sortKeyType(false, sortTypeNames);
     omnistream::RowType inputRowType(false, inputTypes_);
 
-    auto* valueSerializer = new BinaryRowDataListSerializer(
-        static_cast<int>(inputTypes_.size()), new RowDataSerializer(&inputRowType));
-    auto* mapStateDescriptor = new MapStateDescriptor<UK, UV>(
-        "window_rank", new RowDataSerializer(&sortKeyType), valueSerializer);
+    auto* valueSerializer =
+        new BinaryRowDataListSerializer(static_cast<int>(inputTypes_.size()), new RowDataSerializer(&inputRowType));
+    auto* mapStateDescriptor =
+        new MapStateDescriptor<UK, UV>("window_rank", new RowDataSerializer(&sortKeyType), valueSerializer);
     mapStateDescriptor->setKeyValueBackendTypeId(BackendDataType::ROW_BK, BackendDataType::ROW_LIST_BK);
 
     auto* mapState = keyedStateBackend->template getOrCreateKeyedState<int64_t, MapState<UK, UV>, StateMap*>(
@@ -140,7 +140,9 @@ void WindowRankProcessor::advanceProgress(long progress)
     }
 }
 
-void WindowRankProcessor::prepareCheckpoint() {}
+void WindowRankProcessor::prepareCheckpoint()
+{
+}
 
 bool WindowRankProcessor::processBatch(omnistream::VectorBatch* vectorbatch)
 {
@@ -327,10 +329,9 @@ void WindowRankProcessor::fireWindow(int64_t windowEnd)
     for (auto it = map->begin(); it != map->end(); ++it) {
         entries.emplace_back(it->first, it->second);
     }
-    std::stable_sort(
-        entries.begin(), entries.end(), [this](const std::pair<UK, UV>& a, const std::pair<UK, UV>& b) {
-            return sortKeyLess(a.first, b.first);
-        });
+    std::stable_sort(entries.begin(), entries.end(), [this](const std::pair<UK, UV>& a, const std::pair<UK, UV>& b) {
+        return sortKeyLess(a.first, b.first);
+    });
 
     std::vector<std::pair<RowData*, int64_t>> collected;
     int64_t currentRank = 1;
@@ -376,23 +377,14 @@ void WindowRankProcessor::clearWindow(int64_t windowEnd)
         windowState_->clearEntriesCache();
         return;
     }
-    // HEAP: the live map owns nothing itself — rows and lists are freed here
-    // before the state table removes (and deletes) the map and its keys.
-    StateMap* map = windowState_->entries(windowEnd);
-    if (map != nullptr) {
-        for (auto& entry : *map) {
-            if (entry.second != nullptr) {
-                for (RowData* row : *entry.second) {
-                    delete row;
-                }
-                delete entry.second;
-            }
-        }
-    }
+    // Heap state owns the row lists and their rows. Removing the namespace
+    // releases them together with the map and its keys.
     windowState_->clear(windowEnd);
 }
 
-void WindowRankProcessor::close() {}
+void WindowRankProcessor::close()
+{
+}
 
 TypeSerializer* WindowRankProcessor::createWindowSerializer()
 {
@@ -416,29 +408,18 @@ WindowRankProcessor::UK WindowRankProcessor::projectSortKey(RowData* row) const
         }
         switch (sortFieldTypeIds_[i]) {
             case DataTypeId::OMNI_INT:
-            case DataTypeId::OMNI_DATE32:
-                key->setInt(static_cast<int>(i), *row->getInt(col));
-                break;
+            case DataTypeId::OMNI_DATE32: key->setInt(static_cast<int>(i), *row->getInt(col)); break;
             case DataTypeId::OMNI_LONG:
             case DataTypeId::OMNI_DECIMAL64:
             case DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
             case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
-            case DataTypeId::OMNI_TIMESTAMP:
-                key->setLong(static_cast<int>(i), *row->getLong(col));
-                break;
-            case DataTypeId::OMNI_DOUBLE:
-                key->setDouble(static_cast<int>(i), *row->getDouble(col));
-                break;
-            case DataTypeId::OMNI_BOOLEAN:
-                key->setBool(static_cast<int>(i), *row->getBool(col));
-                break;
+            case DataTypeId::OMNI_TIMESTAMP: key->setLong(static_cast<int>(i), *row->getLong(col)); break;
+            case DataTypeId::OMNI_DOUBLE: key->setDouble(static_cast<int>(i), *row->getDouble(col)); break;
+            case DataTypeId::OMNI_BOOLEAN: key->setBool(static_cast<int>(i), *row->getBool(col)); break;
             case DataTypeId::OMNI_CHAR:
-            case DataTypeId::OMNI_VARCHAR:
-                key->setStringView(static_cast<int>(i), row->getStringView(col));
-                break;
-            default:
-                THROW_LOGIC_EXCEPTION("WindowRankProcessor: unsupported sort key column type");
+            case DataTypeId::OMNI_VARCHAR: key->setStringView(static_cast<int>(i), row->getStringView(col)); break;
+            default: THROW_LOGIC_EXCEPTION("WindowRankProcessor: unsupported sort key column type");
         }
     }
     return key;
@@ -495,8 +476,7 @@ int WindowRankProcessor::compareSortKeyColumn(UK a, UK b, size_t pos) const
             int cmp = av.compare(bv);
             return cmp < 0 ? -1 : (cmp > 0 ? 1 : 0);
         }
-        default:
-            THROW_LOGIC_EXCEPTION("WindowRankProcessor: unsupported sort key column type");
+        default: THROW_LOGIC_EXCEPTION("WindowRankProcessor: unsupported sort key column type");
     }
 }
 
@@ -600,7 +580,6 @@ void WindowRankProcessor::copyRowColumn(omnistream::VectorBatch* batch, int col,
             }
             break;
         }
-        default:
-            THROW_LOGIC_EXCEPTION("WindowRankProcessor: unsupported output column type");
+        default: THROW_LOGIC_EXCEPTION("WindowRankProcessor: unsupported output column type");
     }
 }

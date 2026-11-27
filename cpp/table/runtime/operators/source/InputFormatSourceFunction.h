@@ -46,6 +46,7 @@ public:
             }
             INFO_RELEASE("taskId is: " << taskId);
             format_->open(inputSplit_);
+            formatOpen_ = true;
 
             while (isRunning_ && !format_->reachedEnd()) {
                 OUT* nextElement = format_->nextRecord();
@@ -57,7 +58,7 @@ public:
                 }
             }
 
-            format_->close();
+            close();
 #ifdef TROUBLE_SHOOTING
         }
 #endif
@@ -68,9 +69,12 @@ public:
         isRunning_ = false;
     }
 
-    void close()
+    void close() override
     {
-        format_->close();
+        if (formatOpen_) {
+            formatOpen_ = false;
+            format_->close();
+        }
     }
 
     omnistream::csv::CsvInputFormat<OUT>* getFormat()
@@ -90,6 +94,7 @@ public:
 
 private:
     std::atomic<bool> isRunning_;
+    bool formatOpen_ = false;
     omnistream::csv::CsvInputFormat<OUT>* format_;
     InputSplit* inputSplit_;
     int lineCount;

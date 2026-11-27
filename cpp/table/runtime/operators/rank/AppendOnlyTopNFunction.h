@@ -1,27 +1,32 @@
 /*
- * Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
- * You can use this software according to the terms and conditions of the Mulan PSL v2.
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * omnistream is licensed under Mulan PSL v2.
+ * You can use this software according to the terms and conditions of the Mulan
+ * PSL v2.
  * You may obtain a copy of Mulan PSL v2 at:
- *          http://license.coscl.org.cn/MulanPSL2
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
- * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ *         http://license.coscl.org.cn/MulanPSL2
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY
+ * KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
- * See the Mulan PSL v2 for more details.
  */
 
 #ifndef OMNISTREAM_APPENDONLYTOPNFUNCTION_H
 #define OMNISTREAM_APPENDONLYTOPNFUNCTION_H
 
 #include <algorithm>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "AbstractTopNFunction.h"
+#include "AppendOnlyTopNHelper.h"
 #include "core/api/common/state/MapState.h"
 #include "core/api/common/state/MapStateDescriptor.h"
 #include "runtime/state/VoidNamespace.h"
+#include "runtime/state/heap/HeapMapState.h"
+#include "runtime/state/rocksdb/RocksdbMapState.h"
 #include "streaming/api/operators/StreamingRuntimeContext.h"
 #include "table/data/binary/BinaryRowData.h"
 #include "table/runtime/keyselector/KeySelector.h"
@@ -29,19 +34,20 @@
 #include "table/typeutils/BinaryRowDataListSerializer.h"
 #include "table/typeutils/RowDataSerializer.h"
 
-// One top-N per partition key. The only persisted state is Flink's
-// data-state-with-append: MapState<sortKey RowData, List<input RowData>>.
-// Rows that share a sort key stay in one list, in insertion order. Sort keys are
-// ordered by the rank comparator. A batch keeps touched partitions in memory.
-// The first touch reads that map. A partition whose membership does not change
-// is not written. A changed partition puts each changed sort key and removes
-// sort keys that fell out of the top-N. Nothing is kept for the next batch.
+// Persist complete rows in the existing MapState<sortKey, row list>. Keep only
+// owned, ordered sort-key/count metadata across batches. Old rows are fetched
+// on demand once per group per batch. flushPartition calls updateOnePartition
+// and commits this input batch before publishing its metadata or emitting it.
 template <typename K>
 class AppendOnlyTopNFunction : public AbstractTopNFunction<K> {
 public:
-    explicit AppendOnlyTopNFunction(const nlohmann::json& rankConfig)
+    // 根据 rank 配置初始化 AppendOnly TopN 算子。
+    explicit AppendOnlyTopNFunction(
+        const nlohmann::json& rankConfig, bool metadataCache = true, bool batchWrites = true)
         : AbstractTopNFunction<K>(rankConfig),
-          partitionKeySelector(this->partitionKeyTypeIds, this->partitionKeyIndices)
+          partitionKeySelector(this->partitionKeyTypeIds, this->partitionKeyIndices),
+          cacheRequested_(metadataCache),
+          batchWrites_(batchWrites)
     {
         // An empty sort key list is the streaming Limit shape (SortSpec.ANY):
         // every row ranks in arrival order within one constant group - all sort
@@ -50,27 +56,45 @@ public:
         if (this->sortKeyTypeIds.size() > 1) {
             NOT_IMPL_EXCEPTION;
         }
-        if (this->sortKeyTypeIds.size() == 1 &&
-            (this->sortKeyTypeIds[0] != OMNI_LONG || this->sortOrder[0])) {
+        if (this->sortKeyTypeIds.size() == 1 && (this->sortKeyTypeIds[0] != OMNI_LONG || this->sortOrder[0])) {
             NOT_IMPL_EXCEPTION;
         }
-        limitShape = this->partitionKeyIndices.empty();
     }
 
-    ~AppendOnlyTopNFunction() = default;
+    // 释放本算子持有的 metadata 缓存。
+    ~AppendOnlyTopNFunction() override
+    {
+        releaseMetadata();
+    }
 
+    // 关闭算子并释放本地缓存及父类资源。
+    void close() override
+    {
+        releaseMetadata();
+        AbstractTopNFunction<K>::close();
+    }
+
+    // 初始化序列化器，并与状态后端交互获取 MapState。
     void open(const Configuration& context) override
     {
-        int inputArity = static_cast<int>(this->inputRowType->size());
-        // Streaming Limit shape: arity-0 sort key type (the single constant group).
-        std::vector<std::string> sortTypeNames{};
+        releaseMetadata();
+        cacheEnabled_ = cacheRequested_ && !this->sortKeyIndices.empty() && this->isConstantRankEnd &&
+                        this->rankEnd > 0 && this->partitionKeyTypeIds.size() == 1 &&
+                        this->partitionKeyTypeIds[0] == OMNI_LONG;
+        // 构造 MapState key（sort key）的 RowType 与序列化器。
+        // Empty sort keys retain the target branch's streaming LIMIT state shape.
+        std::vector<std::string> sortTypeNames;
         if (!this->sortKeyIndices.empty()) {
             sortTypeNames.push_back((*this->inputTypeNames)[this->sortKeyIndices[0]]);
         }
         omnistream::RowType sortKeyType(false, sortTypeNames);
         auto* sortKeySer = new RowDataSerializer(&sortKeyType);
+
+        // 构造 MapState value（相同 sort key 下的一组输入行）的序列化器。
         omnistream::RowType inputType(false, *this->inputTypeNames);
-        auto* rowListSerializer = new BinaryRowDataListSerializer(inputArity, new RowDataSerializer(&inputType));
+        auto* rowListSerializer = new BinaryRowDataListSerializer(
+            static_cast<int>(this->inputRowType->size()), new RowDataSerializer(&inputType));
+
         auto* desc = new MapStateDescriptor<RowData*, std::vector<RowData*>*>(
             "data-state-with-append", sortKeySer, rowListSerializer);
         desc->setKeyValueBackendTypeId(BackendDataType::ROW_BK, BackendDataType::ROW_LIST_BK);
@@ -78,8 +102,15 @@ public:
         dataState = runtimeContext->template getMapState<RowData*, std::vector<RowData*>*>(desc);
         stateType_ = runtimeContext->getStateType();
         omnistream::checkStateType(stateType_, "AppendOnlyTopNFunction");
+
+        knownEmptyStart_ = runtimeContext->startsWithEmptyKeyedState();
+        if ((rocksBackend() && dynamic_cast<RocksState*>(dataState) == nullptr) ||
+            (!rocksBackend() && dynamic_cast<HeapState*>(dataState) == nullptr)) {
+            throw std::runtime_error("AppendOnlyTopNFunction unsupported state implementation");
+        }
     }
 
+    // 按分区处理一个输入 batch，并输出 TopN 变化。
     void processBatch(
         omnistream::VectorBatch* inputBatch,
         typename KeyedProcessFunction<K, RowData*, RowData*>::Context& ctx,
@@ -87,460 +118,192 @@ public:
     {
         auto inputBatchGuard = std::unique_ptr<omnistream::VectorBatch>(inputBatch);
         this->initRankEnd(nullptr);
-        omnistream::VectorBatch* batch = inputBatchGuard.get();
-        int rowCnt = batch->GetRowCount();
-
-        std::vector<OutRow> outputs;
-        std::vector<RowData*> deleteAfterOutput;
-        std::unordered_map<int64_t, RowData*> retainedKeys;
-        std::unordered_map<K, PartitionWork, PartitionKeyHash, PartitionKeyEq> partitionWork(
-            16, PartitionKeyHash{this}, PartitionKeyEq{this});
+        auto* batch = inputBatchGuard.get();
+        // 当前 batch 中待输出的变更行。
+        std::vector<AppendOnlyTopNOutputRow> outputs;
+        // 当前 batch 结束或异常时需要释放的临时资源。
+        BatchCleanup cleanup;
+        // 按分区聚合当前 batch 的 TopN 计算中间结果。
+        std::unordered_map<K, PartitionWork, PartitionKeyHash, PartitionKeyEq> partitionWork;
+        // 保持分区在当前 batch 中首次出现的顺序，供后续逐分区 flush。
         std::vector<K> touched;
-
-        for (int i = 0; i < rowCnt; ++i) {
-            K rawKey = partitionKeySelector.getKey(batch, i);
-            K partitionKey = retainKey(rawKey, retainedKeys);
-            auto [it, created] = partitionWork.try_emplace(partitionKey);
-            if (created) {
-                ctx.setCurrentKey(partitionKey);
-                loadPartition(it->second);
-                it->second.key = partitionKey;
-                touched.push_back(partitionKey);
+        try {
+            for (int i = 0; i < batch->GetRowCount(); ++i) {
+                K key = Helper::retainKey(partitionKeySelector.getKey(batch, i), cleanup.retainedKeys);
+                auto [it, created] = partitionWork.try_emplace(key);
+                if (created) {
+                    ctx.setCurrentKey(key);
+                    it->second.key = key;
+                    loadPartition(it->second);
+                    touched.push_back(key);
+                }
+                considerRow(batch, i, it->second);
             }
-            considerRow(batch, i, it->second);
-        }
-        flushPartition(batch, ctx, touched, partitionWork, outputs, deleteAfterOutput);
-        if (rocksBackend()) {
+            rocksdb::WriteBatch writeBatch;
+            auto* pending = rocksBackend() && batchWrites_ ? &writeBatch : nullptr;
+            for (const K& key : touched) {
+                updateOnePartition(batch, ctx, partitionWork.find(key)->second, outputs, cleanup.rows, pending);
+            }
+            if (pending != nullptr && pending->Count() != 0) {
+                static_cast<RocksState*>(dataState)->commitBatch(*pending);
+            }
+            for (const K& key : touched) {
+                Helper::publishMetadata(metadata_, partitionWork.find(key)->second);
+            }
             dataState->clearEntriesCache();
-        }
-
-        if (!outputs.empty()) {
-            this->collectOutputBatch(out, buildOutput(outputs));
-        } else {
-            INFO_RELEASE("AppendOnlyTopNFunction processBatch collected no rows");
-        }
-
-        for (RowData* row : deleteAfterOutput) {
-            delete row;
-        }
-        for (auto& pair : retainedKeys) {
-            delete pair.second;
+            if (!outputs.empty()) {
+                this->collectOutputBatch(
+                    out, OutputHelper::build(outputs, *this->inputRowType, this->outputRankNumber));
+            }
+        } catch (...) {
+            // Neither a failed write nor a partially processed input batch is
+            // a valid source of metadata for another processBatch invocation.
+            releaseMetadata();
+            knownEmptyStart_ = false;
+            dataState->clearEntriesCache();
+            throw;
         }
     }
 
+    // AppendOnly TopN 不使用 ValueState。
     ValueState<K>* getValueState() override
     {
         return nullptr;
     }
 
 private:
-    struct WorkItem {
-        bool sortNull = false;
-        int64_t sortValue = 0;
-        bool fromBatch = false;
-        int32_t batchRow = -1;
-        int groupIndex = -1;
-        int indexInGroup = -1;
-        RowData* stateRow = nullptr;
-        int oldRank = 0;
-        int64_t timestamp = 0;
-    };
-
-    struct LoadedGroup {
-        bool sortNull = false;
-        int64_t sortValue = 0;
-        RowData* sortKey = nullptr;
-        std::vector<RowData*>* rows = nullptr;
-        int rowCount = 0;
-        bool kept = false;
-    };
-
-    struct OutRow {
-        omnistream::VectorBatch* batch = nullptr;
-        int32_t batchRow = -1;
-        RowData* stateRow = nullptr;
-        int64_t rank = 0;
-        int64_t timestamp = 0;
-        RowKind kind = RowKind::INSERT;
-    };
-
-    struct PartitionWork {
-        bool open = false;
-        K key{};
-        std::vector<WorkItem> rows;
-        std::vector<WorkItem> evicted;
-        std::vector<LoadedGroup> loadedGroups;
-        int loadedCount = 0;
-        bool hadState = false;
-    };
-
-    MapState<RowData*, std::vector<RowData*>*>* dataState = nullptr;
+    using Helper = AppendOnlyTopNHelper<K>;
+    using RowList = typename Helper::RowList;
+    using RocksState = typename Helper::RocksState;
+    using HeapState = typename Helper::HeapState;
+    using GroupMeta = typename Helper::GroupMeta;
+    using PartitionMeta = typename Helper::PartitionMeta;
+    using WorkItem = typename Helper::WorkItem;
+    using LoadedGroup = typename Helper::LoadedGroup;
+    using PartitionWork = typename Helper::PartitionWork;
+    using BatchCleanup = typename Helper::BatchCleanup;
+    using PartitionKeyHash = typename Helper::PartitionKeyHash;
+    using PartitionKeyEq = typename Helper::PartitionKeyEq;
+    MapState<RowData*, RowList*>* dataState = nullptr;
     omnistream::StateType stateType_ = omnistream::StateType::UNKNOWN;
     KeySelector<K> partitionKeySelector;
-    // Streaming Limit shape (empty partition key, ALL_IN_ONE): one global
-    // partition, the key row is the constant arity-0 row.
-    bool limitShape = false;
+    // TODO: metadata_ 随任务处理的不同分区累计增长，长时间运行可能造成内存压力。
+    // 后续增加容量限制和淘汰机制，并同步适配 knownEmptyStart_ 的缓存未命中判断；充分测试后再合入。
+    std::unordered_map<int64_t, PartitionMeta> metadata_;
+    bool cacheRequested_;
+    bool batchWrites_;
+    bool cacheEnabled_ = false;
+    bool knownEmptyStart_ = false;
 
-    static bool samePartition(const K& left, const K& right)
+    // 释放跨 batch 的 metadata 缓存容量。
+    void releaseMetadata()
     {
-        if constexpr (std::is_same<K, RowData*>::value) {
-            return left != nullptr && right != nullptr && *left->getLong(0) == *right->getLong(0);
-        } else {
-            return left == right;
-        }
+        // clear() alone retains bucket storage. Swap releases that as well.
+        decltype(metadata_){}.swap(metadata_);
+    }
+    RowData* makeSortKey(bool isNull, int64_t value) const
+    {
+        return this->sortKeyIndices.empty() ? BinaryRowData::createBinaryRowDataWithMem(0)
+                                            : Helper::makeSortKey(isNull, value);
     }
 
-    struct PartitionKeyHash {
-        const AppendOnlyTopNFunction* fn = nullptr;
-        size_t operator()(const K& key) const
-        {
-            if constexpr (std::is_same<K, RowData*>::value) {
-                // Streaming Limit shape: every row shares the arity-0 key, so all
-                // keys must hash (and compare) equal - reading getLong(0) on the
-                // empty key row would throw IndexOutOfBoundsException.
-                if (fn != nullptr && fn->limitShape) {
-                    return 0;
-                }
-                return key == nullptr ? 0 : std::hash<int64_t>{}(*key->getLong(0));
-            } else {
-                return std::hash<K>{}(key);
-            }
-        }
-    };
-
-    struct PartitionKeyEq {
-        const AppendOnlyTopNFunction* fn = nullptr;
-        bool operator()(const K& left, const K& right) const
-        {
-            if (fn != nullptr && fn->limitShape) {
-                if constexpr (std::is_same<K, RowData*>::value) {
-                    return left == right || (left != nullptr && right != nullptr);
-                } else {
-                    return left == right;
-                }
-            }
-            return samePartition(left, right);
-        }
-    };
-
-    K retainKey(K key, std::unordered_map<int64_t, RowData*>& retainedKeys)
-    {
-        if constexpr (std::is_same<K, RowData*>::value) {
-            // Streaming Limit shape: single slot for the one arity-0 key.
-            if (limitShape) {
-                auto found = retainedKeys.find(0);
-                if (found != retainedKeys.end()) {
-                    delete key;
-                    return found->second;
-                }
-                retainedKeys.emplace(0, key);
-                return key;
-            }
-            int64_t id = *key->getLong(0);
-            auto found = retainedKeys.find(id);
-            if (found != retainedKeys.end()) {
-                delete key;
-                return found->second;
-            }
-            retainedKeys.emplace(id, key);
-            return key;
-        } else {
-            return key;
-        }
-    }
-
-    bool nullsLast() const
-    {
-        return this->sortNullsIsLast.empty() || this->sortNullsIsLast[0];
-    }
-
-    // Single long sort key, descending. Equal keys keep insertion order.
-    bool strictlyBetter(bool candNull, int64_t cand, bool otherNull, int64_t other) const
-    {
-        if (candNull && otherNull) {
-            return false;
-        }
-        if (candNull) {
-            return !nullsLast();
-        }
-        if (otherNull) {
-            return nullsLast();
-        }
-        return cand > other;
-    }
-
-    void readBatchSort(omnistream::VectorBatch* batch, int row, bool& isNull, int64_t& value) const
-    {
-        if (this->sortKeyIndices.empty()) {
-            // Streaming Limit shape: no sort column, every row is equal.
-            isNull = false;
-            value = 0;
-            return;
-        }
-        auto* column = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batch->Get(this->sortKeyIndices[0]));
-        if (column->IsNull(row)) {
-            isNull = true;
-            value = 0;
-            return;
-        }
-        isNull = false;
-        value = column->GetValue(row);
-    }
-
+    // 判断当前状态后端是否为 RocksDB。
     bool rocksBackend() const
     {
         return stateType_ == omnistream::StateType::ROCKSDB;
     }
 
-    RowData* makeSortKey(bool isNull, int64_t value) const
-    {
-        if (this->sortKeyIndices.empty()) {
-            // Streaming Limit shape: the constant arity-0 group key.
-            return BinaryRowData::createBinaryRowDataWithMem(0);
-        }
-        auto* row = BinaryRowData::createBinaryRowDataWithMem(1);
-        if (isNull) {
-            row->setNullAt(0);
-        } else {
-            row->setLong(0, value);
-        }
-        return row;
-    }
-
-    void readSortKey(RowData* key, bool& isNull, int64_t& value) const
-    {
-        if (key == nullptr) {
-            throw std::runtime_error("AppendOnlyTopNFunction sort key is missing");
-        }
-        if (this->sortKeyIndices.empty()) {
-            // Streaming Limit shape: the single arity-0 key row is never null.
-            isNull = false;
-            value = 0;
-            return;
-        }
-        isNull = key->isNullAt(0);
-        value = isNull ? 0 : *key->getLong(0);
-    }
-
-    bool sameSortKey(bool leftNull, int64_t left, bool rightNull, int64_t right) const
-    {
-        if (leftNull || rightNull) {
-            return leftNull && rightNull;
-        }
-        return left == right;
-    }
-
-    void fillFromGroups(PartitionWork& active)
-    {
-        int count = 0;
-        for (const LoadedGroup& group : active.loadedGroups) {
-            count += group.rowCount;
-        }
-        active.hadState = count > 0;
-        active.loadedCount = count;
-        active.rows.reserve(static_cast<size_t>(count));
-        int rank = 1;
-        for (int groupIndex = 0; groupIndex < static_cast<int>(active.loadedGroups.size()); ++groupIndex) {
-            LoadedGroup& group = active.loadedGroups[static_cast<size_t>(groupIndex)];
-            for (int indexInGroup = 0; indexInGroup < group.rowCount; ++indexInGroup) {
-                WorkItem item;
-                item.sortNull = group.sortNull;
-                item.sortValue = group.sortValue;
-                item.groupIndex = groupIndex;
-                item.indexInGroup = indexInGroup;
-                item.stateRow = (*group.rows)[static_cast<size_t>(indexInGroup)];
-                item.oldRank = rank++;
-                active.rows.push_back(item);
-            }
-        }
-    }
-
-    void sortLoadedGroups(PartitionWork& active)
-    {
-        std::stable_sort(
-            active.loadedGroups.begin(),
-            active.loadedGroups.end(),
-            [&](const LoadedGroup& left, const LoadedGroup& right) {
-                return strictlyBetter(left.sortNull, left.sortValue, right.sortNull, right.sortValue);
-            });
-    }
-
+    // 与状态后端交互加载一个分区的排序组及缓存摘要。
     void loadPartition(PartitionWork& active)
     {
-        emhash7::HashMap<RowData*, std::vector<RowData*>*>* encoded = dataState->entries();
-        if (encoded == nullptr || encoded->empty()) {
-            active.hadState = false;
-            active.loadedCount = 0;
+        active.cacheable = Helper::cacheKey(cacheEnabled_, active.key, active.cacheId);
+        if (active.cacheable) {
+            auto found = metadata_.find(active.cacheId);
+            if (found != metadata_.end()) {
+                active.loadedGroups.reserve(found->second.groups.size());
+                for (const auto& meta : found->second.groups) {
+                    LoadedGroup group;
+                    group.sortValue = meta.sortValue;
+                    group.sortNull = meta.sortNull;
+                    group.rowCount = meta.rowCount;
+                    active.loadedGroups.push_back(std::move(group));
+                }
+                Helper::fillFromGroups(active, this->rankEnd);
+                return;
+            }
+            // if (knownEmptyStart_)路径用于跳过昂贵的首次后端查询，实测当状态后端为RocksDB时，
+            // 首次查询路径loadPartition → entries → RocksDB Seek 会带来约 31%的CPU采样热点，
+            // 是主要热点之一，让性能显著劣化。（Heap后端时无太大影响）
+            // 恢复任务或未知上下文仍读取后端；处理异常后禁用该快路径。
+            if (knownEmptyStart_) {
+                return;
+            }
+        }
+        auto* encoded = dataState->entries();
+        if (encoded == nullptr) {
             return;
         }
         active.loadedGroups.reserve(encoded->size());
         for (const auto& entry : *encoded) {
+            if (entry.first == nullptr || entry.second == nullptr) {
+                throw std::runtime_error("AppendOnlyTopNFunction malformed state group");
+            }
             LoadedGroup group;
             group.sortKey = entry.first;
             group.rows = entry.second;
-            if (group.sortKey == nullptr || group.rows == nullptr) {
-                throw std::runtime_error("AppendOnlyTopNFunction data-state-with-append is malformed");
+            group.rowCount = static_cast<int64_t>(group.rows->size());
+            if (!this->sortKeyIndices.empty()) {
+                Helper::readSortKey(group.sortKey, group.sortNull, group.sortValue);
             }
-            readSortKey(group.sortKey, group.sortNull, group.sortValue);
-            group.rowCount = static_cast<int>(group.rows->size());
-            active.loadedGroups.push_back(group);
-        }
-        sortLoadedGroups(active);
-        fillFromGroups(active);
-    }
-
-    LoadedGroup* findLoaded(PartitionWork& active, bool sortNull, int64_t sortValue)
-    {
-        for (LoadedGroup& group : active.loadedGroups) {
-            if (sameSortKey(group.sortNull, group.sortValue, sortNull, sortValue)) {
-                return &group;
-            }
-        }
-        return nullptr;
-    }
-
-    bool membershipChanged(const PartitionWork& active) const
-    {
-        if (!active.evicted.empty()) {
-            return true;
-        }
-        for (const WorkItem& item : active.rows) {
-            if (item.fromBatch) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // RocksDB entries() returns copies. HashMap entries() returns the live map.
-    void releaseLoadedCopies(PartitionWork& active, std::vector<RowData*>& deleteAfterOutput)
-    {
-        if (!rocksBackend()) {
-            return;
-        }
-        for (LoadedGroup& group : active.loadedGroups) {
-            if (group.rows != nullptr) {
-                for (RowData* row : *group.rows) {
-                    if (row != nullptr) {
-                        deleteAfterOutput.push_back(row);
-                    }
-                }
-                delete group.rows;
-                group.rows = nullptr;
-            }
-            // The entries cache owns these sort keys and deletes them when the cache is cleared.
-            group.sortKey = nullptr;
-        }
-    }
-
-    void writeFlinkState(omnistream::VectorBatch* batch, PartitionWork& active)
-    {
-        struct FinalGroup {
-            bool sortNull = false;
-            int64_t sortValue = 0;
-            RowData* sortKey = nullptr;
-            bool keyCreated = false;
-            bool changed = false;
-            LoadedGroup* previous = nullptr;
-            std::vector<RowData*>* list = nullptr;
-            std::vector<RowData*> extracted;
-        };
-
-        std::vector<FinalGroup> groups;
-        for (const WorkItem& item : active.rows) {
-            if (groups.empty() ||
-                !sameSortKey(groups.back().sortNull, groups.back().sortValue, item.sortNull, item.sortValue)) {
-                FinalGroup group;
-                group.sortNull = item.sortNull;
-                group.sortValue = item.sortValue;
-                group.previous = findLoaded(active, item.sortNull, item.sortValue);
-                group.sortKey = group.previous == nullptr ? nullptr : group.previous->sortKey;
-                group.list = new std::vector<RowData*>();
-                groups.push_back(std::move(group));
-            }
-            FinalGroup& group = groups.back();
-            if (item.fromBatch) {
-                RowData* materialized = batch->extractRowData(item.batchRow);
-                group.list->push_back(materialized);
-                group.extracted.push_back(materialized);
-                group.changed = true;
-            } else {
-                group.list->push_back(item.stateRow);
-            }
-        }
-
-        for (FinalGroup& group : groups) {
-            if (group.previous != nullptr) {
-                group.previous->kept = true;
-                if (group.previous->rows == nullptr || group.list->size() != group.previous->rows->size()) {
-                    group.changed = true;
-                }
-            }
-            if (!group.changed) {
-                delete group.list;
-                group.list = nullptr;
-                continue;
-            }
-            if (group.sortKey == nullptr) {
-                group.sortKey = makeSortKey(group.sortNull, group.sortValue);
-                group.keyCreated = true;
-            }
-            dataState->put(group.sortKey, group.list);
             if (rocksBackend()) {
-                for (RowData* row : group.extracted) {
-                    delete row;
-                }
-                delete group.list;
-                group.list = nullptr;
-                if (group.keyCreated) {
-                    delete group.sortKey;
-                    group.sortKey = nullptr;
-                }
-            } else if (
-                group.previous != nullptr && group.previous->rows != nullptr && group.previous->rows != group.list) {
-                delete group.previous->rows;
-                group.previous->rows = nullptr;
+                // entriesCache's emhash owns its pointer keys; the values
+                // are independent row-list copies owned by this batch.
+                group.ownedRows.reset(group.rows);
             }
+            active.loadedGroups.push_back(std::move(group));
         }
-
-        for (LoadedGroup& previous : active.loadedGroups) {
-            if (previous.kept) {
-                continue;
-            }
-            dataState->remove(previous.sortKey);
-            if (!rocksBackend()) {
-                delete previous.rows;
-                previous.rows = nullptr;
-                delete previous.sortKey;
-                previous.sortKey = nullptr;
-            }
-        }
+        std::stable_sort(
+            active.loadedGroups.begin(), active.loadedGroups.end(), [&](const LoadedGroup& a, const LoadedGroup& b) {
+                return Helper::strictlyBetter(
+                    Helper::nullsLast(this->sortNullsIsLast), a.sortNull, a.sortValue, b.sortNull, b.sortValue);
+            });
+        Helper::fillFromGroups(active, this->rankEnd);
     }
 
+    // 将当前输入行按排序规则纳入该分区的 TopN 候选集。
     void considerRow(omnistream::VectorBatch* batch, int row, PartitionWork& active)
     {
         WorkItem item;
         item.fromBatch = true;
         item.batchRow = row;
         item.timestamp = batch->getTimestamp(row);
-        readBatchSort(batch, row, item.sortNull, item.sortValue);
-
-        const int limit = static_cast<int>(this->rankEnd);
-        if (static_cast<int>(active.rows.size()) >= limit) {
-            const WorkItem& worst = active.rows.back();
-            if (!strictlyBetter(item.sortNull, item.sortValue, worst.sortNull, worst.sortValue)) {
+        if (!this->sortKeyIndices.empty()) {
+            Helper::readBatchSort(batch, this->sortKeyIndices[0], row, item.sortNull, item.sortValue);
+        }
+        const auto limit = static_cast<uint64_t>(this->rankEnd);
+        if (active.rows.size() >= limit) {
+            const auto& worst = active.rows.back();
+            if (!Helper::strictlyBetter(
+                    Helper::nullsLast(this->sortNullsIsLast),
+                    item.sortNull,
+                    item.sortValue,
+                    worst.sortNull,
+                    worst.sortValue)) {
                 return;
             }
         }
-
         auto pos = active.rows.begin();
-        while (
-            pos != active.rows.end() && !strictlyBetter(item.sortNull, item.sortValue, pos->sortNull, pos->sortValue)) {
+        while (pos != active.rows.end() && !Helper::strictlyBetter(
+                                               Helper::nullsLast(this->sortNullsIsLast),
+                                               item.sortNull,
+                                               item.sortValue,
+                                               pos->sortNull,
+                                               pos->sortValue)) {
             ++pos;
         }
         active.rows.insert(pos, item);
-        if (static_cast<int>(active.rows.size()) > limit) {
-            WorkItem dropped = active.rows.back();
+        if (active.rows.size() > limit) {
+            auto dropped = active.rows.back();
             active.rows.pop_back();
             if (!dropped.fromBatch) {
                 active.evicted.push_back(dropped);
@@ -548,243 +311,163 @@ private:
         }
     }
 
-    void flushPartition(
+    // 与状态后端交互写入更新后的排序组，并处理 HeapState 行所有权。
+    void writeFlinkState(
         omnistream::VectorBatch* batch,
-        typename KeyedProcessFunction<K, RowData*, RowData*>::Context& ctx,
-        const std::vector<K>& touched,
-        std::unordered_map<K, PartitionWork, PartitionKeyHash, PartitionKeyEq>& partitionWork,
-        std::vector<OutRow>& outputs,
+        PartitionWork& active,
+        rocksdb::WriteBatch* writeBatch,
         std::vector<RowData*>& deleteAfterOutput)
     {
-        for (const K& partitionKey : touched) {
-            flushOnePartition(batch, ctx, partitionWork.find(partitionKey)->second, outputs, deleteAfterOutput);
+        size_t first = 0;
+        while (first < active.rows.size()) {
+            const auto& front = active.rows[first];
+            size_t end = first + 1;
+            int64_t oldKept = front.fromBatch ? 0 : 1;
+            int64_t newKept = front.fromBatch ? 1 : 0;
+            while (end < active.rows.size() &&
+                   Helper::sameSortKey(
+                       front.sortNull, front.sortValue, active.rows[end].sortNull, active.rows[end].sortValue)) {
+                oldKept += active.rows[end].fromBatch ? 0 : 1;
+                newKept += active.rows[end].fromBatch ? 1 : 0;
+                ++end;
+            }
+            auto* previous = Helper::findLoaded(active, front.sortNull, front.sortValue);
+            if (previous != nullptr) {
+                previous->kept = true;
+            }
+            const bool changed = newKept > 0 || (previous != nullptr && oldKept != previous->rowCount);
+            if (!changed) {
+                first = end;
+                continue;
+            }
+            if (previous != nullptr) {
+                previous->changed = true;
+                if (oldKept > 0 || !rocksBackend()) {
+                    Helper::ensureLoaded(dataState, rocksBackend(), *previous);
+                }
+            }
+            auto list = std::make_unique<RowList>();
+            list->reserve(end - first);
+            std::vector<std::unique_ptr<RowData>> extracted;
+            extracted.reserve(newKept);
+            for (size_t i = first; i < end; ++i) {
+                auto& item = active.rows[i];
+                if (item.fromBatch) {
+                    extracted.emplace_back(batch->extractRowData(item.batchRow));
+                    list->push_back(extracted.back().get());
+                } else {
+                    list->push_back(previous->rows->at(item.indexInGroup));
+                }
+            }
+            std::unique_ptr<RowData> key;
+            RowData* sortKey = previous == nullptr ? nullptr : previous->sortKey;
+            if (sortKey == nullptr) {
+                key.reset(makeSortKey(front.sortNull, front.sortValue));
+                sortKey = key.get();
+            }
+            if (writeBatch != nullptr) {
+                static_cast<RocksState*>(dataState)->appendPut(*writeBatch, sortKey, list.get());
+            } else {
+                dataState->put(sortKey, list.get());
+            }
+            if (!rocksBackend()) {
+                for (auto& row : extracted) {
+                    row.release();
+                }
+                list.release();
+                if (previous == nullptr) {
+                    key.release();
+                } else {
+                    delete previous->rows;
+                    previous->rows = nullptr;
+                }
+            }
+            first = end;
+        }
+        for (auto& previous : active.loadedGroups) {
+            if (!previous.kept) {
+                previous.changed = true;
+                if (!rocksBackend()) {
+                    Helper::ensureLoaded(dataState, rocksBackend(), previous);
+                }
+                std::unique_ptr<RowData> key;
+                RowData* sortKey = previous.sortKey;
+                if (sortKey == nullptr) {
+                    key.reset(makeSortKey(previous.sortNull, previous.sortValue));
+                    sortKey = key.get();
+                }
+                if (writeBatch != nullptr) {
+                    static_cast<RocksState*>(dataState)->appendRemove(*writeBatch, sortKey);
+                } else {
+                    dataState->remove(sortKey);
+                }
+                if (!rocksBackend()) {
+                    delete previous.rows;
+                    previous.rows = nullptr;
+                    delete previous.sortKey;
+                    previous.sortKey = nullptr;
+                }
+            }
+        }
+        if (!rocksBackend()) {
+            // Surviving old rows belong to the new backend lists. Only evicted
+            // old rows are freed, after the output has copied their contents.
+            for (auto& dropped : active.evicted) {
+                if (dropped.stateRow == nullptr) {
+                    // A rank outside the output range can still be evicted.
+                    // Load before replacing/removing its old list instead.
+                    throw std::runtime_error("AppendOnlyTopNFunction unresolved evicted heap row");
+                }
+                deleteAfterOutput.push_back(dropped.stateRow);
+            }
         }
     }
 
-    void flushOnePartition(
+    // 计算一个分区的增删改输出，并将其新 TopN 写入状态后端。
+    void updateOnePartition(
         omnistream::VectorBatch* batch,
         typename KeyedProcessFunction<K, RowData*, RowData*>::Context& ctx,
         PartitionWork& active,
-        std::vector<OutRow>& outputs,
-        std::vector<RowData*>& deleteAfterOutput)
+        std::vector<AppendOnlyTopNOutputRow>& outputs,
+        std::vector<RowData*>& deleteAfterOutput,
+        rocksdb::WriteBatch* writeBatch)
     {
         ctx.setCurrentKey(active.key);
-        if (!membershipChanged(active)) {
-            releaseLoadedCopies(active, deleteAfterOutput);
-            active.rows.clear();
-            active.evicted.clear();
-            active.loadedGroups.clear();
-            active.hadState = false;
-            active.loadedCount = 0;
-            active.open = false;
+        Helper::snapshotMetadata(active);
+        if (!Helper::membershipChanged(active)) {
             return;
         }
-
-        for (const WorkItem& dropped : active.evicted) {
+        for (auto& dropped : active.evicted) {
+            if (!rocksBackend() || (dropped.oldRank >= this->rankStart && dropped.oldRank <= this->rankEnd)) {
+                Helper::resolveRow(dataState, rocksBackend(), active, dropped);
+            }
             if (dropped.oldRank >= this->rankStart && dropped.oldRank <= this->rankEnd) {
-                appendRetract(outputs, dropped);
+                OutputHelper::appendRetract(outputs, dropped, this->generateUpdateBefore);
             }
         }
-
         for (size_t i = 0; i < active.rows.size(); ++i) {
-            int rank = static_cast<int>(i) + 1;
-            const WorkItem& item = active.rows[i];
+            int64_t rank = static_cast<int64_t>(i) + 1;
+            auto& item = active.rows[i];
             bool nowVisible = rank >= this->rankStart && rank <= this->rankEnd;
             bool wasVisible = item.oldRank >= this->rankStart && item.oldRank <= this->rankEnd;
             if (item.fromBatch) {
                 if (nowVisible) {
-                    appendEmit(outputs, batch, item, rank, RowKind::INSERT);
+                    OutputHelper::appendEmit(outputs, batch, item, rank, RowKind::INSERT);
                 }
-                continue;
-            }
-            if (wasVisible && nowVisible && item.oldRank != rank) {
-                appendRetract(outputs, item);
+            } else if (wasVisible && nowVisible && item.oldRank != rank) {
+                Helper::resolveRow(dataState, rocksBackend(), active, item);
+                OutputHelper::appendRetract(outputs, item, this->generateUpdateBefore);
                 RowKind kind = this->generateUpdateBefore ? RowKind::UPDATE_AFTER : RowKind::INSERT;
-                appendEmit(outputs, batch, item, rank, kind);
+                OutputHelper::appendEmit(outputs, batch, item, rank, kind);
             } else if (wasVisible && !nowVisible) {
-                appendRetract(outputs, item);
+                Helper::resolveRow(dataState, rocksBackend(), active, item);
+                OutputHelper::appendRetract(outputs, item, this->generateUpdateBefore);
             } else if (!wasVisible && nowVisible) {
-                appendEmit(outputs, batch, item, rank, RowKind::INSERT);
+                Helper::resolveRow(dataState, rocksBackend(), active, item);
+                OutputHelper::appendEmit(outputs, batch, item, rank, RowKind::INSERT);
             }
         }
-
-        writeFlinkState(batch, active);
-        if (rocksBackend()) {
-            releaseLoadedCopies(active, deleteAfterOutput);
-        } else {
-            for (const WorkItem& dropped : active.evicted) {
-                if (dropped.stateRow != nullptr) {
-                    deleteAfterOutput.push_back(dropped.stateRow);
-                }
-            }
-        }
-
-        active.rows.clear();
-        active.evicted.clear();
-        active.loadedGroups.clear();
-        active.hadState = false;
-        active.loadedCount = 0;
-        active.open = false;
-    }
-
-    void appendRetract(std::vector<OutRow>& outputs, const WorkItem& item)
-    {
-        OutRow row;
-        row.stateRow = item.stateRow;
-        row.rank = item.oldRank;
-        row.timestamp = item.timestamp;
-        row.kind = this->generateUpdateBefore ? RowKind::UPDATE_BEFORE : RowKind::DELETE;
-        outputs.push_back(row);
-    }
-
-    void appendEmit(
-        std::vector<OutRow>& outputs, omnistream::VectorBatch* batch, const WorkItem& item, int rank, RowKind kind)
-    {
-        OutRow row;
-        if (item.fromBatch) {
-            row.batch = batch;
-            row.batchRow = item.batchRow;
-            row.timestamp = item.timestamp;
-        } else {
-            row.stateRow = item.stateRow;
-            row.timestamp = item.timestamp;
-        }
-        row.rank = rank;
-        row.kind = kind;
-        outputs.push_back(row);
-    }
-
-    omnistream::VectorBatch* buildOutput(const std::vector<OutRow>& outputs)
-    {
-        int numRows = static_cast<int>(outputs.size());
-        int numColumns = static_cast<int>(this->inputRowType->size());
-        auto* outputBatch = new omnistream::VectorBatch(numRows);
-        for (int col = 0; col < numColumns; ++col) {
-            outputBatch->Append(copyColumn(col, outputs));
-        }
-        if (this->outputRankNumber) {
-            auto* rankVec = new omniruntime::vec::Vector<int64_t>(numRows);
-            for (int i = 0; i < numRows; ++i) {
-                rankVec->SetValue(i, outputs[i].rank);
-            }
-            outputBatch->Append(rankVec);
-        }
-        std::vector<int64_t> timestamps(numRows);
-        std::vector<RowKind> kinds(numRows);
-        for (int i = 0; i < numRows; ++i) {
-            timestamps[i] = outputs[i].timestamp;
-            kinds[i] = outputs[i].kind;
-        }
-        outputBatch->setTimestamps(0, timestamps.data(), numRows);
-        outputBatch->setRowKinds(0, kinds.data(), numRows);
-        return outputBatch;
-    }
-
-    omniruntime::vec::BaseVector* copyColumn(int col, const std::vector<OutRow>& outputs)
-    {
-        int numRows = static_cast<int>(outputs.size());
-        switch (this->inputRowType->at(col)) {
-            case DataTypeId::OMNI_LONG:
-            case DataTypeId::OMNI_TIME_WITHOUT_TIME_ZONE:
-            case DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
-            case DataTypeId::OMNI_TIMESTAMP_WITH_TIME_ZONE:
-            case DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
-            case DataTypeId::OMNI_TIMESTAMP: return copyLongColumn(col, outputs, numRows);
-            case DataTypeId::OMNI_INT:
-            case DataTypeId::OMNI_DATE32: return copyIntColumn(col, outputs, numRows);
-            case DataTypeId::OMNI_BOOLEAN: return copyBoolColumn(col, outputs, numRows);
-            case DataTypeId::OMNI_CHAR:
-            case DataTypeId::OMNI_VARCHAR: return copyVarcharColumn(col, outputs, numRows);
-            default: throw std::runtime_error("Unsupported column type in AppendOnlyTopNFunction");
-        }
-    }
-
-    omniruntime::vec::Vector<int64_t>* copyLongColumn(int col, const std::vector<OutRow>& outputs, int numRows)
-    {
-        auto* vector = new omniruntime::vec::Vector<int64_t>(numRows);
-        for (int i = 0; i < numRows; ++i) {
-            if (outputs[i].batch != nullptr) {
-                auto* src = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(outputs[i].batch->Get(col));
-                if (src->IsNull(outputs[i].batchRow)) {
-                    vector->SetNull(i);
-                } else {
-                    vector->SetValue(i, src->GetValue(outputs[i].batchRow));
-                }
-            } else if (outputs[i].stateRow->isNullAt(col)) {
-                vector->SetNull(i);
-            } else {
-                vector->SetValue(i, *outputs[i].stateRow->getLong(col));
-            }
-        }
-        return vector;
-    }
-
-    omniruntime::vec::Vector<int32_t>* copyIntColumn(int col, const std::vector<OutRow>& outputs, int numRows)
-    {
-        auto* vector = new omniruntime::vec::Vector<int32_t>(numRows);
-        for (int i = 0; i < numRows; ++i) {
-            if (outputs[i].batch != nullptr) {
-                auto* src = reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(outputs[i].batch->Get(col));
-                if (src->IsNull(outputs[i].batchRow)) {
-                    vector->SetNull(i);
-                } else {
-                    vector->SetValue(i, src->GetValue(outputs[i].batchRow));
-                }
-            } else if (outputs[i].stateRow->isNullAt(col)) {
-                vector->SetNull(i);
-            } else {
-                vector->SetValue(i, *outputs[i].stateRow->getInt(col));
-            }
-        }
-        return vector;
-    }
-
-    omniruntime::vec::Vector<bool>* copyBoolColumn(int col, const std::vector<OutRow>& outputs, int numRows)
-    {
-        auto* vector = new omniruntime::vec::Vector<bool>(numRows);
-        for (int i = 0; i < numRows; ++i) {
-            if (outputs[i].batch != nullptr) {
-                auto* src = reinterpret_cast<omniruntime::vec::Vector<bool>*>(outputs[i].batch->Get(col));
-                if (src->IsNull(outputs[i].batchRow)) {
-                    vector->SetNull(i);
-                } else {
-                    vector->SetValue(i, src->GetValue(outputs[i].batchRow));
-                }
-            } else if (outputs[i].stateRow->isNullAt(col)) {
-                vector->SetNull(i);
-            } else {
-                vector->SetValue(i, *outputs[i].stateRow->getBool(col));
-            }
-        }
-        return vector;
-    }
-
-    omniruntime::vec::BaseVector* copyVarcharColumn(int col, const std::vector<OutRow>& outputs, int numRows)
-    {
-        using VarcharVector = omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>;
-        auto* vector = new VarcharVector(numRows);
-        for (int i = 0; i < numRows; ++i) {
-            std::string value;
-            bool isNull = false;
-            if (outputs[i].batch != nullptr) {
-                auto* src = reinterpret_cast<VarcharVector*>(outputs[i].batch->Get(col));
-                if (src->IsNull(outputs[i].batchRow)) {
-                    isNull = true;
-                } else {
-                    value = std::string(src->GetValue(outputs[i].batchRow));
-                }
-            } else if (outputs[i].stateRow->isNullAt(col)) {
-                isNull = true;
-            } else {
-                value = std::string(outputs[i].stateRow->getStringView(col));
-            }
-            if (isNull) {
-                vector->SetNull(i);
-            } else {
-                omniruntime::vec::VectorHelper::VectorSetValue<DataTypeId::OMNI_VARCHAR>(vector, i, (void*)&value);
-            }
-        }
-        return vector;
+        writeFlinkState(batch, active, writeBatch, deleteAfterOutput);
     }
 };
 

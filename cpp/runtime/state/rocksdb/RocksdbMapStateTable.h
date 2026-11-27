@@ -351,6 +351,48 @@ public:
         }
     };
 
+    // Current key is already set. Appends each user key into the caller's batch.
+    void putAllCurrentKey(
+        ROCKSDB_NAMESPACE::WriteBatch& putBatch, const N& nameSpace, const std::vector<std::pair<UK, UV>>& entries)
+    {
+        for (const auto& item : entries) {
+            DataOutputSerializer outputSerializer;
+            OutputBufferStatus outputBufferStatus;
+            outputSerializer.setBackendBuffer(&outputBufferStatus);
+            ROCKSDB_NAMESPACE::Slice sliceKey = serializerKeyAndUserKey(outputSerializer, item.first, nameSpace);
+
+            DataOutputSerializer valueOutputSerializer;
+            OutputBufferStatus valueOutputBufferStatus;
+            valueOutputSerializer.setBackendBuffer(&valueOutputBufferStatus);
+            ROCKSDB_NAMESPACE::Slice sliceValue = serializerValue(valueOutputSerializer, item.second);
+            putBatch.Put(table, sliceKey, sliceValue);
+        }
+    }
+
+    void writeBatch(ROCKSDB_NAMESPACE::WriteBatch& batch, bool memtableInsertHint, const char* action)
+    {
+        if (memtableInsertHint) {
+            writeOptions.memtable_insert_hint_per_batch = true;
+        }
+        auto ret = rocksDb->Write(writeOptions, &batch);
+        if (!ret.ok()) {
+            THROW_RUNTIME_ERROR("rocksdb map state table " << action << " failed, status is << " << ret.ToString());
+        }
+    }
+
+    // Current key is already set. Appends each user key delete into the caller's batch.
+    void removeAllCurrentKey(
+        ROCKSDB_NAMESPACE::WriteBatch& deleteBatch, const N& nameSpace, const std::vector<UK>& userKeys)
+    {
+        for (const auto& userKey : userKeys) {
+            DataOutputSerializer outputSerializer;
+            OutputBufferStatus outputBufferStatus;
+            outputSerializer.setBackendBuffer(&outputBufferStatus);
+            ROCKSDB_NAMESPACE::Slice sliceKey = serializerKeyAndUserKey(outputSerializer, userKey, nameSpace);
+            deleteBatch.Delete(table, sliceKey);
+        }
+    }
+
     void putByBatch(const N& nameSpace, const K& key, const std::unordered_map<UK, UV>& dataToAdd)
     {
         keyContext->setCurrentKey(key);

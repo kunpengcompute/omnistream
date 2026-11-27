@@ -20,7 +20,6 @@ BinaryRowData::BinaryRowData(int arity) : RowData(RowData::BinaryRowDataID), Bin
 {
     nullBitsSizeInBytes_ = calculateBitSetWidthInBytes(arity);
     types.resize(arity);
-    rawValues_.resize(arity);
 }
 
 BinaryRowData::BinaryRowData(int arity, int length) : RowData(RowData::BinaryRowDataID), BinarySection(), arity_(arity)
@@ -29,7 +28,6 @@ BinaryRowData::BinaryRowData(int arity, int length) : RowData(RowData::BinaryRow
     memoryBuffer = new uint8_t[length]();
     nullBitsSizeInBytes_ = calculateBitSetWidthInBytes(arity);
     types.resize(arity);
-    rawValues_.resize(arity);
     bufferCapacity = length;
     sizeInBytes_ = length;
 }
@@ -227,6 +225,10 @@ void* BinaryRowData::getRawValue(int pos)
     if (payloadStart > static_cast<uint64_t>(bufferCapacity) ||
         rawSize > static_cast<uint64_t>(bufferCapacity) - payloadStart || payloadStart + rawSize > sectionEnd) {
         throw std::runtime_error("BinaryRowData RAW value has invalid offset/size");
+    }
+    // Ordinary rows allocate the RAW cache only on the first RAW read.
+    if (rawValues_.empty()) {
+        rawValues_.resize(arity_);
     }
     rawValues_[pos] = std::make_shared<BinaryRawValueData>(memoryBuffer + payloadStart, static_cast<size_t>(rawSize));
     return rawValues_[pos].get();
