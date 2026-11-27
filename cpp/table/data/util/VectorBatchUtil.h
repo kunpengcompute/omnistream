@@ -141,17 +141,24 @@ public:
     static omniruntime::vec::BaseVector* copyVectorByRowIds(
         omnistream::VectorBatch* vectorBatch, int32_t vectorIndex, std::vector<int32_t>& rowIds)
     {
+        if (vectorBatch == nullptr) {
+            THROW_RUNTIME_ERROR("vectorBatch cannot be nullptr");
+        }
+        auto* sourceVector = vectorBatch->Get(vectorIndex);
+        if (sourceVector == nullptr) {
+            THROW_RUNTIME_ERROR("vectorBatch contains a null vector at index " + std::to_string(vectorIndex));
+        }
         omniruntime::vec::BaseVector* result = nullptr;
-        if (vectorBatch->Get(vectorIndex)->GetEncoding() == omniruntime::vec::OMNI_FLAT ||
-            (vectorBatch->Get(vectorIndex)->GetTypeId() != omniruntime::type::OMNI_CHAR &&
-             vectorBatch->Get(vectorIndex)->GetTypeId() != omniruntime::type::OMNI_VARCHAR)) {
+        if (sourceVector->GetEncoding() == omniruntime::vec::OMNI_FLAT ||
+            (sourceVector->GetTypeId() != omniruntime::type::OMNI_CHAR &&
+             sourceVector->GetTypeId() != omniruntime::type::OMNI_VARCHAR)) {
             // The original vector is not varchar or it is varchar but flat
             result = omnistream::VectorBatchUtil::CopyPositionsVector(
-                vectorBatch->Get(vectorIndex), rowIds.data(), 0, static_cast<int32_t>(rowIds.size()));
+                sourceVector, rowIds.data(), 0, static_cast<int32_t>(rowIds.size()));
         } else {
             // It is a varchar dictionary, copy it out
             result = omnistream::VectorBatch::CopyPositionsAndFlatten(
-                vectorBatch->Get(vectorIndex), rowIds.data(), 0, static_cast<int32_t>(rowIds.size()));
+                sourceVector, rowIds.data(), 0, static_cast<int32_t>(rowIds.size()));
         }
         return result;
     }
@@ -199,7 +206,10 @@ public:
             }
             case omniruntime::type::OMNI_LONG:
             case omniruntime::type::OMNI_TIMESTAMP:
-            case omniruntime::type::OMNI_DATE64: {
+            case omniruntime::type::OMNI_DATE64:
+            case omniruntime::type::OMNI_TIME_WITHOUT_TIME_ZONE:
+            case omniruntime::type::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
+            case omniruntime::type::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE: {
                 return reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(vector)->CopyPositions(
                     positions, offset, length);
             }

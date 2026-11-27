@@ -3161,3 +3161,764 @@ TEST(WindowJoinOperatorTest, LeftOuterJoinVarcharTest)
 
     destroyLeftOuterJoinTestContext(ctx);
 }
+
+// Left outer join covering the additional ordinary-column types carried natively as int64/int32:
+// TIME, TIMESTAMP, TIMESTAMP_LTZ, BOOLEAN and DATE. Key group 1 matches (left-major cartesian)
+// and key group 2 is left-only, so the right columns must be null-padded.
+std::string testDescriptionLeftOuterExtendedTypes = R"delimiter({
+  "originDescription": null,
+  "leftInputTypes": [
+    "INT",
+    "BIGINT",
+    "TIME_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)",
+    "BOOLEAN",
+    "DATE"
+  ],
+  "rightInputTypes": [
+    "INT",
+    "BIGINT",
+    "TIME_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)",
+    "BOOLEAN",
+    "DATE"
+  ],
+  "outputTypes": [
+    "INT", "BIGINT", "TIME_WITHOUT_TIME_ZONE(3)", "TIMESTAMP_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)", "BOOLEAN", "DATE",
+    "INT", "BIGINT", "TIME_WITHOUT_TIME_ZONE(3)", "TIMESTAMP_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)", "BOOLEAN", "DATE"
+  ],
+  "leftJoinKey": [0],
+  "rightJoinKey": [0],
+  "leftWindowEndIndex": 1,
+  "rightWindowEndIndex": 1,
+  "nonEquiCondition": null,
+  "joinType": "LeftOuterJoin",
+  "leftWindowing": "TUMBLE(size=[10 s])",
+  "leftTimeAttributeType": 2,
+  "rightWindowing": "TUMBLE(size=[10 s])",
+  "rightTimeAttributeType": 2
+})delimiter";
+
+struct LeftOuterExtLeftRow {
+    int32_t key;
+    int64_t time;
+    int64_t ts;
+    int64_t ltz;
+    bool boolVal;
+    int32_t dateVal;
+};
+
+// Builds an expected output batch (7 left + 7 right columns). The single right row is
+// (key=1, windowEnd=1000, time=1000, ts=5000, ltz=6000, true, date=10) unless rightNull.
+omnistream::VectorBatch* buildExtendedTypesExpectedBatch(
+    const std::vector<LeftOuterExtLeftRow>& lefts, bool rightNull)
+{
+    auto numRows = static_cast<int>(lefts.size());
+    auto batch = new omnistream::VectorBatch(numRows);
+    auto lKey = new omniruntime::vec::Vector<int32_t>(numRows);
+    auto lWind = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto lTime = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto lTs = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto lLtz = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto lBool = new omniruntime::vec::Vector<bool>(numRows);
+    auto lDate = new omniruntime::vec::Vector<int32_t>(numRows);
+    auto rKey = new omniruntime::vec::Vector<int32_t>(numRows);
+    auto rWind = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto rTime = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto rTs = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto rLtz = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto rBool = new omniruntime::vec::Vector<bool>(numRows);
+    auto rDate = new omniruntime::vec::Vector<int32_t>(numRows);
+    for (int i = 0; i < numRows; i++) {
+        lKey->SetValue(i, lefts[i].key);
+        lWind->SetValue(i, 1000);
+        lTime->SetValue(i, lefts[i].time);
+        lTs->SetValue(i, lefts[i].ts);
+        lLtz->SetValue(i, lefts[i].ltz);
+        lBool->SetValue(i, lefts[i].boolVal);
+        lDate->SetValue(i, lefts[i].dateVal);
+        if (rightNull) {
+            rKey->SetNull(i);
+            rWind->SetNull(i);
+            rTime->SetNull(i);
+            rTs->SetNull(i);
+            rLtz->SetNull(i);
+            rBool->SetNull(i);
+            rDate->SetNull(i);
+        } else {
+            rKey->SetValue(i, 1);
+            rWind->SetValue(i, 1000);
+            rTime->SetValue(i, 1000);
+            rTs->SetValue(i, 5000);
+            rLtz->SetValue(i, 6000);
+            rBool->SetValue(i, true);
+            rDate->SetValue(i, 10);
+        }
+    }
+    batch->Append(lKey);
+    batch->Append(lWind);
+    batch->Append(lTime);
+    batch->Append(lTs);
+    batch->Append(lLtz);
+    batch->Append(lBool);
+    batch->Append(lDate);
+    batch->Append(rKey);
+    batch->Append(rWind);
+    batch->Append(rTime);
+    batch->Append(rTs);
+    batch->Append(rLtz);
+    batch->Append(rBool);
+    batch->Append(rDate);
+    return batch;
+}
+
+TEST(WindowJoinOperatorTest, LeftOuterJoinExtendedTypesTest)
+{
+    auto desc = nlohmann::json::parse(testDescriptionLeftOuterExtendedTypes);
+
+    // Left: key group 1 has two rows; key group 2 has one row with no right-side match.
+    auto vbatchLeft = new omnistream::VectorBatch(3);
+    auto vKeyLeft = new omniruntime::vec::Vector<int32_t>(3);
+    vKeyLeft->SetValue(0, 1);
+    vKeyLeft->SetValue(1, 1);
+    vKeyLeft->SetValue(2, 2);
+    vbatchLeft->Append(vKeyLeft);
+    auto vWindLeft = new omniruntime::vec::Vector<int64_t>(3);
+    for (int i = 0; i < 3; i++) {
+        vWindLeft->SetValue(i, 1000);
+    }
+    vbatchLeft->Append(vWindLeft);
+    auto vTimeLeft = new omniruntime::vec::Vector<int64_t>(3);
+    vTimeLeft->SetValue(0, 1000);
+    vTimeLeft->SetValue(1, 2000);
+    vTimeLeft->SetValue(2, 3000);
+    vbatchLeft->Append(vTimeLeft);
+    auto vTsLeft = new omniruntime::vec::Vector<int64_t>(3);
+    vTsLeft->SetValue(0, 5000);
+    vTsLeft->SetValue(1, 7000);
+    vTsLeft->SetValue(2, 9000);
+    vbatchLeft->Append(vTsLeft);
+    auto vLtzLeft = new omniruntime::vec::Vector<int64_t>(3);
+    vLtzLeft->SetValue(0, 6000);
+    vLtzLeft->SetValue(1, 8000);
+    vLtzLeft->SetValue(2, 10000);
+    vbatchLeft->Append(vLtzLeft);
+    auto vBoolLeft = new omniruntime::vec::Vector<bool>(3);
+    vBoolLeft->SetValue(0, true);
+    vBoolLeft->SetValue(1, false);
+    vBoolLeft->SetValue(2, true);
+    vbatchLeft->Append(vBoolLeft);
+    auto vDateLeft = new omniruntime::vec::Vector<int32_t>(3);
+    vDateLeft->SetValue(0, 10);
+    vDateLeft->SetValue(1, 20);
+    vDateLeft->SetValue(2, 30);
+    vbatchLeft->Append(vDateLeft);
+
+    // Right: one row in key group 1.
+    auto vbatchRight = new omnistream::VectorBatch(1);
+    auto vKeyRight = new omniruntime::vec::Vector<int32_t>(1);
+    vKeyRight->SetValue(0, 1);
+    vbatchRight->Append(vKeyRight);
+    auto vWindRight = new omniruntime::vec::Vector<int64_t>(1);
+    vWindRight->SetValue(0, 1000);
+    vbatchRight->Append(vWindRight);
+    auto vTimeRight = new omniruntime::vec::Vector<int64_t>(1);
+    vTimeRight->SetValue(0, 1000);
+    vbatchRight->Append(vTimeRight);
+    auto vTsRight = new omniruntime::vec::Vector<int64_t>(1);
+    vTsRight->SetValue(0, 5000);
+    vbatchRight->Append(vTsRight);
+    auto vLtzRight = new omniruntime::vec::Vector<int64_t>(1);
+    vLtzRight->SetValue(0, 6000);
+    vbatchRight->Append(vLtzRight);
+    auto vBoolRight = new omniruntime::vec::Vector<bool>(1);
+    vBoolRight->SetValue(0, true);
+    vbatchRight->Append(vBoolRight);
+    auto vDateRight = new omniruntime::vec::Vector<int32_t>(1);
+    vDateRight->SetValue(0, 10);
+    vbatchRight->Append(vDateRight);
+
+    auto ctx = createLeftOuterJoinTestContext(desc);
+    ctx.op->processBatch1(new StreamRecord(vbatchLeft));
+    ctx.op->processBatch2(new StreamRecord(vbatchRight));
+    ctx.op->getInternalTimerService()->advanceWatermark(100000);
+
+    auto matched = buildExtendedTypesExpectedBatch(
+        {LeftOuterExtLeftRow{1, 1000, 5000, 6000, true, 10},
+         LeftOuterExtLeftRow{1, 2000, 7000, 8000, false, 20}},
+        false);
+    auto padded = buildExtendedTypesExpectedBatch(
+        {LeftOuterExtLeftRow{2, 3000, 9000, 10000, true, 30}}, true);
+
+    EXPECT_TRUE(inOutput(matched, ctx.out));
+    EXPECT_TRUE(inOutput(padded, ctx.out));
+
+    destroyLeftOuterJoinTestContext(ctx);
+    delete matched;
+    delete padded;
+}
+
+// ---------------------------------------------------------------------------
+// Non-equi coverage for the natively supported LeftOuterJoin types/predicates.
+// Schema used by the helpers below: key(INT), windowEnd(BIGINT), value(<type>).
+// ---------------------------------------------------------------------------
+
+nlohmann::json makeLeftOuterNonEquiThreeColDescription(
+    const std::string& valueType, const std::string& nonEquiConditionJson)
+{
+    nlohmann::json desc;
+    desc["originDescription"] = nullptr;
+    desc["leftInputTypes"] = std::vector<std::string>{"INT", "BIGINT", valueType};
+    desc["rightInputTypes"] = std::vector<std::string>{"INT", "BIGINT", valueType};
+    desc["outputTypes"] =
+        std::vector<std::string>{"INT", "BIGINT", valueType, "INT", "BIGINT", valueType};
+    desc["leftJoinKey"] = {0};
+    desc["rightJoinKey"] = {0};
+    desc["leftWindowEndIndex"] = 1;
+    desc["rightWindowEndIndex"] = 1;
+    desc["nonEquiCondition"] = nlohmann::json::parse(nonEquiConditionJson);
+    desc["joinType"] = "LeftOuterJoin";
+    desc["leftWindowing"] = "TUMBLE(size=[10 s])";
+    desc["leftTimeAttributeType"] = 2;
+    desc["rightWindowing"] = "TUMBLE(size=[10 s])";
+    desc["rightTimeAttributeType"] = 2;
+    return desc;
+}
+
+omnistream::VectorBatch* makeTwoRowInt64Batch(const std::vector<int64_t>& values)
+{
+    auto batch = new omnistream::VectorBatch(static_cast<int>(values.size()));
+    auto key = new omniruntime::vec::Vector<int32_t>(static_cast<int>(values.size()));
+    auto wind = new omniruntime::vec::Vector<int64_t>(static_cast<int>(values.size()));
+    auto val = new omniruntime::vec::Vector<int64_t>(static_cast<int>(values.size()));
+    for (size_t i = 0; i < values.size(); i++) {
+        key->SetValue(static_cast<int>(i), 0);
+        wind->SetValue(static_cast<int>(i), 1000);
+        val->SetValue(static_cast<int>(i), values[i]);
+    }
+    batch->Append(key);
+    batch->Append(wind);
+    batch->Append(val);
+    return batch;
+}
+
+omnistream::VectorBatch* makeTwoRowInt32Batch(const std::vector<int32_t>& values)
+{
+    auto batch = new omnistream::VectorBatch(static_cast<int>(values.size()));
+    auto key = new omniruntime::vec::Vector<int32_t>(static_cast<int>(values.size()));
+    auto wind = new omniruntime::vec::Vector<int64_t>(static_cast<int>(values.size()));
+    auto val = new omniruntime::vec::Vector<int32_t>(static_cast<int>(values.size()));
+    for (size_t i = 0; i < values.size(); i++) {
+        key->SetValue(static_cast<int>(i), 0);
+        wind->SetValue(static_cast<int>(i), 1000);
+        val->SetValue(static_cast<int>(i), values[i]);
+    }
+    batch->Append(key);
+    batch->Append(wind);
+    batch->Append(val);
+    return batch;
+}
+
+TEST(WindowJoinOperatorTest, LeftOuterJoinNonEquiTimeTest)
+{
+    // TIME is encoded as BIGINT in the non-equi JSON (physical alias) and marshalled via
+    // RowData::getLong(OMNI_TIME_WITHOUT_TIME_ZONE). left.time < right.time.
+    auto desc = makeLeftOuterNonEquiThreeColDescription(
+        "TIME_WITHOUT_TIME_ZONE(3)",
+        R"({"exprType":"BINARY","returnType":4,"operator":"LESS_THAN",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":2,"colVal":2},)"
+        R"("right":{"exprType":"FIELD_REFERENCE","dataType":2,"colVal":5}})");
+
+    auto vbatchLeft = makeTwoRowInt64Batch({1000, 2000});
+    auto vbatchRight = makeTwoRowInt64Batch({1500, 2500});
+
+    auto ctx = createLeftOuterJoinTestContext(desc);
+    ctx.op->processBatch1(new StreamRecord(vbatchLeft));
+    ctx.op->processBatch2(new StreamRecord(vbatchRight));
+    ctx.op->getInternalTimerService()->advanceWatermark(100000);
+
+    auto& batches = ctx.out->getAll();
+    ASSERT_EQ(static_cast<size_t>(2), batches.size());
+    ASSERT_EQ(2, batches[0]->GetRowCount());
+    auto* left0 = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batches[0]->Get(2));
+    auto* right0 = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batches[0]->Get(5));
+    EXPECT_EQ(1000, left0->GetValue(0));
+    EXPECT_EQ(1000, left0->GetValue(1));
+    EXPECT_EQ(1500, right0->GetValue(0));
+    EXPECT_EQ(2500, right0->GetValue(1));
+
+    ASSERT_EQ(1, batches[1]->GetRowCount());
+    auto* left1 = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batches[1]->Get(2));
+    auto* right1 = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batches[1]->Get(5));
+    EXPECT_EQ(2000, left1->GetValue(0));
+    EXPECT_EQ(2500, right1->GetValue(0));
+
+    destroyLeftOuterJoinTestContext(ctx);
+}
+
+TEST(WindowJoinOperatorTest, LeftOuterJoinNonEquiNotNullTest)
+{
+    // NOT(NULL comparison) must be UNKNOWN, i.e. it must not match in the ON clause.
+    // Uses INT here; BOOLEAN comparisons are also supported natively by the scalar JIT.
+    auto desc = makeLeftOuterNonEquiThreeColDescription(
+        "INT",
+        R"({"exprType":"UNARY","returnType":4,"operator":"NOT","expr":)"
+        R"({"exprType":"BINARY","returnType":4,"operator":"LESS_THAN",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":2},)"
+        R"("right":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":5}}})");
+
+    auto vbatchLeft = new omnistream::VectorBatch(1);
+    auto key = new omniruntime::vec::Vector<int32_t>(1);
+    key->SetValue(0, 0);
+    auto wind = new omniruntime::vec::Vector<int64_t>(1);
+    wind->SetValue(0, 1000);
+    auto val = new omniruntime::vec::Vector<int32_t>(1);
+    val->SetNull(0);
+    vbatchLeft->Append(key);
+    vbatchLeft->Append(wind);
+    vbatchLeft->Append(val);
+
+    auto vbatchRight = makeTwoRowInt32Batch({3, 7});
+
+    auto ctx = createLeftOuterJoinTestContext(desc);
+    ctx.op->processBatch1(new StreamRecord(vbatchLeft));
+    ctx.op->processBatch2(new StreamRecord(vbatchRight));
+    ctx.op->getInternalTimerService()->advanceWatermark(100000);
+
+    auto& batches = ctx.out->getAll();
+    ASSERT_EQ(static_cast<size_t>(1), batches.size());
+    ASSERT_EQ(1, batches[0]->GetRowCount());
+    auto* rightVal = reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(batches[0]->Get(5));
+    EXPECT_TRUE(rightVal->IsNull(0));
+
+    destroyLeftOuterJoinTestContext(ctx);
+}
+
+TEST(WindowJoinOperatorTest, LeftOuterJoinNonEquiAndOrNotTest)
+{
+    // left/right values are INT. Conditions exercise nested AND / OR / NOT and multi-predicate
+    // column-reference collection.
+    const std::string lt =
+        R"({"exprType":"BINARY","returnType":4,"operator":"LESS_THAN",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":2},)"
+        R"("right":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":5}})";
+    const std::string ltSix =
+        R"({"exprType":"BINARY","returnType":4,"operator":"LESS_THAN",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":2},)"
+        R"("right":{"exprType":"LITERAL","dataType":1,"isNull":false,"value":6}})";
+    const std::string eqFive =
+        R"({"exprType":"BINARY","returnType":4,"operator":"EQUAL",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":2},)"
+        R"("right":{"exprType":"LITERAL","dataType":1,"isNull":false,"value":5}})";
+    const std::string gt =
+        R"({"exprType":"BINARY","returnType":4,"operator":"GREATER_THAN",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":2},)"
+        R"("right":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":5}})";
+
+    struct IntCase {
+        std::string condition;
+        std::vector<std::vector<int>> expectedRightValues;
+    };
+    std::vector<IntCase> cases = {
+        // (L < R) AND (L < 6)
+        {"{\"exprType\":\"BINARY\",\"returnType\":4,\"operator\":\"AND\",\"left\":" + lt +
+             ",\"right\":" + ltSix + "}", {{3, 7}, {7}}},
+        // (L < R) OR (L = 5)
+        {"{\"exprType\":\"BINARY\",\"returnType\":4,\"operator\":\"OR\",\"left\":" + lt +
+             ",\"right\":" + eqFive + "}", {{3, 7}, {3, 7}}},
+        // NOT (L > R)
+        {"{\"exprType\":\"UNARY\",\"returnType\":4,\"operator\":\"NOT\",\"expr\":" + gt + "}",
+            {{3, 7}, {7}}},
+    };
+
+    for (const auto& testCase : cases) {
+        auto desc = makeLeftOuterNonEquiThreeColDescription("INT", testCase.condition);
+        auto vbatchLeft = makeTwoRowInt32Batch({1, 5});
+        auto vbatchRight = makeTwoRowInt32Batch({3, 7});
+
+        auto ctx = createLeftOuterJoinTestContext(desc);
+        ctx.op->processBatch1(new StreamRecord(vbatchLeft));
+        ctx.op->processBatch2(new StreamRecord(vbatchRight));
+        ctx.op->getInternalTimerService()->advanceWatermark(100000);
+
+        auto& batches = ctx.out->getAll();
+        ASSERT_EQ(static_cast<size_t>(2), batches.size());
+        for (size_t left = 0; left < 2; left++) {
+            const auto& expected = testCase.expectedRightValues[left];
+            auto* batch = batches[left];
+            ASSERT_EQ(static_cast<int>(expected.size()), batch->GetRowCount());
+            auto* rightVal = reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(batch->Get(5));
+            for (size_t i = 0; i < expected.size(); i++) {
+                EXPECT_EQ(expected[i], rightVal->GetValue(static_cast<int>(i)));
+            }
+        }
+        destroyLeftOuterJoinTestContext(ctx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Right outer join mirrors of the extended ordinary-column and non-equi logical
+// coverage added for the left outer join above. RightOuterJoin mirrors the
+// underlying WindowJoinOperator build/insert paths, but emits in right-major
+// order (equi) or per right record (non-equi) and left-null-pads unmatched
+// right rows.
+// ---------------------------------------------------------------------------
+
+std::string testDescriptionRightOuterExtendedTypes = R"delimiter({
+  "originDescription": null,
+  "leftInputTypes": [
+    "INT",
+    "BIGINT",
+    "TIME_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)",
+    "BOOLEAN",
+    "DATE"
+  ],
+  "rightInputTypes": [
+    "INT",
+    "BIGINT",
+    "TIME_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)",
+    "BOOLEAN",
+    "DATE"
+  ],
+  "outputTypes": [
+    "INT", "BIGINT", "TIME_WITHOUT_TIME_ZONE(3)", "TIMESTAMP_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)", "BOOLEAN", "DATE",
+    "INT", "BIGINT", "TIME_WITHOUT_TIME_ZONE(3)", "TIMESTAMP_WITHOUT_TIME_ZONE(3)",
+    "TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)", "BOOLEAN", "DATE"
+  ],
+  "leftJoinKey": [0],
+  "rightJoinKey": [0],
+  "leftWindowEndIndex": 1,
+  "rightWindowEndIndex": 1,
+  "nonEquiCondition": null,
+  "joinType": "RightOuterJoin",
+  "leftWindowing": "TUMBLE(size=[10 s])",
+  "leftTimeAttributeType": 2,
+  "rightWindowing": "TUMBLE(size=[10 s])",
+  "rightTimeAttributeType": 2
+})delimiter";
+
+struct RightOuterExtRightRow {
+    int32_t key;
+    int64_t time;
+    int64_t ts;
+    int64_t ltz;
+    bool boolVal;
+    int32_t dateVal;
+};
+
+// Builds an expected output batch (7 left + 7 right columns) for right-only rows:
+// every left column is NULL and the right columns carry the given values. Window
+// end is always 1000, matching makeTwoRow*Batch and the right outer test inputs.
+omnistream::VectorBatch* buildRightOuterExtendedPaddedBatch(
+    const std::vector<RightOuterExtRightRow>& rights)
+{
+    auto numRows = static_cast<int>(rights.size());
+    auto batch = new omnistream::VectorBatch(numRows);
+    auto lKey = new omniruntime::vec::Vector<int32_t>(numRows);
+    auto lWind = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto lTime = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto lTs = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto lLtz = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto lBool = new omniruntime::vec::Vector<bool>(numRows);
+    auto lDate = new omniruntime::vec::Vector<int32_t>(numRows);
+    auto rKey = new omniruntime::vec::Vector<int32_t>(numRows);
+    auto rWind = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto rTime = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto rTs = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto rLtz = new omniruntime::vec::Vector<int64_t>(numRows);
+    auto rBool = new omniruntime::vec::Vector<bool>(numRows);
+    auto rDate = new omniruntime::vec::Vector<int32_t>(numRows);
+    for (int i = 0; i < numRows; i++) {
+        lKey->SetNull(i);
+        lWind->SetNull(i);
+        lTime->SetNull(i);
+        lTs->SetNull(i);
+        lLtz->SetNull(i);
+        lBool->SetNull(i);
+        lDate->SetNull(i);
+        rKey->SetValue(i, rights[i].key);
+        rWind->SetValue(i, 1000);
+        rTime->SetValue(i, rights[i].time);
+        rTs->SetValue(i, rights[i].ts);
+        rLtz->SetValue(i, rights[i].ltz);
+        rBool->SetValue(i, rights[i].boolVal);
+        rDate->SetValue(i, rights[i].dateVal);
+    }
+    batch->Append(lKey);
+    batch->Append(lWind);
+    batch->Append(lTime);
+    batch->Append(lTs);
+    batch->Append(lLtz);
+    batch->Append(lBool);
+    batch->Append(lDate);
+    batch->Append(rKey);
+    batch->Append(rWind);
+    batch->Append(rTime);
+    batch->Append(rTs);
+    batch->Append(rLtz);
+    batch->Append(rBool);
+    batch->Append(rDate);
+    return batch;
+}
+
+TEST(WindowJoinOperatorTest, RightOuterJoinExtendedTypesTest)
+{
+    auto desc = nlohmann::json::parse(testDescriptionRightOuterExtendedTypes);
+
+    // Left: key group 1 has two rows; key group 2 is left-only and must not be emitted.
+    auto vbatchLeft = new omnistream::VectorBatch(3);
+    auto vKeyLeft = new omniruntime::vec::Vector<int32_t>(3);
+    vKeyLeft->SetValue(0, 1);
+    vKeyLeft->SetValue(1, 1);
+    vKeyLeft->SetValue(2, 2);
+    vbatchLeft->Append(vKeyLeft);
+    auto vWindLeft = new omniruntime::vec::Vector<int64_t>(3);
+    for (int i = 0; i < 3; i++) {
+        vWindLeft->SetValue(i, 1000);
+    }
+    vbatchLeft->Append(vWindLeft);
+    auto vTimeLeft = new omniruntime::vec::Vector<int64_t>(3);
+    vTimeLeft->SetValue(0, 1000);
+    vTimeLeft->SetValue(1, 2000);
+    vTimeLeft->SetValue(2, 3000);
+    vbatchLeft->Append(vTimeLeft);
+    auto vTsLeft = new omniruntime::vec::Vector<int64_t>(3);
+    vTsLeft->SetValue(0, 5000);
+    vTsLeft->SetValue(1, 7000);
+    vTsLeft->SetValue(2, 9000);
+    vbatchLeft->Append(vTsLeft);
+    auto vLtzLeft = new omniruntime::vec::Vector<int64_t>(3);
+    vLtzLeft->SetValue(0, 6000);
+    vLtzLeft->SetValue(1, 8000);
+    vLtzLeft->SetValue(2, 10000);
+    vbatchLeft->Append(vLtzLeft);
+    auto vBoolLeft = new omniruntime::vec::Vector<bool>(3);
+    vBoolLeft->SetValue(0, true);
+    vBoolLeft->SetValue(1, false);
+    vBoolLeft->SetValue(2, true);
+    vbatchLeft->Append(vBoolLeft);
+    auto vDateLeft = new omniruntime::vec::Vector<int32_t>(3);
+    vDateLeft->SetValue(0, 10);
+    vDateLeft->SetValue(1, 20);
+    vDateLeft->SetValue(2, 30);
+    vbatchLeft->Append(vDateLeft);
+
+    // Right: one matched row in key group 1 and one right-only row in key group 3.
+    auto vbatchRight = new omnistream::VectorBatch(2);
+    auto vKeyRight = new omniruntime::vec::Vector<int32_t>(2);
+    vKeyRight->SetValue(0, 1);
+    vKeyRight->SetValue(1, 3);
+    vbatchRight->Append(vKeyRight);
+    auto vWindRight = new omniruntime::vec::Vector<int64_t>(2);
+    vWindRight->SetValue(0, 1000);
+    vWindRight->SetValue(1, 1000);
+    vbatchRight->Append(vWindRight);
+    auto vTimeRight = new omniruntime::vec::Vector<int64_t>(2);
+    vTimeRight->SetValue(0, 1000);
+    vTimeRight->SetValue(1, 4000);
+    vbatchRight->Append(vTimeRight);
+    auto vTsRight = new omniruntime::vec::Vector<int64_t>(2);
+    vTsRight->SetValue(0, 5000);
+    vTsRight->SetValue(1, 11000);
+    vbatchRight->Append(vTsRight);
+    auto vLtzRight = new omniruntime::vec::Vector<int64_t>(2);
+    vLtzRight->SetValue(0, 6000);
+    vLtzRight->SetValue(1, 12000);
+    vbatchRight->Append(vLtzRight);
+    auto vBoolRight = new omniruntime::vec::Vector<bool>(2);
+    vBoolRight->SetValue(0, true);
+    vBoolRight->SetValue(1, false);
+    vbatchRight->Append(vBoolRight);
+    auto vDateRight = new omniruntime::vec::Vector<int32_t>(2);
+    vDateRight->SetValue(0, 10);
+    vDateRight->SetValue(1, 40);
+    vbatchRight->Append(vDateRight);
+
+    auto ctx = createRightOuterJoinTestContext(desc);
+    ctx.op->processBatch1(new StreamRecord(vbatchLeft));
+    ctx.op->processBatch2(new StreamRecord(vbatchRight));
+    ctx.op->getInternalTimerService()->advanceWatermark(100000);
+
+    // Key group 1: right-major with one right row repeats the two left rows in order.
+    auto matched = buildExtendedTypesExpectedBatch(
+        {LeftOuterExtLeftRow{1, 1000, 5000, 6000, true, 10},
+         LeftOuterExtLeftRow{1, 2000, 7000, 8000, false, 20}},
+        false);
+    // Key group 3: right-only row with all left columns NULL.
+    auto padded = buildRightOuterExtendedPaddedBatch(
+        {RightOuterExtRightRow{3, 4000, 11000, 12000, false, 40}});
+
+    auto& batches = ctx.out->getAll();
+    ASSERT_EQ(static_cast<size_t>(2), batches.size());
+    EXPECT_TRUE(inOutput(matched, ctx.out));
+    EXPECT_TRUE(inOutput(padded, ctx.out));
+
+    destroyRightOuterJoinTestContext(ctx);
+    delete matched;
+    delete padded;
+}
+
+nlohmann::json makeRightOuterNonEquiThreeColDescription(
+    const std::string& valueType, const std::string& nonEquiConditionJson)
+{
+    auto desc = makeLeftOuterNonEquiThreeColDescription(valueType, nonEquiConditionJson);
+    desc["joinType"] = "RightOuterJoin";
+    return desc;
+}
+
+TEST(WindowJoinOperatorTest, RightOuterJoinNonEquiTimeTest)
+{
+    // TIME is encoded as BIGINT in the non-equi JSON (physical alias) and marshalled via
+    // RowData::getLong(OMNI_TIME_WITHOUT_TIME_ZONE). left.time < right.time.
+    auto desc = makeRightOuterNonEquiThreeColDescription(
+        "TIME_WITHOUT_TIME_ZONE(3)",
+        R"({"exprType":"BINARY","returnType":4,"operator":"LESS_THAN",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":2,"colVal":2},)"
+        R"("right":{"exprType":"FIELD_REFERENCE","dataType":2,"colVal":5}})");
+
+    auto vbatchLeft = makeTwoRowInt64Batch({1000, 2000});
+    auto vbatchRight = makeTwoRowInt64Batch({1500, 2500});
+
+    auto ctx = createRightOuterJoinTestContext(desc);
+    ctx.op->processBatch1(new StreamRecord(vbatchLeft));
+    ctx.op->processBatch2(new StreamRecord(vbatchRight));
+    ctx.op->getInternalTimerService()->advanceWatermark(100000);
+
+    // Right outer emits per right record: right 1500 matches left 1000; right 2500
+    // matches left 1000 and 2000.
+    auto& batches = ctx.out->getAll();
+    ASSERT_EQ(static_cast<size_t>(2), batches.size());
+
+    ASSERT_EQ(1, batches[0]->GetRowCount());
+    auto* left0 = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batches[0]->Get(2));
+    auto* right0 = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batches[0]->Get(5));
+    EXPECT_EQ(1000, left0->GetValue(0));
+    EXPECT_EQ(1500, right0->GetValue(0));
+
+    ASSERT_EQ(2, batches[1]->GetRowCount());
+    auto* left1 = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batches[1]->Get(2));
+    auto* right1 = reinterpret_cast<omniruntime::vec::Vector<int64_t>*>(batches[1]->Get(5));
+    EXPECT_EQ(1000, left1->GetValue(0));
+    EXPECT_EQ(2000, left1->GetValue(1));
+    EXPECT_EQ(2500, right1->GetValue(0));
+    EXPECT_EQ(2500, right1->GetValue(1));
+
+    destroyRightOuterJoinTestContext(ctx);
+}
+
+TEST(WindowJoinOperatorTest, RightOuterJoinNonEquiNotNullTest)
+{
+    // NOT(NULL comparison) must be UNKNOWN, i.e. it must not match in the ON clause.
+    // Uses INT here; BOOLEAN comparisons are also supported natively by the scalar JIT.
+    auto desc = makeRightOuterNonEquiThreeColDescription(
+        "INT",
+        R"({"exprType":"UNARY","returnType":4,"operator":"NOT","expr":)"
+        R"({"exprType":"BINARY","returnType":4,"operator":"LESS_THAN",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":2},)"
+        R"("right":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":5}}})");
+
+    auto vbatchLeft = new omnistream::VectorBatch(1);
+    auto key = new omniruntime::vec::Vector<int32_t>(1);
+    key->SetValue(0, 0);
+    auto wind = new omniruntime::vec::Vector<int64_t>(1);
+    wind->SetValue(0, 1000);
+    auto val = new omniruntime::vec::Vector<int32_t>(1);
+    val->SetNull(0);
+    vbatchLeft->Append(key);
+    vbatchLeft->Append(wind);
+    vbatchLeft->Append(val);
+
+    auto vbatchRight = makeTwoRowInt32Batch({3, 7});
+
+    auto ctx = createRightOuterJoinTestContext(desc);
+    ctx.op->processBatch1(new StreamRecord(vbatchLeft));
+    ctx.op->processBatch2(new StreamRecord(vbatchRight));
+    ctx.op->getInternalTimerService()->advanceWatermark(100000);
+
+    // No right record matches: each one is emitted with the left columns null-padded.
+    auto& batches = ctx.out->getAll();
+    ASSERT_EQ(static_cast<size_t>(2), batches.size());
+    for (size_t i = 0; i < 2; i++) {
+        ASSERT_EQ(1, batches[i]->GetRowCount());
+        auto* leftVal = reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(batches[i]->Get(2));
+        auto* rightVal = reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(batches[i]->Get(5));
+        EXPECT_TRUE(leftVal->IsNull(0));
+        EXPECT_EQ(i == 0 ? 3 : 7, rightVal->GetValue(0));
+    }
+
+    destroyRightOuterJoinTestContext(ctx);
+}
+
+TEST(WindowJoinOperatorTest, RightOuterJoinNonEquiAndOrNotTest)
+{
+    // left/right values are INT. Conditions exercise nested AND / OR / NOT and multi-predicate
+    // column-reference collection. RightOuterJoin emits per right record, so the expected left
+    // value lists are indexed by right input order (right 3, then right 7).
+    const std::string lt =
+        R"({"exprType":"BINARY","returnType":4,"operator":"LESS_THAN",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":2},)"
+        R"("right":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":5}})";
+    const std::string ltSix =
+        R"({"exprType":"BINARY","returnType":4,"operator":"LESS_THAN",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":2},)"
+        R"("right":{"exprType":"LITERAL","dataType":1,"isNull":false,"value":6}})";
+    const std::string eqFive =
+        R"({"exprType":"BINARY","returnType":4,"operator":"EQUAL",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":2},)"
+        R"("right":{"exprType":"LITERAL","dataType":1,"isNull":false,"value":5}})";
+    const std::string gt =
+        R"({"exprType":"BINARY","returnType":4,"operator":"GREATER_THAN",)"
+        R"("left":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":2},)"
+        R"("right":{"exprType":"FIELD_REFERENCE","dataType":1,"colVal":5}})";
+
+    struct IntCase {
+        std::string condition;
+        std::vector<std::vector<int>> expectedLeftValues;
+    };
+    std::vector<IntCase> cases = {
+        // (L < R) AND (L < 6)
+        {"{\"exprType\":\"BINARY\",\"returnType\":4,\"operator\":\"AND\",\"left\":" + lt +
+             ",\"right\":" + ltSix + "}", {{1}, {1, 5}}},
+        // (L < R) OR (L = 5)
+        {"{\"exprType\":\"BINARY\",\"returnType\":4,\"operator\":\"OR\",\"left\":" + lt +
+             ",\"right\":" + eqFive + "}", {{1, 5}, {1, 5}}},
+        // NOT (L > R)
+        {"{\"exprType\":\"UNARY\",\"returnType\":4,\"operator\":\"NOT\",\"expr\":" + gt + "}",
+            {{1}, {1, 5}}},
+    };
+
+    for (const auto& testCase : cases) {
+        auto desc = makeRightOuterNonEquiThreeColDescription("INT", testCase.condition);
+        auto vbatchLeft = makeTwoRowInt32Batch({1, 5});
+        auto vbatchRight = makeTwoRowInt32Batch({3, 7});
+
+        auto ctx = createRightOuterJoinTestContext(desc);
+        ctx.op->processBatch1(new StreamRecord(vbatchLeft));
+        ctx.op->processBatch2(new StreamRecord(vbatchRight));
+        ctx.op->getInternalTimerService()->advanceWatermark(100000);
+
+        auto& batches = ctx.out->getAll();
+        ASSERT_EQ(static_cast<size_t>(2), batches.size());
+        for (size_t right = 0; right < 2; right++) {
+            const auto& expected = testCase.expectedLeftValues[right];
+            auto* batch = batches[right];
+            ASSERT_EQ(static_cast<int>(expected.size()), batch->GetRowCount());
+            auto* leftVal = reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(batch->Get(2));
+            auto* rightVal = reinterpret_cast<omniruntime::vec::Vector<int32_t>*>(batch->Get(5));
+            for (size_t i = 0; i < expected.size(); i++) {
+                EXPECT_EQ(expected[i], leftVal->GetValue(static_cast<int>(i)));
+                EXPECT_EQ(right == 0 ? 3 : 7, rightVal->GetValue(static_cast<int>(i)));
+            }
+        }
+        destroyRightOuterJoinTestContext(ctx);
+    }
+}

@@ -354,6 +354,12 @@ bool AbstractStreamingJoinOperator<K>::filterRecord(
     std::fill(reUsableVals_.begin(), reUsableVals_.end(), 0);
     std::fill(reUsableNulls_.begin(), reUsableNulls_.end(), 0);
     bool resultBool; // todo: Unknown purpose
+    // The generated filter unconditionally loads the value at the address in `reUsableVals_`
+    // before applying the null flag, so null operands must still point at readable memory.
+    // 16-byte alignment keeps DECIMAL128's i128 load safe; the zero content is masked by the
+    // null flag.
+    alignas(16) uint64_t nullScratch[2] = {0, 0};
+    const int64_t nullValueAddress = reinterpret_cast<int64_t>(nullScratch);
 
     // for the inputSide
     for (auto col : colRefsForNonEquiCondition) {
@@ -362,7 +368,7 @@ bool AbstractStreamingJoinOperator<K>::filterRecord(
             auto localCol = static_cast<int32_t>(inputIsLeft ? col : col - leftArity_);
             reUsableNulls_[col] = static_cast<int8_t>(inputRow->isNullAt(localCol));
             if (reUsableNulls_[col]) {
-                reUsableVals_[col] = 0;
+                reUsableVals_[col] = nullValueAddress;
             } else {
                 if (joinCondition[col] == nullptr) {
                     THROW_RUNTIME_ERROR("Missing RowData field getter for non-equi join condition");
@@ -378,7 +384,7 @@ bool AbstractStreamingJoinOperator<K>::filterRecord(
             auto localCol = static_cast<int32_t>(inputIsLeft ? col - leftArity_ : col);
             reUsableNulls_[col] = static_cast<int8_t>(otherRow->isNullAt(localCol));
             if (reUsableNulls_[col]) {
-                reUsableVals_[col] = 0;
+                reUsableVals_[col] = nullValueAddress;
             } else {
                 if (joinCondition[col] == nullptr) {
                     THROW_RUNTIME_ERROR("Missing RowData field getter for non-equi join condition");
