@@ -25,6 +25,8 @@
 // The state is a map. in the InternalKvState, the state is stored as a pointer to emhash7
 template <typename K, typename N, typename UK, typename UV>
 class RocksdbMapState : public MapState<UK, UV>, public InternalKvState<K, N, emhash7::HashMap<UK, UV>*> {
+    friend struct RankStateTestAccess;
+
 public:
     RocksdbMapState(
         RocksdbMapStateTable<K, N, UK, UV>* stateTable,
@@ -68,6 +70,24 @@ public:
         std::unordered_map<std::pair<K, XXH128_hash_t>, UV>& result);
 
     void put(const UK& userKey, const UV& userValue) override;
+    // Encode while the caller's current partition key is set. WriteBatch
+    // owns copied bytes; no pointer to a row or serializer escapes this call.
+    void appendPut(ROCKSDB_NAMESPACE::WriteBatch& batch, const UK& key, const UV& value)
+    {
+        stateTable->putAllCurrentKey(batch, currentNamespace, {{key, value}});
+    }
+
+    void appendRemove(ROCKSDB_NAMESPACE::WriteBatch& batch, const UK& key)
+    {
+        stateTable->removeAllCurrentKey(batch, currentNamespace, {key});
+    }
+
+    void commitBatch(ROCKSDB_NAMESPACE::WriteBatch& batch)
+    {
+        if (batch.Count() != 0) {
+            stateTable->writeBatch(batch, true, "rank batch");
+        }
+    }
     void putByBatch(const K& key, const std::unordered_map<UK, UV>& dataToAdd);
     void putByBatch(std::unordered_map<K, std::unordered_map<UK, UV>>& dataToAdd);
     void putByBatch(std::unordered_map<K, std::vector<std::tuple<UK, UV>>>& dataToAdd);

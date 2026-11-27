@@ -13,16 +13,16 @@
 
 // --- ConstantRankRange Implementation ---
 
-ConstantRankRange::ConstantRankRange(long rankStart, long rankEnd) : rankStart_(rankStart), rankEnd_(rankEnd)
+ConstantRankRange::ConstantRankRange(int64_t rankStart, int64_t rankEnd) : rankStart_(rankStart), rankEnd_(rankEnd)
 {
 }
 
-long ConstantRankRange::getRankStart() const
+int64_t ConstantRankRange::getRankStart() const
 {
     return rankStart_;
 }
 
-long ConstantRankRange::getRankEnd() const
+int64_t ConstantRankRange::getRankEnd() const
 {
     return rankEnd_;
 }

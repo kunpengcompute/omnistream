@@ -65,7 +65,7 @@ public:
         std::shared_ptr<OmniTaskBridge> omniTaskBridge_,
         std::shared_ptr<OperatorID> operatorId,
         int alternativeIdx)
-        : keySerializer(keySerializer_),
+        : keySerializer(keySerializer_, [](TypeSerializer*) {}),
           operatorIdentifier(operatorIdentifier_),
           instanceBasePath(instanceBasePath_),
           optionsContainer(optionsContainer_),

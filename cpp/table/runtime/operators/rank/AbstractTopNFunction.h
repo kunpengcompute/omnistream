@@ -158,22 +158,20 @@ protected:
     {
         return rank <= rankEnd;
     }
-    long getDefaultTopNSize()
+    int64_t getDefaultTopNSize()
     {
         return isConstantRankEnd ? rankEnd : DEFAULT_TOPN_SIZE;
     }
-    long initRankEnd(RowData* row)
+    int64_t initRankEnd(RowData* row)
     {
         if (isConstantRankEnd) {
             return rankEnd;
         }
         if (row == nullptr) {
-            throw std::runtime_error(
-                "variable rank end requires the input row to read the rank end column");
+            throw std::runtime_error("variable rank end requires the input row to read the rank end column");
         }
         if (!rankEndState.isRegistered()) {
-            throw std::runtime_error(
-                "rankEnd state is not registered for variable rank end");
+            throw std::runtime_error("rankEnd state is not registered for variable rank end");
         }
         long curRankEnd = fetchRankEnd(row);
         // Presence mirrors Flink's boxed Long: a state entry (any value, including
@@ -206,10 +204,8 @@ protected:
             return 0L;
         }
         switch (inputRowType->at(static_cast<size_t>(idx))) {
-            case omniruntime::type::DataTypeId::OMNI_LONG:
-                return *row->getLong(idx);
-            case omniruntime::type::DataTypeId::OMNI_INT:
-                return static_cast<long>(*row->getInt(idx));
+            case omniruntime::type::DataTypeId::OMNI_LONG: return *row->getLong(idx);
+            case omniruntime::type::DataTypeId::OMNI_INT: return static_cast<long>(*row->getInt(idx));
             default:
                 throw std::runtime_error(
                     "variable rank index column must be long, short or int type, while input type is " +
@@ -243,9 +239,7 @@ protected:
             }
             switch (typeIds[i]) {
                 case omniruntime::type::DataTypeId::OMNI_INT:
-                case omniruntime::type::DataTypeId::OMNI_DATE32:
-                    out << *row->getInt(pos);
-                    break;
+                case omniruntime::type::DataTypeId::OMNI_DATE32: out << *row->getInt(pos); break;
                 case omniruntime::type::DataTypeId::OMNI_LONG:
                 case omniruntime::type::DataTypeId::OMNI_DATE64:
                 case omniruntime::type::DataTypeId::OMNI_DECIMAL64:
@@ -253,28 +247,18 @@ protected:
                 case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITHOUT_TIME_ZONE:
                 case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 case omniruntime::type::DataTypeId::OMNI_TIMESTAMP_WITH_TIME_ZONE:
-                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP:
-                    out << *row->getLong(pos);
-                    break;
-                case omniruntime::type::DataTypeId::OMNI_DOUBLE:
-                    out << *row->getDouble(pos);
-                    break;
-                case omniruntime::type::DataTypeId::OMNI_BOOLEAN:
-                    out << (*row->getBool(pos) ? "true" : "false");
-                    break;
+                case omniruntime::type::DataTypeId::OMNI_TIMESTAMP: out << *row->getLong(pos); break;
+                case omniruntime::type::DataTypeId::OMNI_DOUBLE: out << *row->getDouble(pos); break;
+                case omniruntime::type::DataTypeId::OMNI_BOOLEAN: out << (*row->getBool(pos) ? "true" : "false"); break;
                 case omniruntime::type::DataTypeId::OMNI_CHAR:
-                case omniruntime::type::DataTypeId::OMNI_VARCHAR:
-                    out << std::string(row->getStringView(pos));
-                    break;
+                case omniruntime::type::DataTypeId::OMNI_VARCHAR: out << std::string(row->getStringView(pos)); break;
                 case omniruntime::type::DataTypeId::OMNI_DECIMAL128: {
                     const omniruntime::type::Decimal128* value = row->getDecimal128(pos);
                     out << "<decimal128:" << value->LowBits() << "," << value->HighBits() << ">";
                     delete value;
                     break;
                 }
-                default:
-                    out << "<type:" << static_cast<int>(typeIds[i]) << ">";
-                    break;
+                default: out << "<type:" << static_cast<int>(typeIds[i]) << ">"; break;
             }
         }
         out << ")";
@@ -339,11 +323,14 @@ void AbstractTopNFunction<KeyType>::parseDescription(const nlohmann::json& jsonS
     // Flink's VariableRankRange) maps to VariableRankRange: the rank end is read
     // from a data column at runtime, mirroring Flink's AbstractTopNFunction.
     std::string rankRangeStr = jsonString.at("rankRange").get<std::string>();
-    std::regex pattern(R"(rankStart=(\d+),\s*rankEnd=(\d+))"); // Regex pattern
+    std::regex pattern(R"(rankStart=(-?\d+),\s*rankEnd=(-?\d+))"); // Regex pattern
     std::smatch match;
     if (std::regex_search(rankRangeStr, match, pattern)) {
-        rankStart = std::stoi(match[1].str()); // Extract first number
-        rankEnd = std::stoi(match[2].str());   // Extract second number
+        rankStart = std::stoll(match[1].str()); // Extract first number
+        rankEnd = std::stoll(match[2].str());   // Extract second number
+        if (rankStart < 0 || rankEnd < 1 || rankEnd < rankStart) {
+            throw std::invalid_argument("Invalid TopN rank range");
+        }
         rankRange = new ConstantRankRange(rankStart, rankEnd);
     } else {
         std::regex variablePattern(R"(rankEnd=\$(\d+))");
@@ -580,8 +567,8 @@ omnistream::VectorBatch* AbstractTopNFunction<KeyType>::createOutputBatch()
             case DataTypeId::OMNI_VARCHAR: {
                 using VarcharVector =
                     omniruntime::vec::Vector<omniruntime::vec::LargeStringContainer<std::string_view>>;
-                VarcharVector* vector = new VarcharVector(
-                    numRows, omniruntime::vec::INITIAL_STRING_SIZE, inputRowType->at(colIndex));
+                VarcharVector* vector =
+                    new VarcharVector(numRows, omniruntime::vec::INITIAL_STRING_SIZE, inputRowType->at(colIndex));
                 for (int rowIndex = 0; rowIndex < numRows; ++rowIndex) {
                     if (collectedRows[rowIndex]->isNullAt(colIndex)) {
                         vector->SetNull(rowIndex);
